@@ -259,12 +259,20 @@ he formatted final summary with sources
     configurable = Configuration.from_runnable_config(config)
     reasoning_model = state.get("reasoning_model") or configurable.reasoning_mod
 el
-
-    # Format the prompt
     current_date = get_current_date()
-    formatted_prompt = biography_instructions.format(
+
+    # Determine if biography is requested
+    research_topic_query = get_research_topic(state["messages"])
+    is_biography_request = "biography of" in research_topic_query.lower()
+
+    if is_biography_request:
+        prompt_template = biography_instructions
+    else:
+        prompt_template = answer_instructions
+
+    formatted_prompt = prompt_template.format(
         current_date=current_date,
-        research_topic=get_research_topic(state["messages"]),
+        research_topic=research_topic_query, # Use the extracted research topic
         summaries="\n---\n\n".join(state["web_research_result"]),
     )
 
@@ -287,13 +295,14 @@ el
             )
             unique_sources.append(source)
 
-    # Store the biography content in the state
-    final_biography_content = result.content
+
+    final_content_for_message = result.content
+    biography_specific_content = final_content_for_message if is_biography_request else None
 
     return {{
-        "messages": [AIMessage(content=final_biography_content)], # Use the same content for the AI message
+        "messages": [AIMessage(content=final_content_for_message)],
         "sources_gathered": unique_sources,
-        "biography_content": final_biography_content, # Added field
+        "biography_content": biography_specific_content,
     }}
 
 
