@@ -1,11 +1,12 @@
 # mypy: disable - error - code = "no-untyped-def,misc"
 import pathlib
 import io
+import os # For environment variables
 from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import StreamingResponse
-# Hypothetical import for LangGraph state retrieval - this might need adjustment
-# from langgraph.checkpoint import get_thread_state
+from langgraph_postgres import PostgresSaver # Correct import for PostgresSaver
+from ..graph import builder as agent_builder # Import the StateGraph builder from graph.py
 import fastapi.exceptions
 
 # Define the FastAPI app
@@ -61,34 +62,42 @@ ry.",
 
 @app.get("/download_biography/{thread_id}")
 async def download_biography(thread_id: str):
-    # TODO: Implement actual state retrieval logic using LangGraph's persistence layer.
-    # This is a placeholder for how one might access the state.
-    # The exact method depends on how LangGraph is configured and its state persistence API.
-    # For example, if a Postgres checkpointer is used, we might need to query it.
-    # Or, LangServe might offer a utility to get the state of a thread.
+    try:
+        db_host = os.getenv("POSTGRES_HOST", "localhost")
+        db_port = os.getenv("POSTGRES_PORT", "5432")
+        db_user = os.getenv("POSTGRES_USER", "postgres")
+        db_pass = os.getenv("POSTGRES_PASSWORD", "postgres")
+        db_name = os.getenv("POSTGRES_DB", "postgres")
 
-    # Hypothetical state retrieval:
-    # assistant_state = get_thread_state("agent", thread_id) # "agent" is the assistant_id
-    # biography_text = assistant_state.get("values", {}).get("biography_content") if assistant_state else None
+        conn_string = f"postgresql+psycopg://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
 
-    # For now, using placeholder content until state retrieval is finalized:
-    biography_text = f"Biography for thread {thread_id}:\n\nThis is placeholder biography content."
-    # In a real implementation, if biography_text is None or empty, return a 404 or appropriate error.
-    if not biography_text:
+        checkpointer = PostgresSaver.from_conn_string(conn_string)
+        # Assuming agent_builder is the StateGraph instance before .compile()
+        # This compiled graph is specifically for state retrieval via its checkpointer
+        retrieval_graph = agent_builder.compile(checkpointer=checkpointer)
+
+        config = {"configurable": {"thread_id": thread_id}} # assistant_id might be part of thread_id or checkpointer config
+
+        state_snapshot = await retrieval_graph.aget_state(config)
+
+        if state_snapshot:
+            biography_text = state_snapshot.values.get("biography_content")
+            if biography_text:
+                file_name = f"biography_{thread_id}.md"
+                stream = io.StringIO(biography_text)
+                return StreamingResponse(
+                    iter([stream.read()]),
+                    media_type="text/markdown",
+                    headers={
+                        "Content-Disposition": f"attachment; filename={file_name}"
+                    }
+                )
+
         return Response(content="Biography not found or not yet generated for this thread.", status_code=404)
 
-    file_name = f"biography_{thread_id}.md"
-
-    # Create an in-memory text stream
-    stream = io.StringIO(biography_text)
-
-    return StreamingResponse(
-        iter([stream.read()]), # Read the whole string to send it
-        media_type="text/markdown",
-        headers={
-            "Content-Disposition": f"attachment; filename={file_name}"
-        }
-    )
+    except Exception as e:
+        print(f"Error retrieving biography: {e}") # Log the error
+        return Response(content="Error retrieving biography.", status_code=500)
 
 # Mount the frontend under /app to not conflict with the LangGraph API routes
 app.mount(
