@@ -2,6 +2,7 @@ const express = require('express');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai'); // Added for Gemini
 const axios = require('axios'); // Added for WebSearchTool
+const math = require('mathjs'); // Added for CalculatorTool
 const app = express();
 const port = 3000;
 
@@ -55,6 +56,32 @@ async function callGemini(promptString) {
     }
     // For other errors (actual API errors, etc.)
     throw new Error(`Error generating content from Gemini: ${error.message}`);
+  }
+}
+
+// --- Tool Definition: CalculatorTool ---
+class CalculatorTool {
+  async execute(inputObject) {
+    if (!inputObject || typeof inputObject.expression !== 'string' || !inputObject.expression.trim()) {
+      return { result: null, error: "Invalid input: expression string is required for CalculatorTool." };
+    }
+
+    try {
+      const calculationResult = math.evaluate(inputObject.expression);
+
+      // Check if the result is a function (e.g., from defining a function like 'f(x) = x^2')
+      // or if it's an object that might not be directly usable as a simple "result" (e.g. a matrix)
+      // For now, we'll specifically check for functions. More complex objects might need specific handling if encountered.
+      if (typeof calculationResult === 'function') {
+        return { result: null, error: "Calculation error: Expression resulted in a function, not a direct value. Please provide a calculable expression that yields a number, string, or boolean." };
+      }
+
+      // Ensure the result is stringified for consistent output.
+      return { result: String(calculationResult), error: null };
+    } catch (e) {
+      console.error(`CalculatorTool error for expression "${inputObject.expression}":`, e.message);
+      return { result: null, error: "Calculation error: " + e.message };
+    }
   }
 }
 
@@ -143,7 +170,8 @@ app.get('/test-gemini', async (req, res) => {
 async function generatePlanWithGemini(userTask, callGeminiFunc) {
   const tools = [
     { name: "GeminiStepExecutor", description: "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate." },
-    { name: "WebSearchTool", description: "Useful for finding specific, real-time information or facts from the web. Input should be a search query." } // Updated tool name and description
+    { name: "WebSearchTool", description: "Useful for finding specific, real-time information or facts from the web. Input should be a search query." },
+    { name: "CalculatorTool", description: "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm')." }
   ];
 
   const toolsDescriptionString = tools.map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
@@ -281,10 +309,12 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
   let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
 
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
-  const webSearchTool = new WebSearchTool(); // Instantiate the new WebSearchTool
+  const webSearchTool = new WebSearchTool();
+  const calculatorTool = new CalculatorTool(); // Instantiate CalculatorTool
   const availableTools = {
     "GeminiStepExecutor": geminiExecutor,
-    "WebSearchTool": webSearchTool // Use the new tool and its correct name
+    "WebSearchTool": webSearchTool,
+    "CalculatorTool": calculatorTool // Add CalculatorTool to available tools
   };
 
   // Outer loop for stages
@@ -329,11 +359,11 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
       try {
         if (toolName === "GeminiStepExecutor") {
           currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
-        } else if (toolName === "WebSearchTool") { // Updated to WebSearchTool
+        } else if (toolName === "WebSearchTool") {
           currentStepOutcome = await selectedTool.execute({ query: stepDescription });
+        } else if (toolName === "CalculatorTool") {
+          currentStepOutcome = await selectedTool.execute({ expression: stepDescription }); // Pass expression for CalculatorTool
         } else {
-          // This case should ideally be caught by the unknown tool check earlier,
-          // but as a safeguard:
           console.error(`Attempted to execute unhandled tool: ${toolName}`);
           currentStepOutcome = { result: null, error: `Unhandled tool: ${toolName}` };
         }
