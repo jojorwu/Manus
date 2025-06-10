@@ -15,21 +15,45 @@ if (apiKey) {
 }
 
 // Async helper function to call Gemini
+const GEMINI_TIMEOUT_DURATION = 20000; // 20 seconds
+
 async function callGemini(promptString) {
   if (!genAI) {
-    // This case should ideally be caught before calling callGemini,
-    // but as a safeguard within the function itself:
     throw new Error("Gemini API client not initialized. Check API key.");
   }
+
+  let timeoutId; // For clearing timeout if Gemini finishes first
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`Gemini API call timed out after ${GEMINI_TIMEOUT_DURATION / 1000} seconds.`));
+    }, GEMINI_TIMEOUT_DURATION);
+  });
+
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-pro" });
-    const result = await model.generateContent(promptString);
-    const response = await result.response;
+    const geminiPromise = genAI.getGenerativeModel({ model: "gemini-pro" }).generateContent(promptString);
+
+    const raceResult = await Promise.race([
+      geminiPromise,
+      timeoutPromise
+    ]);
+
+    clearTimeout(timeoutId); // Clear the timeout as Gemini call completed
+
+    // If timeoutPromise did not win, raceResult is the result from geminiPromise
+    const response = await raceResult.response; // This line might fail if raceResult is from a timeout (it wouldn't have .response)
+                                             // However, Promise.race ensures only one promise (the first to settle) provides its result/rejection.
+                                             // If timeout wins, it rejects, and execution goes to catch.
     const text = response.text();
     return text;
+
   } catch (error) {
-    console.error("Error calling Gemini API:", error);
-    // Re-throw or throw a new error to be caught by the caller
+    clearTimeout(timeoutId); // Ensure timeout is cleared on any error too
+    console.error("Error calling Gemini API or timed out:", error.message);
+    // Check if it's our specific timeout error
+    if (error.message.includes("Gemini API call timed out")) {
+      throw error; // Re-throw the timeout error as is
+    }
+    // For other errors (actual API errors, etc.)
     throw new Error(`Error generating content from Gemini: ${error.message}`);
   }
 }
@@ -62,7 +86,7 @@ class WebSearchTool {
     };
 
     try {
-      const response = await axios.get(searchUrl, { params: params });
+      const response = await axios.get(searchUrl, { params: params, timeout: 8000 }); // Added timeout: 8000ms
 
       if (response.data && response.data.items && response.data.items.length > 0) {
         const formattedResults = response.data.items
@@ -77,9 +101,11 @@ class WebSearchTool {
       }
     } catch (error) {
       console.error('Error fetching web search results:', error.message);
-      if (error.response && error.response.data && error.response.data.error) {
+      if (error.code === 'ECONNABORTED' || (error.message && error.message.toLowerCase().includes('timeout'))) {
+        return { result: null, error: "Web search request timed out after 8 seconds." };
+      } else if (error.response && error.response.data && error.response.data.error) {
         // Handle errors returned by the Google API itself (e.g., bad API key, quota exceeded)
-        return { result: null, error: `Google Search API Error: ${error.response.data.error.message || 'Failed to fetch search results'}` };
+        return { result: null, error: `Google Search API Error: ${error.response.data.error.message || 'Failed to fetch search results due to API error'}` };
       }
       return { result: null, error: `Failed to fetch search results: ${error.message}` };
     }
@@ -205,11 +231,27 @@ Example for a task like 'Research impacts of remote work and summarize findings'
 
     return { success: true, plan: parsedPlanStages, rawResponse: null }; // Indicate success
 
-  } catch (error) { // Catches errors from callGeminiFunc or JSON.parse
-    console.error("Error in generatePlanWithGemini (staged planning):", error);
+  } catch (error) { // Catches errors from callGeminiFunc (which now throws on API/timeout error) or JSON.parse
+    console.error("Error in generatePlanWithGemini (staged planning):", error.message);
+    if (error.message.includes("Gemini API call timed out")) {
+      return {
+        success: false,
+        message: "Failed to generate plan: Gemini API call timed out.",
+        details: error.message,  // The specific timeout message from callGemini
+        rawResponse: rawResponseFromGemini // This might be empty if timeout occurred before Gemini responded
+      };
+    }
+    // Differentiate between parsing error (if Gemini responded but with bad JSON) vs. other API errors
     const isParsingError = error instanceof SyntaxError;
     const message = isParsingError ? "Failed to parse tool-aware plan from Gemini." : "Failed to generate tool-aware plan due to an API error.";
-    return { success: false, message: message, details: error.message, rawResponse: rawResponseFromGemini };
+    // If it's not a parsing error, rawResponseFromGemini might not be set if callGeminiFunc failed before returning a response string.
+    // error.message would be more relevant for details in that case.
+    return {
+      success: false,
+      message: message,
+      details: error.message,
+      rawResponse: isParsingError ? rawResponseFromGemini : null // Only include rawResponse if it was a parsing issue
+    };
   }
 }
 
