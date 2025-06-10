@@ -16,7 +16,7 @@ This project consists of two main components: a Node.js backend that houses the 
         *   Managing and dispatching tasks to various tools (e.g., Web Search, Calculator, Webpage Reader, GeminiStepExecutor).
         *   Handling the execution flow, including staged/parallel execution and context management.
     *   Exposes an API (currently `/api/generate-plan`) that the frontend consumes.
-    *   It also serves the original, basic HTML interface (though development focus is on the new React frontend).
+    *   Its root path (`/`) now returns a simple JSON health/status message, and it serves static assets (which could include a production build of the frontend if placed in the root).
 
 *   **Frontend (`frontend/` Directory):**
     *   A modern single-page application (SPA) built with React and Vite.
@@ -50,7 +50,7 @@ This project consists of two main components: a Node.js backend that houses the 
 *   **Staged and Parallel Execution:** Plans are structured into stages. Steps within the same stage can be executed in parallel.
 *   **Contextual Memory & Summarization:** Information from completed steps is carried forward. Long contexts are automatically summarized using Gemini to maintain efficiency.
 *   **Multi-Stage Replanning:** If a step fails, the agent can attempt a focused "step fix" or a more comprehensive "full replan" using Gemini.
-*   **Modern Web Interface:** A React/Vite/Tailwind/Shadcn/UI frontend for task submission and detailed progress/result viewing.
+*   **Modern Web Interface:** A React/Vite/Tailwind/Shadcn/UI frontend for task submission and detailed progress/result viewing, located in the `frontend/` directory.
 
 ## Technology Stack
 
@@ -119,7 +119,7 @@ This project has two main parts that need to be run simultaneously for developme
         ```
     *   The backend server will typically start on `http://localhost:3000`.
     *   API endpoints (like `/api/generate-plan`) will be available at this address.
-    *   The original basic HTML UI (if still present) is also served from `http://localhost:3000`.
+    *   Its root path (`/`) provides a JSON status message. Static assets are also served from the root (which could include a production build of the frontend if placed there).
     *   Changes to `server.js` require a manual restart unless using a tool like `nodemon`.
 
 **2. Frontend Development Server (New React UI):**

@@ -274,9 +274,12 @@ app.use(express.urlencoded({ extended: true }));
 // Serve static files from the root directory (e.g., style.css)
 app.use(express.static(__dirname));
 
-// GET endpoint to serve index.html
+// GET endpoint for root - now returns a JSON message
 app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  res.json({
+    message: "AI Agent backend is running. Please use the frontend application to interact with the agent.",
+    status: "healthy"
+  });
 });
 
 // Temporary GET route to test Gemini
