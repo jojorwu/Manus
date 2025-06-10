@@ -5,45 +5,137 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <h1>Biography Download Agent</h1>
-  <label for="nameInput">Enter Name:</label>
-  <input type="text" id="nameInput">
-  <button id="downloadButton">Download Biography</button>
+  <h1>Task Plan Generator</h1>
+  <label for="taskInput">Enter Task:</label>
+  <input type="text" id="taskInput">
+  <button id="planButton">Generate Plan</button>
   <div id="statusArea"></div>
 
   <script>
-    const nameInput = document.getElementById('nameInput');
-    const downloadButton = document.getElementById('downloadButton');
+    const taskInput = document.getElementById('taskInput');
+    const planButton = document.getElementById('planButton');
     const statusArea = document.getElementById('statusArea');
 
-    downloadButton.addEventListener('click', async () => {
-      const name = nameInput.value;
-      statusArea.textContent = ''; // Clear previous messages
+    planButton.addEventListener('click', async () => {
+      const originalTask = taskInput.value; // Store original task
+      statusArea.innerHTML = ''; // Clear previous messages
 
-      if (!name.trim()) {
-        statusArea.textContent = 'Please enter a name.';
+      if (!originalTask.trim()) {
+        statusArea.textContent = 'Please enter a task.';
         return;
       }
 
+      // Initial "loading" message
+      const loadingP = document.createElement('p');
+      loadingP.textContent = 'Generating plan and executing first step...';
+      statusArea.appendChild(loadingP);
+
       try {
-        const response = await fetch('/api/download-biography', {
+        const response = await fetch('/api/generate-plan', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ name: name }),
+          body: JSON.stringify({ task: task }),
         });
 
         const result = await response.json();
+        statusArea.innerHTML = ''; // Clear loading message
+
+        // Display Original Task
+        const taskHeading = document.createElement('h3');
+        taskHeading.textContent = 'Your Task:';
+        statusArea.appendChild(taskHeading);
+        const taskP = document.createElement('p');
+        taskP.textContent = originalTask;
+        statusArea.appendChild(taskP);
+        statusArea.appendChild(document.createElement('hr'));
+
 
         if (response.ok) {
-          statusArea.textContent = result.message;
+          // Display the Plan
+          const planHeading = document.createElement('h3');
+          planHeading.textContent = 'Generated Plan:';
+          statusArea.appendChild(planHeading);
+
+          if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
+            const ol = document.createElement('ol'); // Use ordered list for steps
+            result.plan.forEach(step => {
+              const li = document.createElement('li');
+              li.textContent = step;
+              ol.appendChild(li);
+            });
+            statusArea.appendChild(ol);
+          } else {
+            const p = document.createElement('p');
+            p.textContent = 'No plan could be generated or the plan is empty.';
+            statusArea.appendChild(p);
+          }
+          statusArea.appendChild(document.createElement('hr'));
+
+          // Display First Step Execution Result
+          const executionHeading = document.createElement('h3');
+          executionHeading.textContent = 'First Step Execution:';
+          statusArea.appendChild(executionHeading);
+
+          if (result.executedStep) {
+            const stepP = document.createElement('p');
+            stepP.innerHTML = `<strong>Executed Step:</strong> ${result.executedStep}`;
+            statusArea.appendChild(stepP);
+          } else if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
+            // If there was a plan, but no specific executedStep field was in response (should not happen with current server.js)
+            const stepP = document.createElement('p');
+            stepP.innerHTML = `<strong>Executing:</strong> ${result.plan[0]}`; // Fallback to plan[0]
+            statusArea.appendChild(stepP);
+          }
+
+
+          if (result.executionError) {
+            const errorP = document.createElement('p');
+            errorP.style.color = 'red';
+            errorP.innerHTML = `<strong>Execution Error:</strong> ${result.executionError}`;
+            statusArea.appendChild(errorP);
+          } else if (result.firstStepExecutionResult && result.firstStepExecutionResult.trim() !== "") {
+            const resultP = document.createElement('p');
+            resultP.textContent = result.firstStepExecutionResult;
+            statusArea.appendChild(resultP);
+          } else if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
+            // Only show this if a plan was attempted, and there was no error, but also no result.
+             const p = document.createElement('p');
+             p.textContent = 'The first step was processed, but no specific output was returned.';
+             statusArea.appendChild(p);
+          }
+          // If no plan, this section might not show much, which is fine.
+
         } else {
-          statusArea.textContent = `Error: ${result.message || response.statusText}`;
+          // Handle errors from the server (e.g., 500, 400 from API calls)
+          const errorHeading = document.createElement('h3');
+          errorHeading.textContent = 'Error:';
+          errorHeading.style.color = 'red';
+          statusArea.appendChild(errorHeading);
+
+          const errorP = document.createElement('p');
+          errorP.style.color = 'red';
+          errorP.textContent = `${result.error || response.statusText}. ${result.details || ''}`;
+          statusArea.appendChild(errorP);
+
+          if (result.rawResponse) {
+            console.warn('Problematic raw response from server:', result.rawResponse);
+            const rawLabel = document.createElement('p');
+            rawLabel.textContent = "Raw server response (see console for details if truncated):";
+            statusArea.appendChild(rawLabel);
+            const rawP = document.createElement('pre');
+            rawP.style.fontSize = 'small';
+            rawP.style.backgroundColor = '#f0f0f0';
+            rawP.style.padding = '5px';
+            rawP.style.whiteSpace = 'pre-wrap';
+            rawP.textContent = typeof result.rawResponse === 'string' ? result.rawResponse.substring(0, 500) : JSON.stringify(result.rawResponse).substring(0,500) + "...";
+            statusArea.appendChild(rawP);
+          }
         }
       } catch (error) {
         console.error('Fetch error:', error);
-        statusArea.textContent = 'Failed to send request. Check console for details.';
+        statusArea.textContent = 'Failed to send request. Check browser console for details.';
       }
     });
   </script>

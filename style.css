@@ -55,9 +55,45 @@ button:hover {
   background-color: #e9ecef;
   border-color: #ced4da;
   word-wrap: break-word;
+  text-align: left; /* Align text to left for lists etc. */
 }
 
 /* Style for when statusArea has content */
 #statusArea:not(:empty) {
   border-color: #ced4da; /* Make border more visible when there's text */
+  padding: 15px; /* Add more padding when there's content */
+}
+
+#statusArea h3 {
+  margin-top: 10px;
+  margin-bottom: 5px;
+  font-weight: bold;
+}
+
+#statusArea p {
+  margin-top: 5px;
+  margin-bottom: 10px;
+}
+
+#statusArea ol, #statusArea ul {
+  margin-top: 5px;
+  margin-bottom: 10px;
+  padding-left: 20px; /* Indent lists */
+}
+
+#statusArea hr {
+  margin-top: 15px;
+  margin-bottom: 15px;
+  border: 0;
+  border-top: 1px solid #ccc;
+}
+
+#statusArea pre {
+  font-size: small;
+  background-color: #f0f0f0;
+  padding: 5px;
+  white-space: pre-wrap;
+  word-wrap: break-word; /* ensure long strings in pre wrap */
+  border: 1px solid #ddd;
+  border-radius: 4px;
 }

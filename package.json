@@ -18,6 +18,7 @@
   },
   "homepage": "https://github.com/jojorwu/Manus#readme",
   "dependencies": {
+    "@google/generative-ai": "^0.24.1",
     "express": "^5.1.0"
   }
 }
