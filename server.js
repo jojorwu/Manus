@@ -5,6 +5,7 @@ const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai'); // Added for Gemini
 const axios = require('axios'); // Added for WebSearchTool
 const math = require('mathjs'); // Added for CalculatorTool
+// const he = require('he'); // Skipped due to npm install issues in this environment
 const app = express();
 const port = 3000;
 
@@ -141,6 +142,94 @@ class WebSearchTool {
   }
 }
 
+// --- Tool Definition: ReadWebpageTool ---
+class ReadWebpageTool {
+  async execute(inputObject) {
+    if (!inputObject || typeof inputObject.url !== 'string' || !inputObject.url.trim()) {
+      return { result: null, error: "Invalid input: URL string is required for ReadWebpageTool." };
+    }
+
+    const url = inputObject.url.trim();
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      return { result: null, error: "Invalid URL format. Must start with http:// or https://" };
+    }
+
+    try {
+      const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8' // More specific accept header
+      };
+      const response = await axios.get(url, { headers: headers, timeout: 10000 });
+
+      const contentType = response.headers['content-type'];
+      if (!contentType || (!contentType.includes('text/html') && !contentType.includes('text/plain'))) {
+        return { result: null, error: `Content is not HTML or plain text. Received: ${contentType || "unknown"}` };
+      }
+
+      let htmlContent = response.data;
+      if (typeof htmlContent !== 'string') {
+        // Try to decode if it's a buffer (e.g. from text/plain)
+        try {
+          htmlContent = Buffer.from(htmlContent).toString('utf-8');
+        } catch (bufferError) {
+          return { result: null, error: "Could not convert fetched content to string."};
+        }
+      }
+
+      const MAX_CONTENT_LENGTH = 1000000; // 1MB
+      if (htmlContent.length > MAX_CONTENT_LENGTH) {
+        console.warn(`Content from ${url} exceeded ${MAX_CONTENT_LENGTH} chars, truncating.`);
+        htmlContent = htmlContent.substring(0, MAX_CONTENT_LENGTH);
+      }
+
+      let extractedText = htmlContent;
+      // Remove script tags and content
+      extractedText = extractedText.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, ' ');
+      // Remove style tags and content
+      extractedText = extractedText.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, ' ');
+      // Remove HTML comments
+      extractedText = extractedText.replace(/<!--[\s\S]*?-->/g, ' ');
+      // Remove all other HTML tags (replace with a space)
+      extractedText = extractedText.replace(/<[^>]+>/g, ' ');
+
+      // HTML entity decoding would ideally be here with he.decode(extractedText);
+      // Since 'he' could not be installed, entities will remain.
+
+      // Clean Whitespace: replace multiple whitespace characters with a single space
+      extractedText = extractedText.replace(/\s+/g, ' ').trim();
+
+      if (extractedText.length < 50) {
+        return { result: "Could not extract significant textual content from the URL.", error: null };
+      }
+
+      return { result: extractedText, error: null };
+
+    } catch (error) {
+      console.error(`Error fetching or processing URL "${url}":`, error.message);
+      if (error.response) {
+        // The request was made and the server responded with a status code
+        // that falls out of the range of 2xx
+        return { result: null, error: `Failed to fetch URL: Server responded with status ${error.response.status} - ${error.response.statusText}` };
+      } else if (error.request) {
+        // The request was made but no response was received
+        // `error.request` is an instance of XMLHttpRequest in the browser and an instance of
+        // http.ClientRequest in node.js
+        let errorMessage = "Failed to fetch URL: No response received from server.";
+        if (error.code === 'ECONNABORTED') {
+          errorMessage = "Failed to fetch URL: Request timed out after 10 seconds.";
+        } else if (error.message) {
+          errorMessage += ` Details: ${error.message}`;
+        }
+        return { result: null, error: errorMessage };
+      } else {
+        // Something happened in setting up the request that triggered an Error
+        return { result: null, error: `Failed to fetch URL: ${error.message}` };
+      }
+    }
+  }
+}
+
+
 // Middleware to parse JSON bodies and URL-encoded data
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -224,7 +313,8 @@ async function generatePlanWithGemini(userTask, callGeminiFunc) {
   const tools = [
     { name: "GeminiStepExecutor", description: "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate." },
     { name: "WebSearchTool", description: "Useful for finding specific, real-time information or facts from the web. Input should be a search query." },
-    { name: "CalculatorTool", description: "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm')." }
+    { name: "CalculatorTool", description: "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm')." },
+    { name: "ReadWebpageTool", description: "Fetches and extracts the main textual content from a given web URL. The stepDescription for this tool must be a valid URL string (e.g., 'https://example.com/article')." }
   ];
   const toolNames = tools.map(t => t.name);
 
@@ -425,10 +515,12 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
   const webSearchTool = new WebSearchTool();
   const calculatorTool = new CalculatorTool();
+  const readWebpageTool = new ReadWebpageTool(); // Instantiate ReadWebpageTool
   const availableTools = {
     "GeminiStepExecutor": geminiExecutor,
     "WebSearchTool": webSearchTool,
-    "CalculatorTool": calculatorTool
+    "CalculatorTool": calculatorTool,
+    "ReadWebpageTool": readWebpageTool // Add ReadWebpageTool to available tools
   };
 
   for (let stageIndex = 0; stageIndex < planStagesArray.length; stageIndex++) {
@@ -459,6 +551,7 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
         if (toolName === "GeminiStepExecutor") currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
         else if (toolName === "WebSearchTool") currentStepOutcome = await selectedTool.execute({ query: stepDescription });
         else if (toolName === "CalculatorTool") currentStepOutcome = await selectedTool.execute({ expression: stepDescription });
+        else if (toolName === "ReadWebpageTool") currentStepOutcome = await selectedTool.execute({ url: stepDescription });
         else currentStepOutcome = { result: null, error: `Unhandled tool: ${toolName}` };
         return { originalStep: planStep, outcome: currentStepOutcome, success: !currentStepOutcome.error };
       } catch (toolError) {
