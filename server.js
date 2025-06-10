@@ -16,7 +16,9 @@ if (apiKey) {
 // Async helper function to call Gemini
 async function callGemini(promptString) {
   if (!genAI) {
-    return "Error: Gemini API key not configured or client not initialized.";
+    // This case should ideally be caught before calling callGemini,
+    // but as a safeguard within the function itself:
+    throw new Error("Gemini API client not initialized. Check API key.");
   }
   try {
     const model = genAI.getGenerativeModel({ model: "gemini-pro" });
@@ -26,7 +28,8 @@ async function callGemini(promptString) {
     return text;
   } catch (error) {
     console.error("Error calling Gemini API:", error);
-    return `Error generating content: ${error.message}`;
+    // Re-throw or throw a new error to be caught by the caller
+    throw new Error(`Error generating content from Gemini: ${error.message}`);
   }
 }
 
@@ -52,27 +55,19 @@ app.get('/test-gemini', async (req, res) => {
     const geminiResponse = await callGemini(prompt);
     res.send(geminiResponse);
   } catch (error) {
+    // callGemini now throws, so catch it here
     res.status(500).send(`Error calling Gemini: ${error.message}`);
   }
 });
 
-// POST endpoint for generating a plan
-app.post('/api/generate-plan', async (req, res) => {
-  const userTask = req.body.task;
-  if (!userTask) {
-    return res.status(400).json({ error: "Task is required" });
-  }
-
-  if (!genAI) {
-    return res.status(500).json({ error: "Gemini API client not initialized. Check API key." });
-  }
-
-  // Refined Planning Prompt
+// --- Helper Function 1: Generate Plan ---
+async function generatePlanWithGemini(userTask, callGeminiFunc) {
   const planningPrompt = `User task: '${userTask}'. Break this down into a JSON array of short, actionable, and logically sequenced steps to achieve the task. The steps should be granular enough to be executed one by one. The output should be only the JSON array. For example, for 'Research the history of the internet', steps might be: ["Define scope of research", "Identify key milestones", "Find primary sources for early development", "Summarize findings into a timeline"].`;
+  let rawResponseFromGemini = "";
 
   try {
-    // Planning stage (first Gemini call)
-    const planResponseString = await callGemini(planningPrompt); // Use refined planningPrompt
+    const planResponseString = await callGeminiFunc(planningPrompt);
+    rawResponseFromGemini = planResponseString;
     let cleanedPlanResponseString = planResponseString.trim();
     if (cleanedPlanResponseString.startsWith('```json')) {
       cleanedPlanResponseString = cleanedPlanResponseString.substring(7).trim();
@@ -83,62 +78,103 @@ app.post('/api/generate-plan', async (req, res) => {
       cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
     }
 
-    let planArray;
-    try {
-      planArray = JSON.parse(cleanedPlanResponseString);
-      } catch (parseError) {
-        console.error("Error parsing Gemini response for plan:", parseError, "Raw response:", cleanedPlanResponseString);
-        return res.status(500).json({ error: "Failed to parse plan from Gemini.", details: parseError.message, rawResponse: cleanedPlanResponseString, originalTask: userTask });
-      }
+    const planArray = JSON.parse(cleanedPlanResponseString);
 
-      if (!Array.isArray(planArray) || planArray.length === 0) {
-        console.error("Gemini generated an empty or invalid plan:", cleanedPlanResponseString);
-        return res.status(500).json({ error: "Failed to generate a valid plan.", details: "Gemini returned an empty or invalid plan.", rawResponse: cleanedPlanResponseString, originalTask: userTask });
-      }
-
-      // Execution Loop Stage (New)
-      const executionLog = [];
-      let contextSummaryForNextStep = "No previous steps executed yet.\n\n"; // Initial context
-
-      for (const stepDescription of planArray) {
-        if (typeof stepDescription !== 'string' || !stepDescription.trim()) {
-          console.warn("Skipping invalid step in plan:", stepDescription);
-          executionLog.push({ step: String(stepDescription), error: "Invalid step description in plan.", status: "skipped" });
-          continue;
-        }
-
-        // Ensure contextSummaryForNextStep does not grow excessively (optional simple check)
-        // For this subtask, we'll keep it simple and not truncate aggressively.
-        // A more advanced solution might summarize if it exceeds a token limit.
-
-        // Refined Step Execution Prompt
-        const executionPrompt = `Original task: '${userTask}'.\n\nContext from previous completed steps:\n${contextSummaryForNextStep}\nConsidering the 'Original task' and the 'Context from previous completed steps', provide a concise output for successfully completing the current step: '${stepDescription}'. Focus only on the output for this specific step.`;
-
-        try {
-          const stepResultText = await callGemini(executionPrompt);
-          executionLog.push({ step: stepDescription, result: stepResultText, status: "completed" });
-          // Append structured context
-          contextSummaryForNextStep += `Summary of step "${stepDescription}": ${stepResultText}\n\n`;
-        } catch (stepError) {
-          console.error(`Error calling callGemini for step execution ('${stepDescription}'):`, stepError);
-          executionLog.push({ step: stepDescription, error: stepError.message || "Unknown error during step execution.", status: "failed" });
-          break; // Terminate loop on first failure
-        }
-      }
-
-      res.json({
-        originalTask: userTask,
-        plan: planArray,
-        executionLog: executionLog
-      });
-
-    } catch (planningError) { // Catches errors from the first callGemini (planning) or initial parsing
-      console.error("Error in planning stage of /api/generate-plan:", planningError);
-      res.status(500).json({ error: "Failed to generate plan due to an internal error.", details: planningError.message, originalTask: userTask });
+    if (!Array.isArray(planArray) || planArray.length === 0) {
+      console.error("Gemini generated an empty or invalid plan array:", cleanedPlanResponseString);
+      return { success: false, message: "Generated plan is empty or invalid.", details: "Gemini returned an empty or invalid plan array.", rawResponse: cleanedPlanResponseString };
     }
-  } catch (initialError) { // Catches errors if genAI is not initialized, or userTask is missing
-    console.error("Initial error in /api/generate-plan:", initialError);
-    res.status(500).json({ error: "Failed to process request due to a setup or configuration issue.", details: initialError.message });
+    return { success: true, plan: planArray, rawResponse: null }; // Indicate success
+
+  } catch (error) { // Catches errors from callGeminiFunc or JSON.parse
+    console.error("Error in generatePlanWithGemini:", error);
+    // Determine if the error is from parsing or from the API call itself
+    const isParsingError = error instanceof SyntaxError;
+    const message = isParsingError ? "Failed to parse plan from Gemini." : "Failed to generate plan due to an API error.";
+    return { success: false, message: message, details: error.message, rawResponse: rawResponseFromGemini };
+  }
+}
+
+// --- Tool Definition: GeminiStepExecutorTool ---
+class GeminiStepExecutorTool {
+  constructor(callGeminiFunction) {
+    this.callGemini = callGeminiFunction;
+  }
+
+  async execute(originalTask, stepDescription, contextSummary) {
+    const executionPrompt = `Original task: '${originalTask}'.\n\nContext from previous completed steps:\n${contextSummary}\nConsidering the 'Original task' and the 'Context from previous completed steps', provide a concise output for successfully completing the current step: '${stepDescription}'. Focus only on the output for this specific step.`;
+
+    try {
+      const stepResultText = await this.callGemini(executionPrompt);
+      return { result: stepResultText, error: null };
+    } catch (error) {
+      console.error(`Error executing step ("${stepDescription}") with GeminiStepExecutorTool:`, error);
+      // Ensure the error message is propagated; callGemini now throws an Error object.
+      return { result: null, error: error.message || "Unknown error during step execution." };
+    }
+  }
+}
+
+// --- Helper Function: Execute Plan Loop (now uses the tool) ---
+async function executePlanLoop(userTask, planArray, callGeminiFunc) {
+  const executionLog = [];
+  let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
+  const stepExecutor = new GeminiStepExecutorTool(callGeminiFunc); // Instantiate the tool
+
+  for (const stepDescription of planArray) {
+    if (typeof stepDescription !== 'string' || !stepDescription.trim()) {
+      console.warn("Skipping invalid step in plan:", stepDescription);
+      executionLog.push({ step: String(stepDescription), error: "Invalid step description in plan.", status: "skipped" });
+      continue;
+    }
+
+    // Call the tool's execute method
+    const stepOutcome = await stepExecutor.execute(userTask, stepDescription, contextSummaryForNextStep);
+
+    if (stepOutcome.error) {
+      executionLog.push({ step: stepDescription, error: stepOutcome.error, status: "failed" });
+      break;
+    } else {
+      executionLog.push({ step: stepDescription, result: stepOutcome.result, status: "completed" });
+      contextSummaryForNextStep += `Summary of step "${stepDescription}": ${stepOutcome.result}\n\n`;
+    }
+  }
+  return executionLog;
+}
+
+// --- Main API Endpoint ---
+app.post('/api/generate-plan', async (req, res) => {
+  const userTask = req.body.task;
+  if (!userTask) {
+    return res.status(400).json({ message: "Task is required in the request body.", context: { originalTask: userTask || null } });
+  }
+  if (!genAI) {
+    return res.status(500).json({ message: "API client not initialized.", details: "Server configuration issue: GEMINI_API_KEY may be missing.", context: { originalTask: userTask } });
+  }
+
+  try {
+    const planResult = await generatePlanWithGemini(userTask, callGemini);
+
+    if (!planResult.success) { // Check the success flag
+      return res.status(500).json({
+        message: planResult.message || "Failed to generate plan.", // Use message from planResult
+        details: planResult.details,
+        context: { originalTask: userTask, rawResponse: planResult.rawResponse }
+      });
+    }
+    const planArray = planResult.plan;
+
+    const executionLog = await executePlanLoop(userTask, planArray, callGemini);
+
+    res.json({
+      originalTask: userTask,
+      plan: planArray,
+      executionLog: executionLog
+    });
+
+  } catch (unexpectedError) {
+    console.error("Unexpected error in /api/generate-plan route handler:", unexpectedError);
+    res.status(500).json({ message: "An unexpected server error occurred.", details: unexpectedError.message, context: { originalTask: userTask } });
   }
 });
 
