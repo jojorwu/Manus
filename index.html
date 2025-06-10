@@ -40,82 +40,101 @@
         });
 
         const result = await response.json();
+        const result = await response.json(); // Expect { originalTask, plan, executionLog }
         statusArea.innerHTML = ''; // Clear loading message
 
-        // Display Original Task
+        // --- Display Original Task ---
         const taskHeading = document.createElement('h3');
         taskHeading.textContent = 'Your Task:';
         statusArea.appendChild(taskHeading);
         const taskP = document.createElement('p');
-        taskP.textContent = originalTask;
+        // Use result.originalTask from server response if available, otherwise fallback to input
+        taskP.textContent = result.originalTask || originalTask;
         statusArea.appendChild(taskP);
         statusArea.appendChild(document.createElement('hr'));
 
-
         if (response.ok) {
-          // Display the Plan
+          // --- Display Generated Plan ---
           const planHeading = document.createElement('h3');
           planHeading.textContent = 'Generated Plan:';
           statusArea.appendChild(planHeading);
-
+          const planOl = document.createElement('ol');
           if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
-            const ol = document.createElement('ol'); // Use ordered list for steps
-            result.plan.forEach(step => {
+            result.plan.forEach(stepDesc => {
               const li = document.createElement('li');
-              li.textContent = step;
-              ol.appendChild(li);
+              li.textContent = stepDesc;
+              planOl.appendChild(li);
             });
-            statusArea.appendChild(ol);
           } else {
             const p = document.createElement('p');
             p.textContent = 'No plan could be generated or the plan is empty.';
-            statusArea.appendChild(p);
+            planOl.appendChild(p); // Append to OL to keep structure, or directly to statusArea
           }
+          statusArea.appendChild(planOl);
           statusArea.appendChild(document.createElement('hr'));
 
-          // Display First Step Execution Result
-          const executionHeading = document.createElement('h3');
-          executionHeading.textContent = 'First Step Execution:';
-          statusArea.appendChild(executionHeading);
+          // --- Display Execution Log ---
+          const logHeading = document.createElement('h3');
+          logHeading.textContent = 'Execution Log:';
+          statusArea.appendChild(logHeading);
 
-          if (result.executedStep) {
-            const stepP = document.createElement('p');
-            stepP.innerHTML = `<strong>Executed Step:</strong> ${result.executedStep}`;
-            statusArea.appendChild(stepP);
-          } else if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
-            // If there was a plan, but no specific executedStep field was in response (should not happen with current server.js)
-            const stepP = document.createElement('p');
-            stepP.innerHTML = `<strong>Executing:</strong> ${result.plan[0]}`; // Fallback to plan[0]
-            statusArea.appendChild(stepP);
+          const logUl = document.createElement('ul'); // Unordered list for log entries
+          logUl.classList.add('execution-log'); // Add class for potential styling
+
+          if (result.executionLog && Array.isArray(result.executionLog) && result.executionLog.length > 0) {
+            result.executionLog.forEach(entry => {
+              const logLi = document.createElement('li');
+              logLi.innerHTML = `<strong>Step:</strong> ${entry.step || 'N/A'}`;
+
+              const statusSpan = document.createElement('span');
+              statusSpan.classList.add('status', entry.status); // "status completed" or "status failed"
+              statusSpan.textContent = ` (${entry.status})`;
+              logLi.appendChild(statusSpan);
+
+              if (entry.status === "completed") {
+                const resultP = document.createElement('p');
+                resultP.classList.add('log-result');
+                resultP.textContent = `Result: ${entry.result || 'No specific result.'}`;
+                logLi.appendChild(resultP);
+              } else if (entry.status === "failed") {
+                const errorP = document.createElement('p');
+                errorP.classList.add('log-error');
+                errorP.textContent = `Error: ${entry.error || 'Unknown error.'}`;
+                logLi.appendChild(errorP);
+              } else if (entry.status === "skipped") {
+                 const skippedP = document.createElement('p');
+                 skippedP.classList.add('log-skipped');
+                 skippedP.textContent = `Skipped: ${entry.error || 'Step was skipped.'}`;
+                 logLi.appendChild(skippedP);
+              }
+              logUl.appendChild(logLi);
+            });
+          } else {
+            const p = document.createElement('p');
+            p.textContent = 'No execution log available.';
+            logUl.appendChild(p);
+          }
+          statusArea.appendChild(logUl);
+
+          // Indicate if not all plan steps were executed
+          if (result.plan && result.executionLog && result.plan.length > result.executionLog.length) {
+            const lastExecutedEntry = result.executionLog[result.executionLog.length - 1];
+            if (lastExecutedEntry && lastExecutedEntry.status === 'failed') {
+              const noteP = document.createElement('p');
+              noteP.style.marginTop = '10px';
+              noteP.innerHTML = `<em>Execution stopped after failed step. Subsequent steps in the plan were not attempted.</em>`;
+              statusArea.appendChild(noteP);
+            }
           }
 
-
-          if (result.executionError) {
-            const errorP = document.createElement('p');
-            errorP.style.color = 'red';
-            errorP.innerHTML = `<strong>Execution Error:</strong> ${result.executionError}`;
-            statusArea.appendChild(errorP);
-          } else if (result.firstStepExecutionResult && result.firstStepExecutionResult.trim() !== "") {
-            const resultP = document.createElement('p');
-            resultP.textContent = result.firstStepExecutionResult;
-            statusArea.appendChild(resultP);
-          } else if (result.plan && Array.isArray(result.plan) && result.plan.length > 0) {
-            // Only show this if a plan was attempted, and there was no error, but also no result.
-             const p = document.createElement('p');
-             p.textContent = 'The first step was processed, but no specific output was returned.';
-             statusArea.appendChild(p);
-          }
-          // If no plan, this section might not show much, which is fine.
-
-        } else {
-          // Handle errors from the server (e.g., 500, 400 from API calls)
+        } else { // Handle errors from the server (e.g., Gemini API failure during planning)
           const errorHeading = document.createElement('h3');
           errorHeading.textContent = 'Error:';
-          errorHeading.style.color = 'red';
+          errorHeading.classList.add('status', 'failed'); // Use existing class for red color
           statusArea.appendChild(errorHeading);
 
           const errorP = document.createElement('p');
-          errorP.style.color = 'red';
+          errorP.classList.add('status', 'failed');
           errorP.textContent = `${result.error || response.statusText}. ${result.details || ''}`;
           statusArea.appendChild(errorP);
 
@@ -124,13 +143,9 @@
             const rawLabel = document.createElement('p');
             rawLabel.textContent = "Raw server response (see console for details if truncated):";
             statusArea.appendChild(rawLabel);
-            const rawP = document.createElement('pre');
-            rawP.style.fontSize = 'small';
-            rawP.style.backgroundColor = '#f0f0f0';
-            rawP.style.padding = '5px';
-            rawP.style.whiteSpace = 'pre-wrap';
-            rawP.textContent = typeof result.rawResponse === 'string' ? result.rawResponse.substring(0, 500) : JSON.stringify(result.rawResponse).substring(0,500) + "...";
-            statusArea.appendChild(rawP);
+            const rawPre = document.createElement('pre'); // Changed from rawP to rawPre
+            rawPre.textContent = typeof result.rawResponse === 'string' ? result.rawResponse.substring(0, 500) + (result.rawResponse.length > 500 ? "..." : "") : JSON.stringify(result.rawResponse).substring(0,500) + "...";
+            statusArea.appendChild(rawPre);
           }
         }
       } catch (error) {

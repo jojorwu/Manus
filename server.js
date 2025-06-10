@@ -67,60 +67,78 @@ app.post('/api/generate-plan', async (req, res) => {
     return res.status(500).json({ error: "Gemini API client not initialized. Check API key." });
   }
 
-  const prompt = `User task: '${userTask}'. Break this down into a JSON array of short, actionable steps. The output should be only the JSON array. For example, for 'Research the history of the internet', steps might be: ["Define scope of research", "Identify key milestones", "Find primary sources for early development", "Summarize findings into a timeline"].`;
+  // Refined Planning Prompt
+  const planningPrompt = `User task: '${userTask}'. Break this down into a JSON array of short, actionable, and logically sequenced steps to achieve the task. The steps should be granular enough to be executed one by one. The output should be only the JSON array. For example, for 'Research the history of the internet', steps might be: ["Define scope of research", "Identify key milestones", "Find primary sources for early development", "Summarize findings into a timeline"].`;
 
   try {
-    const geminiResponseString = await callGemini(prompt);
-
-    // Attempt to remove potential markdown backticks and "json" prefix if present
-    let cleanedResponseString = geminiResponseString.trim();
-    if (cleanedResponseString.startsWith('```json')) {
-      cleanedResponseString = cleanedResponseString.substring(7).trim();
-    } else if (cleanedResponseString.startsWith('```')) {
-      cleanedResponseString = cleanedResponseString.substring(3).trim();
+    // Planning stage (first Gemini call)
+    const planResponseString = await callGemini(planningPrompt); // Use refined planningPrompt
+    let cleanedPlanResponseString = planResponseString.trim();
+    if (cleanedPlanResponseString.startsWith('```json')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.substring(7).trim();
+    } else if (cleanedPlanResponseString.startsWith('```')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.substring(3).trim();
     }
-    if (cleanedResponseString.endsWith('```')) {
-      cleanedResponseString = cleanedResponseString.slice(0, -3).trim();
+    if (cleanedPlanResponseString.endsWith('```')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
     }
 
+    let planArray;
     try {
-      const planArray = JSON.parse(cleanedResponseString);
-      if (Array.isArray(planArray) && planArray.length > 0) {
-        const firstStep = planArray[0];
-        const executionPrompt = `Regarding the overall user task: '${userTask}', please execute the following step from the plan: '${firstStep}'. Provide a concise text result for completing this specific step. Focus only on the result of this single step.`;
+      planArray = JSON.parse(cleanedPlanResponseString);
+      } catch (parseError) {
+        console.error("Error parsing Gemini response for plan:", parseError, "Raw response:", cleanedPlanResponseString);
+        return res.status(500).json({ error: "Failed to parse plan from Gemini.", details: parseError.message, rawResponse: cleanedPlanResponseString, originalTask: userTask });
+      }
 
-        let firstStepExecutionResult = null;
-        let executionError = null;
+      if (!Array.isArray(planArray) || planArray.length === 0) {
+        console.error("Gemini generated an empty or invalid plan:", cleanedPlanResponseString);
+        return res.status(500).json({ error: "Failed to generate a valid plan.", details: "Gemini returned an empty or invalid plan.", rawResponse: cleanedPlanResponseString, originalTask: userTask });
+      }
 
-        try {
-          firstStepExecutionResult = await callGemini(executionPrompt);
-        } catch (execError) {
-          console.error("Error calling callGemini for step execution:", execError);
-          executionError = `Failed to execute first step: ${execError.message}`;
+      // Execution Loop Stage (New)
+      const executionLog = [];
+      let contextSummaryForNextStep = "No previous steps executed yet.\n\n"; // Initial context
+
+      for (const stepDescription of planArray) {
+        if (typeof stepDescription !== 'string' || !stepDescription.trim()) {
+          console.warn("Skipping invalid step in plan:", stepDescription);
+          executionLog.push({ step: String(stepDescription), error: "Invalid step description in plan.", status: "skipped" });
+          continue;
         }
 
-        res.json({
-          plan: planArray,
-          executedStep: firstStep,
-          firstStepExecutionResult: firstStepExecutionResult,
-          executionError: executionError
-        });
+        // Ensure contextSummaryForNextStep does not grow excessively (optional simple check)
+        // For this subtask, we'll keep it simple and not truncate aggressively.
+        // A more advanced solution might summarize if it exceeds a token limit.
 
-      } else if (Array.isArray(planArray) && planArray.length === 0) {
-        console.error("Gemini generated an empty plan:", cleanedResponseString);
-        res.status(500).json({ error: "Failed to generate a valid plan.", details: "Gemini returned an empty plan.", rawResponse: cleanedResponseString });
-      } else {
-        console.error("Gemini response was not a JSON array:", cleanedResponseString);
-        res.status(500).json({ error: "Failed to generate a valid plan.", details: "Gemini response was not a JSON array.", rawResponse: geminiResponseString });
+        // Refined Step Execution Prompt
+        const executionPrompt = `Original task: '${userTask}'.\n\nContext from previous completed steps:\n${contextSummaryForNextStep}\nConsidering the 'Original task' and the 'Context from previous completed steps', provide a concise output for successfully completing the current step: '${stepDescription}'. Focus only on the output for this specific step.`;
+
+        try {
+          const stepResultText = await callGemini(executionPrompt);
+          executionLog.push({ step: stepDescription, result: stepResultText, status: "completed" });
+          // Append structured context
+          contextSummaryForNextStep += `Summary of step "${stepDescription}": ${stepResultText}\n\n`;
+        } catch (stepError) {
+          console.error(`Error calling callGemini for step execution ('${stepDescription}'):`, stepError);
+          executionLog.push({ step: stepDescription, error: stepError.message || "Unknown error during step execution.", status: "failed" });
+          break; // Terminate loop on first failure
+        }
       }
-    } catch (parseError) {
-      console.error("Error parsing Gemini response for plan:", parseError, "Raw response:", cleanedResponseString);
-      res.status(500).json({ error: "Failed to parse plan from Gemini.", details: parseError.message, rawResponse: cleanedResponseString });
+
+      res.json({
+        originalTask: userTask,
+        plan: planArray,
+        executionLog: executionLog
+      });
+
+    } catch (planningError) { // Catches errors from the first callGemini (planning) or initial parsing
+      console.error("Error in planning stage of /api/generate-plan:", planningError);
+      res.status(500).json({ error: "Failed to generate plan due to an internal error.", details: planningError.message, originalTask: userTask });
     }
-  } catch (error) {
-    // This catches errors from the first callGemini (planning)
-    console.error("Error calling callGemini in /api/generate-plan for planning:", error);
-    res.status(500).json({ error: "Failed to generate plan due to an internal error.", details: error.message });
+  } catch (initialError) { // Catches errors if genAI is not initialized, or userTask is missing
+    console.error("Initial error in /api/generate-plan:", initialError);
+    res.status(500).json({ error: "Failed to process request due to a setup or configuration issue.", details: initialError.message });
   }
 });
 

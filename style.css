@@ -97,3 +97,52 @@ button:hover {
   border: 1px solid #ddd;
   border-radius: 4px;
 }
+
+/* Execution Log Styling */
+.execution-log {
+  list-style-type: none; /* Remove default bullets */
+  padding-left: 0;
+}
+
+.execution-log li {
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid #eee;
+  border-radius: 4px;
+  background-color: #f9f9f9;
+}
+
+.execution-log strong { /* For "Step:" label */
+  font-weight: bold;
+}
+
+.status {
+  font-weight: bold;
+}
+.status.completed {
+  color: #28a745; /* Green */
+}
+.status.failed {
+  color: #dc3545; /* Red */
+}
+.status.skipped {
+  color: #6c757d; /* Gray */
+}
+
+.log-result, .log-error, .log-skipped {
+  margin-top: 5px;
+  padding-left: 10px;
+  border-left: 3px solid; /* Default border, color set by specific class */
+}
+
+.log-result {
+  border-left-color: #28a745; /* Green */
+}
+
+.log-error {
+  border-left-color: #dc3545; /* Red */
+}
+
+.log-skipped {
+  border-left-color: #6c757d; /* Gray */
+}
