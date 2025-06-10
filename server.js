@@ -6,6 +6,13 @@ const { GoogleGenerativeAI } = require('@google/generative-ai'); // Added for Ge
 const axios = require('axios'); // Added for WebSearchTool
 const math = require('mathjs'); // Added for CalculatorTool
 // const he = require('he'); // Skipped due to npm install issues in this environment
+const { v4: uuidv4 } = require('uuid'); // For parentTaskIds
+
+const SubTaskQueue = require('./core/SubTaskQueue');
+const ResultsQueue = require('./core/ResultsQueue');
+const OrchestratorAgent = require('./agents/OrchestratorAgent');
+const UtilityAgent = require('./agents/UtilityAgent');
+
 const app = express();
 const port = 3000;
 
@@ -734,6 +741,52 @@ app.post('/api/generate-plan', async (req, res) => {
     res.status(500).json({ message: "An unexpected server error occurred.", details: unexpectedError.message, context: { originalTask: userTask } });
   }
 });
+
+// --- Multi-Agent System Setup ---
+const subTaskQueue = new SubTaskQueue();
+const resultsQueue = new ResultsQueue();
+
+// Instantiate tools for worker agents
+const calculatorTool = new CalculatorTool();
+// Potentially other tools here: const webSearchTool = new WebSearchTool(); etc.
+
+const toolsForUtilityAgent = {
+  "CalculatorTool": calculatorTool
+  // Add other tools specific to UtilityAgent if any
+};
+// const toolsForResearchAgent = { "WebSearchTool": webSearchTool, "ReadWebpageTool": readWebpageTool }; // Example
+
+// Instantiate Agents
+const orchestratorApiKeys = { gemini: process.env.GEMINI_API_KEY };
+const utilityAgentApiKeys = {}; // UtilityAgent using CalculatorTool doesn't need keys for it
+
+const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, callGemini /* llmService */, orchestratorApiKeys);
+const utilityAgent = new UtilityAgent(subTaskQueue, resultsQueue, toolsForUtilityAgent, utilityAgentApiKeys);
+// const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, toolsForResearchAgent, researchAgentApiKeys); // Example
+
+// Start Worker Agents
+utilityAgent.startListening();
+// researchAgent.startListening(); // Example
+
+// --- New API Endpoint for Multi-Agent Task Processing ---
+app.post('/api/v2/process-task', async (req, res) => {
+  const userTask = req.body.task;
+  if (!userTask) {
+    // Using the standardized error structure
+    return res.status(400).json({ message: "Task is required in the request body.", context: { originalTask: userTask || null } });
+  }
+  const parentTaskId = uuidv4();
+  try {
+    console.log(`API: Received task for /api/v2/process-task, parentTaskId: ${parentTaskId}`);
+    const result = await orchestratorAgent.handleUserTask(userTask, parentTaskId);
+    res.json(result);
+  } catch (error) {
+    console.error(`API Error for /api/v2/process-task, parentTaskId ${parentTaskId}:`, error);
+    // Using the standardized error structure
+    res.status(500).json({ message: "Failed to process task due to an internal server error.", details: error.message, context: { originalTask: userTask, parentTaskId: parentTaskId } });
+  }
+});
+
 
 app.listen(port, () => {
   console.log(`Server listening on port ${port}`);
