@@ -1,6 +1,7 @@
 const express = require('express');
 const path = require('path');
 const { GoogleGenerativeAI } = require('@google/generative-ai'); // Added for Gemini
+const axios = require('axios'); // Added for WebSearchTool
 const app = express();
 const port = 3000;
 
@@ -33,36 +34,54 @@ async function callGemini(promptString) {
   }
 }
 
-// --- Tool Definition: WebSearchSimulatorTool ---
-class WebSearchSimulatorTool {
-  async execute(inputObject) {
-    if (!inputObject || typeof inputObject.query !== 'string') {
-      return { result: null, error: "Invalid input: query string is required." };
+// --- Tool Definition: WebSearchTool ---
+class WebSearchTool {
+  constructor() {
+    this.apiKey = process.env.SEARCH_API_KEY;
+    this.cseId = process.env.CSE_ID;
+
+    if (!this.apiKey || !this.cseId) {
+      console.warn("WebSearchTool: SEARCH_API_KEY or CSE_ID environment variable is missing. Web searches will fail.");
+    }
+  }
+
+  async execute({ query }) { // Destructure query from input object
+    if (!this.apiKey || !this.cseId) {
+      return { result: null, error: "WebSearchTool is not configured due to missing API key or CSE ID." };
+    }
+    if (!query || typeof query !== 'string' || !query.trim()) {
+        return { result: null, error: "Invalid input: query string is required for WebSearchTool." };
     }
 
-    const originalQuery = inputObject.query;
-    const query = originalQuery.toLowerCase();
+    const searchUrl = 'https://www.googleapis.com/customsearch/v1';
+    const params = {
+      key: this.apiKey,
+      cx: this.cseId,
+      q: query,
+      num: 5 // Get up to 5 results
+    };
 
-    if (query.includes("history of ai") || query.includes("ai history")) {
-      return {
-        result: "Simulated Search Result: The history of AI dates back to antiquity, with philosophical roots. Modern AI began in the mid-20th century with pioneers like Alan Turing, John McCarthy, and Marvin Minsky. Key milestones include the Dartmouth Workshop, expert systems, machine learning, and deep learning breakthroughs.",
-        error: null
-      };
-    } else if (query.includes("latest ai breakthroughs") || query.includes("recent ai news")) {
-      return {
-        result: "Simulated Search Result: Recent AI breakthroughs (as of early 2024) include advancements in large language models (LLMs) like GPT-4 and Gemini, generative AI for images and video, and applications in scientific discovery (e.g., protein folding). Ethical considerations and AI safety remain key discussion points.",
-        error: null
-      };
-    } else if (query.includes("what is langgraph")) {
-      return {
-        result: "Simulated Search Result: LangGraph is a library for building stateful, multi-actor applications with LLMs. It allows developers to define agentic workflows as graphs, where nodes represent computations (often LLM calls or tool uses) and edges represent the flow of state.",
-        error: null
-      };
-    } else {
-      return {
-        result: `Simulated Search Result: Your query '${originalQuery}' did not match any specific predefined results. This is a simulated search; in a real system, this would search the web.`,
-        error: null
-      };
+    try {
+      const response = await axios.get(searchUrl, { params: params });
+
+      if (response.data && response.data.items && response.data.items.length > 0) {
+        const formattedResults = response.data.items
+          .map(item => `Title: ${item.title}\nSnippet: ${item.snippet}\n\n`)
+          .join('');
+        return { result: formattedResults.trim(), error: null };
+      } else if (response.data && response.data.error) {
+        console.error('Google Search API Error:', response.data.error);
+        return { result: null, error: `Google Search API Error: ${response.data.error.message || 'Unknown API error'}` };
+      } else {
+        return { result: "No search results found.", error: null };
+      }
+    } catch (error) {
+      console.error('Error fetching web search results:', error.message);
+      if (error.response && error.response.data && error.response.data.error) {
+        // Handle errors returned by the Google API itself (e.g., bad API key, quota exceeded)
+        return { result: null, error: `Google Search API Error: ${error.response.data.error.message || 'Failed to fetch search results'}` };
+      }
+      return { result: null, error: `Failed to fetch search results: ${error.message}` };
     }
   }
 }
@@ -98,11 +117,11 @@ app.get('/test-gemini', async (req, res) => {
 async function generatePlanWithGemini(userTask, callGeminiFunc) {
   const tools = [
     { name: "GeminiStepExecutor", description: "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate." },
-    { name: "WebSearchSimulator", description: "Useful for finding specific information, facts, or emulating a web search for a query." }
+    { name: "WebSearchTool", description: "Useful for finding specific, real-time information or facts from the web. Input should be a search query." } // Updated tool name and description
   ];
 
   const toolsDescriptionString = tools.map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
-  const toolNamesArrayStringified = tools.map(tool => `"${tool.name}"`).join(", ");
+  const toolNamesArrayStringified = tools.map(tool => `"${tool.name}"`).join(", "); // This will now include "WebSearchTool"
 
   const planningPrompt = `User task: '${userTask}'.
 You have the following tools available:
@@ -123,8 +142,8 @@ Example for a task like 'Research impacts of remote work and summarize findings'
   {
     "stage": 1,
     "steps": [
-      { "stepDescription": "Search for articles on productivity in remote work", "toolName": "WebSearchSimulator" },
-      { "stepDescription": "Search for articles on team collaboration in remote work", "toolName": "WebSearchSimulator" }
+      { "stepDescription": "Search for articles on productivity in remote work", "toolName": "WebSearchTool" }, // Updated example
+      { "stepDescription": "Search for articles on team collaboration in remote work", "toolName": "WebSearchTool" } // Updated example
     ]
   },
   {
@@ -220,10 +239,10 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
   let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
 
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
-  const searchSimulator = new WebSearchSimulatorTool();
+  const webSearchTool = new WebSearchTool(); // Instantiate the new WebSearchTool
   const availableTools = {
     "GeminiStepExecutor": geminiExecutor,
-    "WebSearchSimulator": searchSimulator
+    "WebSearchTool": webSearchTool // Use the new tool and its correct name
   };
 
   // Outer loop for stages
@@ -267,11 +286,14 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
       let currentStepOutcome;
       try {
         if (toolName === "GeminiStepExecutor") {
-          currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep); // All parallel steps in this stage get same initial context
-        } else if (toolName === "WebSearchSimulator") {
+          currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
+        } else if (toolName === "WebSearchTool") { // Updated to WebSearchTool
           currentStepOutcome = await selectedTool.execute({ query: stepDescription });
         } else {
-          currentStepOutcome = { result: null, error: `Tool execution logic not implemented for ${toolName}` };
+          // This case should ideally be caught by the unknown tool check earlier,
+          // but as a safeguard:
+          console.error(`Attempted to execute unhandled tool: ${toolName}`);
+          currentStepOutcome = { result: null, error: `Unhandled tool: ${toolName}` };
         }
         return { originalStep: planStep, outcome: currentStepOutcome, success: !currentStepOutcome.error };
       } catch (toolError) {
