@@ -13,7 +13,7 @@ This project is a Node.js-based AI agent that leverages the Google Gemini API to
     *   **WebSearchTool:** For performing real-time web searches using the Google Custom Search Engine API to gather information.
 *   **Staged and Parallel Execution:** Plans are structured into stages. Steps within the same stage can be executed in parallel, while subsequent stages depend on the completion of prior ones.
 *   **Contextual Memory:** Information and results from completed steps are carried forward as context for subsequent steps, enabling more coherent and informed execution.
-*   **Web Interface:** A simple browser-based UI for submitting tasks and viewing the agent's plan and execution log.
+*   **Web Interface:** A simple browser-based UI for submitting tasks and viewing the agent's plan and execution log. (Note: A newer React-based frontend is under development in the `frontend/` directory).
 
 ## Technology Stack
 
@@ -21,6 +21,7 @@ This project is a Node.js-based AI agent that leverages the Google Gemini API to
 *   **LLM:** Google Gemini API (via `@google/generative-ai`)
 *   **Web Search:** Google Custom Search Engine (CSE) API (via `axios`)
 *   **HTTP Client:** Axios
+*   **Frontend (New):** React, Vite, Tailwind CSS, Shadcn/UI
 
 ## Setup and Installation
 
@@ -33,9 +34,15 @@ This project is a Node.js-based AI agent that leverages the Google Gemini API to
 
 1.  Clone this repository (if you haven't already).
 2.  Navigate to the project directory.
-3.  Install dependencies:
+3.  Install backend dependencies:
     ```bash
     npm install
+    ```
+4.  (Optional) For the new frontend, navigate to the `frontend` directory and install its dependencies:
+    ```bash
+    cd frontend
+    npm install
+    cd ..
     ```
 
 ### Environment Variables
@@ -59,15 +66,40 @@ CSE_ID="YOUR_CSE_ID_HERE"
 
 ## Running the Application
 
+### Backend Server (Old UI)
+
 1.  Ensure your environment variables are set correctly.
 2.  Open your terminal in the project root directory.
 3.  Run the server:
     ```bash
     node server.js
     ```
-4.  The application will typically be accessible at `http://localhost:3000` in your web browser.
+4.  The original application with the basic HTML interface will typically be accessible at `http://localhost:3000` in your web browser.
 
-## How to Use
+### New Frontend (React + Vite + Tailwind + Shadcn/UI)
+
+This is a new, more advanced UI under development, located in the `frontend/` directory.
+
+To run the new frontend development server:
+
+1.  Navigate to the frontend directory:
+    ```bash
+    cd frontend
+    ```
+2.  Install dependencies (if you haven't already from the main setup, or if `frontend/package.json` changed):
+    ```bash
+    npm install
+    ```
+3.  Start the Vite development server:
+    ```bash
+    npm run dev
+    ```
+4.  The frontend will typically be available at `http://localhost:5173` (or another port indicated by Vite).
+5.  **Note:** The backend server (`node server.js` run from the root directory) must also be running for the new frontend to eventually fetch data from its API endpoints (e.g., `/api/generate-plan`).
+
+## How to Use (Old UI)
+
+The instructions below apply to the original UI served from `http://localhost:3000` by `server.js`.
 
 1.  Open your web browser and navigate to `http://localhost:3000`.
 2.  You will see an input field labeled "Enter Task:".
