@@ -310,28 +310,70 @@ class GeminiStepExecutorTool {
   }
 }
 
-// --- Actual handleReplanning function ---
+// --- Actual handleReplanning function (Two-Stage Recovery) ---
 async function handleReplanning(originalTask, originalPlanStagesArray, executionLogSoFar, failedStepDetails, callGeminiFunc, availableToolsMap) {
-  // Reconstruct tool definitions based on the keys in availableToolsMap for the prompt
-  // This assumes a standard description or fetching descriptions if they were stored elsewhere.
-  // For simplicity, using generic descriptions here if not easily available.
-  const toolDefinitions = Object.keys(availableToolsMap).map(name => {
-    let description = "A tool to help achieve the task.";
+  const currentToolNames = Object.keys(availableToolsMap);
+  const toolDefinitions = currentToolNames.map(name => {
+    let description = "A general-purpose tool.";
     if (name === "GeminiStepExecutor") description = "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate.";
     else if (name === "WebSearchTool") description = "Useful for finding specific, real-time information or facts from the web. Input should be a search query.";
     else if (name === "CalculatorTool") description = "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm').";
     return { name, description };
   });
-  const currentToolNames = Object.keys(availableToolsMap);
-
-  const toolsDescriptionString = toolDefinitions
-    .map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
+  const toolsDescriptionString = toolDefinitions.map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
   const toolNamesArrayStringified = currentToolNames.map(name => `"${name}"`).join(", ");
+  const recentLogEntries = executionLogSoFar.slice(-3); // Last 3 entries for context
 
-  // Show last 5 log entries for brevity in the prompt, or fewer if not available.
-  const recentLogEntries = executionLogSoFar.slice(-5);
+  // Stage 1: Attempt Focused Step Fix
+  const fixPrompt = `You are an AI assistant. The user wants to achieve: '${originalTask}'.
+A previous plan execution failed. Here's the context:
+Failed Step Details:
+  Stage: ${failedStepDetails.stage}
+  Description: "${failedStepDetails.stepDescription}"
+  Tool Used: ${failedStepDetails.toolName}
+  Error: "${failedStepDetails.error}"
+Recent Execution History (last few steps):
+${JSON.stringify(recentLogEntries, null, 2)}
 
-  const replanningPrompt = `You are an AI assistant helping a user achieve a task.
+Available Tools:
+        ${toolsDescriptionString}
+
+Suggest a short replacement plan segment (e.g., 1 stage with 1-2 steps, in the standard JSON stage/step format described below) to specifically overcome or work around the described failure. The goal is to fix or replace *only* the failed step or its immediate blocker, allowing the original plan to potentially resume.
+If a direct fix for this step is not possible or requires more than 2 steps, return an empty JSON array \`[]\`.
+
+Output Format (JSON array of stages):
+Each stage object must have 'stage' (integer, starting from 1 for this segment) and 'steps' (array of step objects). Each step object must have 'stepDescription' (string) and 'toolName' (string from [${toolNamesArrayStringified}]).
+Ensure the output is *only* the JSON array.`;
+
+  let fixAttemptResponseString = "";
+  try {
+    console.log("Attempting focused step fix with prompt:", fixPrompt);
+    fixAttemptResponseString = await callGeminiFunc(fixPrompt);
+    const parsedFixResult = await parseStagedPlanResponse(fixAttemptResponseString, currentToolNames);
+
+    if (parsedFixResult.success) {
+      if (parsedFixResult.planStagesArray.length > 0) {
+        const totalStepsInFix = parsedFixResult.planStagesArray.reduce((sum, stage) => sum + stage.steps.length, 0);
+        if (totalStepsInFix > 0 && totalStepsInFix <= 2) {
+          console.log("Focused step fix successful, new plan segment generated:", JSON.stringify(parsedFixResult.planStagesArray, null, 2));
+          return { success: true, recoveryType: "FIX", planSegment: parsedFixResult.planStagesArray };
+        } else {
+          console.log("Focused step fix proposed a plan segment that was too long or empty, proceeding to full replan. Fix steps:", totalStepsInFix);
+        }
+      } else {
+        console.log("Focused step fix returned an empty plan, proceeding to full replan.");
+      }
+    } else {
+      console.warn("Failed to parse focused step fix response, proceeding to full replan. Error:", parsedFixResult.message, "Raw:", parsedFixResult.rawResponse);
+    }
+  } catch (error) {
+    console.warn("Error during focused step fix API call, proceeding to full replan:", error.message);
+    // Proceed to full replan if fix attempt itself errors out (e.g. timeout)
+  }
+
+  // Stage 2: Fallback to Full Replan
+  console.log("Focused step fix failed or was not feasible, attempting full replan.");
+  const fullReplanPrompt = `You are an AI assistant helping a user achieve a task.
 Original user task: '${originalTask}'
 
 The initial plan you (or another AI) devised was:
@@ -353,23 +395,24 @@ You have the following tools available:
 Each stage object in the array must have 'stage' (integer, starting from 1 for the new plan segment) and 'steps' (array of step objects). Each step object must have 'stepDescription' (string) and 'toolName' (string from [${toolNamesArrayStringified}]).
 Ensure the output is only the JSON array of stages. The new plan should ideally start from a point that makes sense given the successful execution history, or be a full new plan if necessary. The stage numbering for the new plan should restart from 1.`;
 
-  let replanResponseString = "";
+  let fullReplanResponseString = "";
   try {
-    console.log("Attempting replanning with prompt:", replanningPrompt); // Log the prompt for debugging
-    replanResponseString = await callGeminiFunc(replanningPrompt);
-    const parsedResult = await parseStagedPlanResponse(replanResponseString, currentToolNames);
+    console.log("Attempting full replan with prompt:", fullReplanPrompt);
+    fullReplanResponseString = await callGeminiFunc(fullReplanPrompt);
+    const parsedFullReplanResult = await parseStagedPlanResponse(fullReplanResponseString, currentToolNames);
 
-    if (parsedResult.success) {
-      console.log("Replanning successful, new plan generated:", JSON.stringify(parsedResult.planStagesArray, null, 2));
-      return { success: true, newPlanStagesArray: parsedResult.planStagesArray };
+    if (parsedFullReplanResult.success && parsedFullReplanResult.planStagesArray.length > 0) {
+      console.log("Full replanning successful, new plan generated:", JSON.stringify(parsedFullReplanResult.planStagesArray, null, 2));
+      return { success: true, recoveryType: "FULL_REPLAN", planSegment: parsedFullReplanResult.planStagesArray };
     } else {
-      console.error("Failed to parse replanned stages:", parsedResult.message, parsedResult.details, "Raw replan response:", parsedResult.rawResponse);
-      return { success: false, error: parsedResult.message || "Failed to generate a valid recovery plan.", details: parsedResult.details, newPlanStagesArray: [], rawResponse: parsedResult.rawResponse };
+      const errorMessage = parsedFullReplanResult.success ? "Full replan resulted in an empty plan." : parsedFullReplanResult.message;
+      console.error("Full replanning failed:", errorMessage, parsedFullReplanResult.details, "Raw response:", parsedFullReplanResult.rawResponse);
+      return { success: false, error: errorMessage || "Full replanning failed to generate a valid plan.", recoveryType: "NONE", newPlanStagesArray: [], details: parsedFullReplanResult.details, rawResponse: parsedFullReplanResult.rawResponse };
     }
   } catch (error) { // Catches errors from callGeminiFunc (e.g. timeout)
-    console.error("Error during replanning API call:", error.message);
-    const message = error.message.includes("Gemini API call timed out") ? "Replanning failed: Gemini API call timed out." : "Replanning failed due to an API error.";
-    return { success: false, error: message, details: error.message, newPlanStagesArray: [], rawResponse: replanResponseString };
+    console.error("Error during full replanning API call:", error.message);
+    const message = error.message.includes("Gemini API call timed out") ? "Full replanning failed: Gemini API call timed out." : "Full replanning failed due to an API error.";
+    return { success: false, error: message, recoveryType: "NONE", newPlanStagesArray: [], details: error.message, rawResponse: fullReplanResponseString };
   }
 }
 
@@ -377,102 +420,58 @@ Ensure the output is only the JSON array of stages. The new plan should ideally 
 async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replanningAttempted = false, initialContextSummary = null) {
   const overallExecutionLog = [];
   let contextSummaryForNextStep = initialContextSummary !== null ? initialContextSummary : "No previous steps executed yet.\n\n";
+  let allOriginalStagesCompleted = true; // Tracks if the current plan (original or replan segment) completes
 
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
   const webSearchTool = new WebSearchTool();
-  const calculatorTool = new CalculatorTool(); // Instantiate CalculatorTool
+  const calculatorTool = new CalculatorTool();
   const availableTools = {
     "GeminiStepExecutor": geminiExecutor,
     "WebSearchTool": webSearchTool,
-    "CalculatorTool": calculatorTool // Add CalculatorTool to available tools
+    "CalculatorTool": calculatorTool
   };
 
-  // Outer loop for stages
-  for (const stageObj of planStagesArray) {
+  for (let stageIndex = 0; stageIndex < planStagesArray.length; stageIndex++) {
+    const stageObj = planStagesArray[stageIndex];
     const currentStageNumber = stageObj.stage;
     const stepsInStage = stageObj.steps;
     let stageFailed = false;
-    const contextBeforeThisStage = contextSummaryForNextStep; // Capture context before this stage's results are added
+    const contextBeforeThisStage = contextSummaryForNextStep;
 
     if (!Array.isArray(stepsInStage) || stepsInStage.length === 0) {
       console.warn(`Stage ${currentStageNumber} has no steps or invalid steps array. Skipping.`);
-      overallExecutionLog.push({
-        stage: currentStageNumber,
-        step: "Stage Validation",
-        tool: "System",
-        status: "skipped",
-        error: "Stage has no steps or invalid steps array."
-      });
+      overallExecutionLog.push({ stage: currentStageNumber, step: "Stage Validation", tool: "System", status: "skipped", error: "Stage has no steps or invalid steps array." });
       continue;
     }
 
-    // 3. Parallel Execution of Steps within a Stage
     const stepPromises = stepsInStage.map(async (planStep) => {
       const stepDescription = planStep.stepDescription;
       const toolName = planStep.toolName;
-
-      // Validate individual planStep structure
-      if (typeof stepDescription !== 'string' || !stepDescription.trim() ||
-          typeof toolName !== 'string' || !toolName.trim()) {
-        console.warn("Skipping invalid plan step object in stage:", planStep);
-        return {
-          originalStep: { stepDescription: String(stepDescription || "Invalid step"), toolName: String(toolName || "N/A") },
-          outcome: { error: "Invalid step object structure. Missing/empty stepDescription or toolName." },
-          success: false
-        };
+      if (typeof stepDescription !== 'string' || !stepDescription.trim() || typeof toolName !== 'string' || !toolName.trim()) {
+        return { originalStep: { stepDescription: String(stepDescription || "Invalid step"), toolName: String(toolName || "N/A") }, outcome: { error: "Invalid step object structure." }, success: false };
       }
-
       const selectedTool = availableTools[toolName];
       if (!selectedTool) {
-        console.error(`Unknown tool specified in plan: ${toolName} for step: "${stepDescription}"`);
-        return {
-          originalStep: planStep,
-          outcome: { error: `Unknown tool specified: ${toolName}` },
-          success: false
-        };
+        return { originalStep: planStep, outcome: { error: `Unknown tool specified: ${toolName}` }, success: false };
       }
-
-      let currentStepOutcome;
       try {
-        if (toolName === "GeminiStepExecutor") {
-          currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
-        } else if (toolName === "WebSearchTool") {
-          currentStepOutcome = await selectedTool.execute({ query: stepDescription });
-        } else if (toolName === "CalculatorTool") {
-          currentStepOutcome = await selectedTool.execute({ expression: stepDescription }); // Pass expression for CalculatorTool
-        } else {
-          console.error(`Attempted to execute unhandled tool: ${toolName}`);
-          currentStepOutcome = { result: null, error: `Unhandled tool: ${toolName}` };
-        }
+        let currentStepOutcome;
+        if (toolName === "GeminiStepExecutor") currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
+        else if (toolName === "WebSearchTool") currentStepOutcome = await selectedTool.execute({ query: stepDescription });
+        else if (toolName === "CalculatorTool") currentStepOutcome = await selectedTool.execute({ expression: stepDescription });
+        else currentStepOutcome = { result: null, error: `Unhandled tool: ${toolName}` };
         return { originalStep: planStep, outcome: currentStepOutcome, success: !currentStepOutcome.error };
       } catch (toolError) {
-        console.error(`Error during ${toolName}.execute() for step "${stepDescription}":`, toolError);
-        return {
-          originalStep: planStep,
-          outcome: { error: toolError.message || "An unexpected error occurred during tool execution." },
-          success: false
-        };
+        return { originalStep: planStep, outcome: { error: toolError.message || "Tool execution error." }, success: false };
       }
     });
 
-    // Wait for all steps in the current stage to complete (or fail individually)
     const stageStepResults = await Promise.all(stepPromises);
-
-    // 4. Handling Results and Context from Parallel Stage
-    let stageContextAccumulator = ""; // Accumulate context from successful steps in this stage
+    let stageContextAccumulator = "";
 
     for (const stepResult of stageStepResults) {
       const { originalStep, outcome, success } = stepResult;
-      const logEntry = {
-        stage: currentStageNumber,
-        step: originalStep.stepDescription,
-        tool: originalStep.toolName,
-        status: success ? "completed" : "failed",
-        result: success ? outcome.result : null,
-        error: success ? null : outcome.error,
-      };
-      overallExecutionLog.push(logEntry);
-
+      overallExecutionLog.push({ stage: currentStageNumber, step: originalStep.stepDescription, tool: originalStep.toolName, status: success ? "completed" : "failed", result: success ? outcome.result : null, error: success ? null : outcome.error });
       if (success) {
         stageContextAccumulator += `Result from Stage ${currentStageNumber}, Step "${originalStep.stepDescription}" (using ${originalStep.toolName}): ${outcome.result}\n\n`;
       } else {
@@ -480,64 +479,65 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
       }
     }
 
-    // Append all context from this stage to the main context summary *after* all parallel steps are processed
     if (stageContextAccumulator) {
-        contextSummaryForNextStep += stageContextAccumulator;
+      contextSummaryForNextStep += stageContextAccumulator;
     }
 
     if (stageFailed) {
+      allOriginalStagesCompleted = false; // Current plan segment failed
       console.log(`Stage ${currentStageNumber} failed.`);
       if (replanningAttempted) {
-        console.log("Replanning was already attempted or new plan segment also failed. Halting execution.");
-        overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Halted", tool: "System", error: "Previous replanning attempt did not resolve the issue or new plan segment failed.", status: "system_error" });
-        break; // Terminate outer loop for stages
+        overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Halted", tool: "System", error: "Previous replanning attempt or its execution failed.", status: "system_error" });
+        break;
       } else {
-        const firstFailedStepResult = stageStepResults.find(r => !r.success);
-        const failedStepDetails = {
-          stage: currentStageNumber,
-          stepDescription: firstFailedStepResult.originalStep.stepDescription,
-          toolName: firstFailedStepResult.originalStep.toolName,
-          error: firstFailedStepResult.outcome.error,
-        };
+        const firstFailedStep = stageStepResults.find(r => !r.success);
+        const failedStepDetails = { stage: currentStageNumber, stepDescription: firstFailedStep.originalStep.stepDescription, toolName: firstFailedStep.originalStep.toolName, error: firstFailedStep.outcome.error };
+        overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Triggered", tool: "System", result: `Attempting to replan due to failure in step: '${failedStepDetails.stepDescription}'. Error: ${failedStepDetails.error}`, status: "system_action" });
 
-        overallExecutionLog.push({
-          stage: currentStageNumber,
-          step: "Replanning Triggered",
-          tool: "System",
-          result: `Attempting to replan due to failure in step: '${failedStepDetails.stepDescription}'. Error: ${failedStepDetails.error}`,
-          status: "system_action"
-        });
+        const recoveryOutcome = await handleReplanning(userTask, planStagesArray /* original full plan for context */, overallExecutionLog, failedStepDetails, callGeminiFunc, availableTools);
 
-        // Pass the availableTools map to handleReplanning
-        const replanResult = await handleReplanning(userTask, planStagesArray, overallExecutionLog, failedStepDetails, callGeminiFunc, availableTools);
+        if (recoveryOutcome.success && recoveryOutcome.planSegment && recoveryOutcome.planSegment.length > 0) {
+          overallExecutionLog.push({ stage: currentStageNumber, step: `Replanning Attempt Succeeded (${recoveryOutcome.recoveryType})`, tool: "System", result: "New plan segment generated. Attempting execution.", status: "system_action" });
 
-        if (replanResult.success && replanResult.newPlanStagesArray && replanResult.newPlanStagesArray.length > 0) {
-          overallExecutionLog.push({
-            stage: currentStageNumber, // Log under current stage for context
-            step: "Replanning Successful",
-            tool: "System",
-            result: "New plan segment generated. Attempting execution of new plan segment.",
-            status: "system_action"
-          });
+          let recoveryExecutionResult;
+          if (recoveryOutcome.recoveryType === "FIX") {
+            overallExecutionLog.push({ stage: currentStageNumber, step: "Executing Step Fix", tool: "System", result: `Attempting to execute ${recoveryOutcome.planSegment.length} stage(s) as a fix.`, status: "system_action" });
+            recoveryExecutionResult = await executePlanLoop(userTask, recoveryOutcome.planSegment, callGeminiFunc, true, contextBeforeThisStage);
+            overallExecutionLog.push(...recoveryExecutionResult.log);
+            contextSummaryForNextStep = recoveryExecutionResult.finalContext;
 
-          // Execute the new plan segment, passing the context from *before* the failed stage
-          const newPlanExecutionLog = await executePlanLoop(userTask, replanResult.newPlanStagesArray, callGeminiFunc, true, contextBeforeThisStage);
-          overallExecutionLog.push(...newPlanExecutionLog); // Append results of the new plan
-        } else {
-          overallExecutionLog.push({
-            stage: currentStageNumber,
-            step: "Replanning Failed",
-            tool: "System",
-            error: replanResult.error || "No new plan generated or new plan was empty.",
-            status: "system_error"
-          });
-          console.log("Replanning failed or no new plan was generated. Terminating further plan execution.");
+            if (recoveryExecutionResult.allStepsCompletedSuccessfully) {
+              const originalPlanRemainder = planStagesArray.slice(stageIndex + 1);
+              if (originalPlanRemainder.length > 0) {
+                overallExecutionLog.push({ stage: currentStageNumber, step: "Step Fix Successful", tool: "System", result: "Attempting to resume original plan.", status: "system_action" });
+                const remainderExecutionResult = await executePlanLoop(userTask, originalPlanRemainder, callGeminiFunc, true, contextSummaryForNextStep);
+                overallExecutionLog.push(...remainderExecutionResult.log);
+                contextSummaryForNextStep = remainderExecutionResult.finalContext;
+                allOriginalStagesCompleted = remainderExecutionResult.allStepsCompletedSuccessfully; // Overall success now depends on remainder
+              } else {
+                allOriginalStagesCompleted = true; // Fix was successful and no remainder
+              }
+            } else {
+              overallExecutionLog.push({ stage: currentStageNumber, step: "Step Fix Failed", tool: "System", error: "The implemented fix also failed.", status: "system_error" });
+              allOriginalStagesCompleted = false;
+            }
+          } else if (recoveryOutcome.recoveryType === "FULL_REPLAN") {
+            overallExecutionLog.push({ stage: currentStageNumber, step: "Executing Full Replan", tool: "System", result: `Attempting to execute new ${recoveryOutcome.planSegment.length}-stage plan.`, status: "system_action" });
+            recoveryExecutionResult = await executePlanLoop(userTask, recoveryOutcome.planSegment, callGeminiFunc, true, contextBeforeThisStage);
+            overallExecutionLog.push(...recoveryExecutionResult.log);
+            contextSummaryForNextStep = recoveryExecutionResult.finalContext;
+            allOriginalStagesCompleted = recoveryExecutionResult.allStepsCompletedSuccessfully;
+          }
+        } else { // Replanning itself failed (e.g., no plan generated, API error during replan)
+          overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Failed (System)", tool: "System", error: recoveryOutcome.error || "No recovery plan generated.", status: "system_error" });
+          allOriginalStagesCompleted = false;
         }
-        break; // Terminate processing of the *original* plan's further stages
+        break; // Stop processing original plan stages after a replan attempt (successful or not)
       }
     }
+    // If loop completes, allOriginalStagesCompleted remains true (if initialized true and no stageFailed)
   }
-  return overallExecutionLog;
+  return { log: overallExecutionLog, finalContext: contextSummaryForNextStep, allStepsCompletedSuccessfully: allOriginalStagesCompleted };
 }
 
 // --- Main API Endpoint ---
@@ -562,12 +562,16 @@ app.post('/api/generate-plan', async (req, res) => {
     }
     const planArray = planResult.plan;
 
-    const executionLog = await executePlanLoop(userTask, planArray, callGemini);
+    // Call executePlanLoop and get the structured response
+    const executionResult = await executePlanLoop(userTask, planArray, callGemini);
 
     res.json({
       originalTask: userTask,
-      plan: planArray,
-      executionLog: executionLog
+      plan: planArray, // This is the initial plan; executionLog might contain info about new plans
+      executionLog: executionResult.log, // The comprehensive log
+      // Optionally, include overall success status and final context if useful for client
+      // allStepsCompletedSuccessfully: executionResult.allStepsCompletedSuccessfully,
+      // finalContextSummary: executionResult.finalContext
     });
 
   } catch (unexpectedError) {
