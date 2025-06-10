@@ -12,6 +12,7 @@ const SubTaskQueue = require('./core/SubTaskQueue');
 const ResultsQueue = require('./core/ResultsQueue');
 const OrchestratorAgent = require('./agents/OrchestratorAgent');
 const UtilityAgent = require('./agents/UtilityAgent');
+const ResearchAgent = require('./agents/ResearchAgent'); // Require ResearchAgent
 
 const app = express();
 const port = 3000;
@@ -748,25 +749,30 @@ const resultsQueue = new ResultsQueue();
 
 // Instantiate tools for worker agents
 const calculatorTool = new CalculatorTool();
-// Potentially other tools here: const webSearchTool = new WebSearchTool(); etc.
+const webSearchTool = new WebSearchTool(); // Already defined, ensure it's here
+const readWebpageTool = new ReadWebpageTool(); // Already defined, ensure it's here
 
 const toolsForUtilityAgent = {
   "CalculatorTool": calculatorTool
-  // Add other tools specific to UtilityAgent if any
 };
-// const toolsForResearchAgent = { "WebSearchTool": webSearchTool, "ReadWebpageTool": readWebpageTool }; // Example
+
+const toolsForResearchAgent = {
+  "WebSearchTool": webSearchTool,
+  "ReadWebpageTool": readWebpageTool
+};
 
 // Instantiate Agents
 const orchestratorApiKeys = { gemini: process.env.GEMINI_API_KEY };
-const utilityAgentApiKeys = {}; // UtilityAgent using CalculatorTool doesn't need keys for it
+const utilityAgentApiKeys = {};
+const researchAgentApiKeys = {}; // ResearchAgent tools (WebSearch, ReadPage) handle their own keys via process.env
 
 const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, callGemini /* llmService */, orchestratorApiKeys);
 const utilityAgent = new UtilityAgent(subTaskQueue, resultsQueue, toolsForUtilityAgent, utilityAgentApiKeys);
-// const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, toolsForResearchAgent, researchAgentApiKeys); // Example
+const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, toolsForResearchAgent, researchAgentApiKeys);
 
 // Start Worker Agents
 utilityAgent.startListening();
-// researchAgent.startListening(); // Example
+researchAgent.startListening(); // Start ResearchAgent
 
 // --- New API Endpoint for Multi-Agent Task Processing ---
 app.post('/api/v2/process-task', async (req, res) => {
