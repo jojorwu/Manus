@@ -146,3 +146,10 @@ button:hover {
 .log-skipped {
   border-left-color: #6c757d; /* Gray */
 }
+
+.tool-name {
+  font-size: 0.9em;
+  font-style: italic;
+  color: #555;
+  margin-left: 5px;
+}

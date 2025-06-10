@@ -72,10 +72,11 @@ planButton.addEventListener('click', async () => {
       if (result.executionLog && Array.isArray(result.executionLog) && result.executionLog.length > 0) {
         result.executionLog.forEach(entry => {
           const logLi = document.createElement('li');
-          logLi.innerHTML = `<strong>Step:</strong> ${entry.step || 'N/A'}`;
+          // Display Step Description and Tool Name
+          logLi.innerHTML = `<strong>Step:</strong> ${entry.step || 'N/A'} <span class="tool-name">(using tool: ${entry.tool || 'N/A'})</span>`;
 
           const statusSpan = document.createElement('span');
-          statusSpan.classList.add('status', entry.status); // "status completed" or "status failed"
+          statusSpan.classList.add('status', entry.status); // "status completed", "status failed", or "status skipped"
           statusSpan.textContent = ` (${entry.status})`;
           logLi.appendChild(statusSpan);
 

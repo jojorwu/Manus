@@ -33,6 +33,40 @@ async function callGemini(promptString) {
   }
 }
 
+// --- Tool Definition: WebSearchSimulatorTool ---
+class WebSearchSimulatorTool {
+  async execute(inputObject) {
+    if (!inputObject || typeof inputObject.query !== 'string') {
+      return { result: null, error: "Invalid input: query string is required." };
+    }
+
+    const originalQuery = inputObject.query;
+    const query = originalQuery.toLowerCase();
+
+    if (query.includes("history of ai") || query.includes("ai history")) {
+      return {
+        result: "Simulated Search Result: The history of AI dates back to antiquity, with philosophical roots. Modern AI began in the mid-20th century with pioneers like Alan Turing, John McCarthy, and Marvin Minsky. Key milestones include the Dartmouth Workshop, expert systems, machine learning, and deep learning breakthroughs.",
+        error: null
+      };
+    } else if (query.includes("latest ai breakthroughs") || query.includes("recent ai news")) {
+      return {
+        result: "Simulated Search Result: Recent AI breakthroughs (as of early 2024) include advancements in large language models (LLMs) like GPT-4 and Gemini, generative AI for images and video, and applications in scientific discovery (e.g., protein folding). Ethical considerations and AI safety remain key discussion points.",
+        error: null
+      };
+    } else if (query.includes("what is langgraph")) {
+      return {
+        result: "Simulated Search Result: LangGraph is a library for building stateful, multi-actor applications with LLMs. It allows developers to define agentic workflows as graphs, where nodes represent computations (often LLM calls or tool uses) and edges represent the flow of state.",
+        error: null
+      };
+    } else {
+      return {
+        result: `Simulated Search Result: Your query '${originalQuery}' did not match any specific predefined results. This is a simulated search; in a real system, this would search the web.`,
+        error: null
+      };
+    }
+  }
+}
+
 // Middleware to parse JSON bodies and URL-encoded data
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -62,7 +96,27 @@ app.get('/test-gemini', async (req, res) => {
 
 // --- Helper Function 1: Generate Plan ---
 async function generatePlanWithGemini(userTask, callGeminiFunc) {
-  const planningPrompt = `User task: '${userTask}'. Break this down into a JSON array of short, actionable, and logically sequenced steps to achieve the task. The steps should be granular enough to be executed one by one. The output should be only the JSON array. For example, for 'Research the history of the internet', steps might be: ["Define scope of research", "Identify key milestones", "Find primary sources for early development", "Summarize findings into a timeline"].`;
+  const tools = [
+    { name: "GeminiStepExecutor", description: "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate." },
+    { name: "WebSearchSimulator", description: "Useful for finding specific information, facts, or emulating a web search for a query." }
+  ];
+
+  const toolsDescriptionString = tools.map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
+  const toolNamesArrayStringified = tools.map(tool => `"${tool.name}"`).join(", ");
+
+  const planningPrompt = `User task: '${userTask}'.
+You have the following tools available:
+        ${toolsDescriptionString}
+
+Break this down into a JSON array of objects to achieve the task. Each object must have two keys: 'stepDescription' (a string describing the action) and 'toolName' (a string: must be exactly one of [${toolNamesArrayStringified}]).
+The steps should be logically sequenced.
+Ensure the output is only the JSON array.
+Example for a task like 'Research and summarize the discovery of Penicillin':
+[
+  { "stepDescription": "Search for the history of Penicillin discovery", "toolName": "WebSearchSimulator" },
+  { "stepDescription": "Based on the search results, identify key scientists and dates.", "toolName": "GeminiStepExecutor" },
+  { "stepDescription": "Draft a summary of the Penicillin discovery story.", "toolName": "GeminiStepExecutor" }
+]`;
   let rawResponseFromGemini = "";
 
   try {
@@ -78,19 +132,35 @@ async function generatePlanWithGemini(userTask, callGeminiFunc) {
       cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
     }
 
-    const planArray = JSON.parse(cleanedPlanResponseString);
+    const parsedPlan = JSON.parse(cleanedPlanResponseString);
 
-    if (!Array.isArray(planArray) || planArray.length === 0) {
-      console.error("Gemini generated an empty or invalid plan array:", cleanedPlanResponseString);
-      return { success: false, message: "Generated plan is empty or invalid.", details: "Gemini returned an empty or invalid plan array.", rawResponse: cleanedPlanResponseString };
+    if (!Array.isArray(parsedPlan) || parsedPlan.length === 0) {
+      console.error("Gemini generated an empty or non-array plan:", cleanedPlanResponseString);
+      return { success: false, message: "Generated plan is empty or not an array.", details: "Gemini returned an empty or non-array plan.", rawResponse: cleanedPlanResponseString };
     }
-    return { success: true, plan: planArray, rawResponse: null }; // Indicate success
+
+    // Validate structure of each plan step
+    for (const step of parsedPlan) {
+      if (typeof step !== 'object' || step === null ||
+          typeof step.stepDescription !== 'string' || !step.stepDescription.trim() ||
+          typeof step.toolName !== 'string' || !step.toolName.trim()) {
+        console.error("Invalid step structure in plan:", step, "Full plan:", cleanedPlanResponseString);
+        return { success: false, message: "Generated plan contains invalid step structures.", details: "Each step must be an object with non-empty 'stepDescription' and 'toolName' strings.", rawResponse: cleanedPlanResponseString };
+      }
+      // Optional: Validate if step.toolName is one of the known tools
+      if (!tools.find(t => t.name === step.toolName)) {
+        console.warn("Plan contains a step with an unknown toolName:", step.toolName, "Step:", step);
+        // For now, we'll allow unknown tool names and let execution handle it,
+        // but one could return an error here if strict tool usage is required.
+      }
+    }
+
+    return { success: true, plan: parsedPlan, rawResponse: null }; // Indicate success
 
   } catch (error) { // Catches errors from callGeminiFunc or JSON.parse
     console.error("Error in generatePlanWithGemini:", error);
-    // Determine if the error is from parsing or from the API call itself
     const isParsingError = error instanceof SyntaxError;
-    const message = isParsingError ? "Failed to parse plan from Gemini." : "Failed to generate plan due to an API error.";
+    const message = isParsingError ? "Failed to parse tool-aware plan from Gemini." : "Failed to generate tool-aware plan due to an API error.";
     return { success: false, message: message, details: error.message, rawResponse: rawResponseFromGemini };
   }
 }
@@ -115,28 +185,68 @@ class GeminiStepExecutorTool {
   }
 }
 
-// --- Helper Function: Execute Plan Loop (now uses the tool) ---
+// --- Helper Function: Execute Plan Loop (with tool dispatch) ---
 async function executePlanLoop(userTask, planArray, callGeminiFunc) {
   const executionLog = [];
   let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
-  const stepExecutor = new GeminiStepExecutorTool(callGeminiFunc); // Instantiate the tool
 
-  for (const stepDescription of planArray) {
-    if (typeof stepDescription !== 'string' || !stepDescription.trim()) {
-      console.warn("Skipping invalid step in plan:", stepDescription);
-      executionLog.push({ step: String(stepDescription), error: "Invalid step description in plan.", status: "skipped" });
-      continue;
+  // 1. Instantiate Tools
+  const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
+  const searchSimulator = new WebSearchSimulatorTool(); // Does not need callGeminiFunc
+  const availableTools = {
+    "GeminiStepExecutor": geminiExecutor,
+    "WebSearchSimulator": searchSimulator
+  };
+
+  for (const planStep of planArray) { // planStep is an object: { stepDescription, toolName }
+    const stepDescription = planStep.stepDescription;
+    const toolName = planStep.toolName;
+
+    // Validate planStep structure (already partially done in generatePlanWithGemini, but good for robustness)
+    if (typeof stepDescription !== 'string' || !stepDescription.trim() ||
+        typeof toolName !== 'string' || !toolName.trim()) {
+      console.warn("Skipping invalid plan step object in executePlanLoop:", planStep);
+      executionLog.push({
+        step: String(stepDescription || "Invalid step object"),
+        tool: String(toolName || "N/A"),
+        error: "Invalid step object structure. Missing/empty stepDescription or toolName.",
+        status: "skipped"
+      });
+      continue; // Skip this invalid step
     }
 
-    // Call the tool's execute method
-    const stepOutcome = await stepExecutor.execute(userTask, stepDescription, contextSummaryForNextStep);
+    // 2. Select Tool
+    const selectedTool = availableTools[toolName];
+    if (!selectedTool) {
+      console.error(`Unknown tool specified in plan: ${toolName}`);
+      executionLog.push({ step: stepDescription, tool: toolName, error: `Unknown tool specified: ${toolName}`, status: "failed" });
+      break; // Terminate loop if tool is unknown, as plan execution cannot proceed reliably
+    }
 
+    // 3. Prepare Tool Input & Call Tool's execute Method
+    let stepOutcome;
+    try {
+      if (toolName === "GeminiStepExecutor") {
+        stepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
+      } else if (toolName === "WebSearchSimulator") {
+        stepOutcome = await selectedTool.execute({ query: stepDescription });
+      } else {
+        // This case should ideally be caught by the unknown tool check above
+        console.error(`Tool execution logic not implemented for ${toolName} in executePlanLoop`);
+        stepOutcome = { result: null, error: `Tool execution logic not implemented for ${toolName}` };
+      }
+    } catch (toolError) { // Catch errors if tool.execute() itself throws unexpectedly
+        console.error(`Error during ${toolName}.execute():`, toolError);
+        stepOutcome = { result: null, error: toolError.message || "An unexpected error occurred during tool execution."};
+    }
+
+    // 4. Update executionLog and contextSummaryForNextStep
     if (stepOutcome.error) {
-      executionLog.push({ step: stepDescription, error: stepOutcome.error, status: "failed" });
-      break;
+      executionLog.push({ step: stepDescription, tool: toolName, error: stepOutcome.error, status: "failed" });
+      break; // Terminate loop on first failure
     } else {
-      executionLog.push({ step: stepDescription, result: stepOutcome.result, status: "completed" });
-      contextSummaryForNextStep += `Summary of step "${stepDescription}": ${stepOutcome.result}\n\n`;
+      executionLog.push({ step: stepDescription, tool: toolName, result: stepOutcome.result, status: "completed" });
+      contextSummaryForNextStep += `Summary of step "${stepDescription}" (using ${toolName}): ${stepOutcome.result}\n\n`;
     }
   }
   return executionLog;
