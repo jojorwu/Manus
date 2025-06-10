@@ -9,6 +9,9 @@ const math = require('mathjs'); // Added for CalculatorTool
 const app = express();
 const port = 3000;
 
+const MAX_CONTEXT_CHARS_BEFORE_SUMMARIZATION = 4000;
+const SUMMARIZED_CONTEXT_PREFIX = "Summary of prior actions and information: ";
+
 // Initialize GoogleGenerativeAI
 const apiKey = process.env.GEMINI_API_KEY;
 let genAI;
@@ -59,6 +62,40 @@ async function callGemini(promptString) {
     }
     // For other errors (actual API errors, etc.)
     throw new Error(`Error generating content from Gemini: ${error.message}`);
+  }
+}
+
+async function summarizeContextIfNeeded(currentContext, originalTask, callGeminiFunc) {
+  if (!currentContext || typeof currentContext !== 'string' || currentContext.length <= MAX_CONTEXT_CHARS_BEFORE_SUMMARIZATION) {
+    return currentContext; // Return original if not a string, null, empty, or not exceeding threshold
+  }
+
+  console.log(`Context length (${currentContext.length}) exceeds threshold of ${MAX_CONTEXT_CHARS_BEFORE_SUMMARIZATION}. Attempting summarization...`);
+
+  const summarizationPrompt = `The original user task is: '${originalTask}'.
+The following is a history of actions taken and information gathered so far (it might be condensed or summarized itself already):
+---
+${currentContext}
+---
+Summarize this history VERY concisely. Extract only the most critical facts, outcomes, and insights that are directly relevant for informing the NEXT step in achieving the original user task. The summary MUST be significantly shorter than the history provided. Focus on essential information that prevents loss of crucial context for future actions. Avoid conversational fluff.`;
+
+  try {
+    // callGeminiFunc is expected to throw an error on failure (e.g., timeout or API error)
+    const summaryResponse = await callGeminiFunc(summarizationPrompt);
+
+    // Since callGeminiFunc throws on error, we only proceed if it returns a string successfully.
+    // No need to check for "Error:" prefix in summaryResponse if callGeminiFunc adheres to its contract.
+    console.log("Context successfully summarized.");
+    return SUMMARIZED_CONTEXT_PREFIX + summaryResponse;
+
+  } catch (error) {
+    console.error("Exception during context summarization call:", error.message);
+    // If summarization fails (timeout, API error from callGeminiFunc), return the original context.
+    // A more robust fallback could be to truncate the original context here if it's excessively long,
+    // e.g., currentContext.substring(0, MAX_CONTEXT_CHARS_BEFORE_SUMMARIZATION) + "... (summary failed, context truncated)";
+    // For now, returning original context on summarization failure.
+    console.warn("Context summarization failed. Using original context (which might be very long).");
+    return currentContext;
   }
 }
 
@@ -510,7 +547,14 @@ Ensure the output is only the JSON array of stages. The new plan should ideally 
 async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replanningAttempted = false, initialContextSummary = null) {
   const overallExecutionLog = [];
   let contextSummaryForNextStep = initialContextSummary !== null ? initialContextSummary : "No previous steps executed yet.\n\n";
-  let allOriginalStagesCompleted = true; // Tracks if the current plan (original or replan segment) completes
+  let allOriginalStagesCompleted = true; // Assume success until a failure occurs and is not recovered
+
+  // Summarize initial context if needed
+  const originalInitialContext = contextSummaryForNextStep;
+  contextSummaryForNextStep = await summarizeContextIfNeeded(contextSummaryForNextStep, userTask, callGeminiFunc);
+  if (contextSummaryForNextStep !== originalInitialContext && contextSummaryForNextStep.startsWith(SUMMARIZED_CONTEXT_PREFIX)) {
+    overallExecutionLog.push({ stage: "Initial", step: "Context Management", tool: "System", result: "Initial context was summarized.", status: "system_action" });
+  }
 
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
   const webSearchTool = new WebSearchTool();
@@ -576,6 +620,21 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
       contextSummaryForNextStep += stageContextAccumulator;
     }
 
+    // Summarize context after this stage if it didn't fail and cause a break
+    if (!stageFailed) {
+      const contextBeforeStageSummarization = contextSummaryForNextStep;
+      contextSummaryForNextStep = await summarizeContextIfNeeded(contextSummaryForNextStep, userTask, callGeminiFunc);
+      if (contextSummaryForNextStep !== contextBeforeStageSummarization && contextSummaryForNextStep.startsWith(SUMMARIZED_CONTEXT_PREFIX)) {
+          overallExecutionLog.push({
+              stage: currentStageNumber,
+              step: "Context Management",
+              tool: "System",
+              result: `Context summarized after Stage ${currentStageNumber}.`,
+              status: "system_action"
+          });
+      }
+    }
+
     if (stageFailed) {
       allOriginalStagesCompleted = false; // Current plan segment failed
       console.log(`Stage ${currentStageNumber} failed.`);
@@ -597,18 +656,19 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
             overallExecutionLog.push({ stage: currentStageNumber, step: "Executing Step Fix", tool: "System", result: `Attempting to execute ${recoveryOutcome.planSegment.length} stage(s) as a fix.`, status: "system_action" });
             recoveryExecutionResult = await executePlanLoop(userTask, recoveryOutcome.planSegment, callGeminiFunc, true, contextBeforeThisStage);
             overallExecutionLog.push(...recoveryExecutionResult.log);
-            contextSummaryForNextStep = recoveryExecutionResult.finalContext;
+            contextSummaryForNextStep = recoveryExecutionResult.finalContext; // Update context from the recovery
 
             if (recoveryExecutionResult.allStepsCompletedSuccessfully) {
               const originalPlanRemainder = planStagesArray.slice(stageIndex + 1);
               if (originalPlanRemainder.length > 0) {
                 overallExecutionLog.push({ stage: currentStageNumber, step: "Step Fix Successful", tool: "System", result: "Attempting to resume original plan.", status: "system_action" });
+                // Context for remainder is the one from the successful fix
                 const remainderExecutionResult = await executePlanLoop(userTask, originalPlanRemainder, callGeminiFunc, true, contextSummaryForNextStep);
                 overallExecutionLog.push(...remainderExecutionResult.log);
                 contextSummaryForNextStep = remainderExecutionResult.finalContext;
-                allOriginalStagesCompleted = remainderExecutionResult.allStepsCompletedSuccessfully; // Overall success now depends on remainder
+                allOriginalStagesCompleted = remainderExecutionResult.allStepsCompletedSuccessfully;
               } else {
-                allOriginalStagesCompleted = true; // Fix was successful and no remainder
+                allOriginalStagesCompleted = true;
               }
             } else {
               overallExecutionLog.push({ stage: currentStageNumber, step: "Step Fix Failed", tool: "System", error: "The implemented fix also failed.", status: "system_error" });
@@ -621,14 +681,13 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replan
             contextSummaryForNextStep = recoveryExecutionResult.finalContext;
             allOriginalStagesCompleted = recoveryExecutionResult.allStepsCompletedSuccessfully;
           }
-        } else { // Replanning itself failed (e.g., no plan generated, API error during replan)
+        } else {
           overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Failed (System)", tool: "System", error: recoveryOutcome.error || "No recovery plan generated.", status: "system_error" });
           allOriginalStagesCompleted = false;
         }
-        break; // Stop processing original plan stages after a replan attempt (successful or not)
+        break;
       }
     }
-    // If loop completes, allOriginalStagesCompleted remains true (if initialized true and no stageFailed)
   }
   return { log: overallExecutionLog, finalContext: contextSummaryForNextStep, allStepsCompletedSuccessfully: allOriginalStagesCompleted };
 }
