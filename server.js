@@ -108,14 +108,37 @@ async function generatePlanWithGemini(userTask, callGeminiFunc) {
 You have the following tools available:
         ${toolsDescriptionString}
 
-Break this down into a JSON array of objects to achieve the task. Each object must have two keys: 'stepDescription' (a string describing the action) and 'toolName' (a string: must be exactly one of [${toolNamesArrayStringified}]).
-The steps should be logically sequenced.
-Ensure the output is only the JSON array.
-Example for a task like 'Research and summarize the discovery of Penicillin':
+Break this down into a JSON array of 'stages' to achieve the task. Each stage object in the array must have two keys:
+1. 'stage': An integer representing the stage number (e.g., 1, 2, 3...).
+2. 'steps': An array of one or more step objects.
+Each step object within a stage's 'steps' array must have two keys:
+1. 'stepDescription': A string describing the action for that step.
+2. 'toolName': A string indicating which tool to use (must be exactly one of [${toolNamesArrayStringified}]).
+
+Steps within the same stage are considered parallelizable if the task allows. Subsequent stages depend on the completion of all steps in the preceding stage.
+The overall plan should be logically sequenced by stage. Ensure the output is only the JSON array of stages.
+
+Example for a task like 'Research impacts of remote work and summarize findings':
 [
-  { "stepDescription": "Search for the history of Penicillin discovery", "toolName": "WebSearchSimulator" },
-  { "stepDescription": "Based on the search results, identify key scientists and dates.", "toolName": "GeminiStepExecutor" },
-  { "stepDescription": "Draft a summary of the Penicillin discovery story.", "toolName": "GeminiStepExecutor" }
+  {
+    "stage": 1,
+    "steps": [
+      { "stepDescription": "Search for articles on productivity in remote work", "toolName": "WebSearchSimulator" },
+      { "stepDescription": "Search for articles on team collaboration in remote work", "toolName": "WebSearchSimulator" }
+    ]
+  },
+  {
+    "stage": 2,
+    "steps": [
+      { "stepDescription": "Based on all search results, identify 3 key positive and 3 key negative impacts of remote work.", "toolName": "GeminiStepExecutor" }
+    ]
+  },
+  {
+    "stage": 3,
+    "steps": [
+      { "stepDescription": "Draft a concise summary of the identified impacts.", "toolName": "GeminiStepExecutor" }
+    ]
+  }
 ]`;
   let rawResponseFromGemini = "";
 
@@ -132,33 +155,39 @@ Example for a task like 'Research and summarize the discovery of Penicillin':
       cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
     }
 
-    const parsedPlan = JSON.parse(cleanedPlanResponseString);
+    const parsedPlanStages = JSON.parse(cleanedPlanResponseString);
 
-    if (!Array.isArray(parsedPlan) || parsedPlan.length === 0) {
-      console.error("Gemini generated an empty or non-array plan:", cleanedPlanResponseString);
-      return { success: false, message: "Generated plan is empty or not an array.", details: "Gemini returned an empty or non-array plan.", rawResponse: cleanedPlanResponseString };
+    if (!Array.isArray(parsedPlanStages) || parsedPlanStages.length === 0) {
+      console.error("Gemini generated an empty or non-array plan (expected array of stages):", cleanedPlanResponseString);
+      return { success: false, message: "Generated plan is empty or not an array of stages.", details: "Gemini returned an empty or non-array plan.", rawResponse: cleanedPlanResponseString };
     }
 
-    // Validate structure of each plan step
-    for (const step of parsedPlan) {
-      if (typeof step !== 'object' || step === null ||
-          typeof step.stepDescription !== 'string' || !step.stepDescription.trim() ||
-          typeof step.toolName !== 'string' || !step.toolName.trim()) {
-        console.error("Invalid step structure in plan:", step, "Full plan:", cleanedPlanResponseString);
-        return { success: false, message: "Generated plan contains invalid step structures.", details: "Each step must be an object with non-empty 'stepDescription' and 'toolName' strings.", rawResponse: cleanedPlanResponseString };
+    // Validate structure of each stage and its steps
+    for (const stageObj of parsedPlanStages) {
+      if (typeof stageObj !== 'object' || stageObj === null ||
+          typeof stageObj.stage !== 'number' ||
+          !Array.isArray(stageObj.steps) || stageObj.steps.length === 0) {
+        console.error("Invalid stage structure in plan:", stageObj, "Full plan:", cleanedPlanResponseString);
+        return { success: false, message: "Generated plan contains an invalid stage structure.", details: "Each stage must be an object with a numeric 'stage' and a non-empty 'steps' array.", rawResponse: cleanedPlanResponseString };
       }
-      // Optional: Validate if step.toolName is one of the known tools
-      if (!tools.find(t => t.name === step.toolName)) {
-        console.warn("Plan contains a step with an unknown toolName:", step.toolName, "Step:", step);
-        // For now, we'll allow unknown tool names and let execution handle it,
-        // but one could return an error here if strict tool usage is required.
+
+      for (const step of stageObj.steps) {
+        if (typeof step !== 'object' || step === null ||
+            typeof step.stepDescription !== 'string' || !step.stepDescription.trim() ||
+            typeof step.toolName !== 'string' || !step.toolName.trim()) {
+          console.error("Invalid step structure within a stage:", step, "Stage:", stageObj.stage, "Full plan:", cleanedPlanResponseString);
+          return { success: false, message: "Generated plan contains invalid step structures within a stage.", details: "Each step must be an object with non-empty 'stepDescription' and 'toolName' strings.", rawResponse: cleanedPlanResponseString };
+        }
+        if (!tools.find(t => t.name === step.toolName)) {
+          console.warn("Plan contains a step with an unknown toolName:", step.toolName, "Step:", step);
+        }
       }
     }
 
-    return { success: true, plan: parsedPlan, rawResponse: null }; // Indicate success
+    return { success: true, plan: parsedPlanStages, rawResponse: null }; // Indicate success
 
   } catch (error) { // Catches errors from callGeminiFunc or JSON.parse
-    console.error("Error in generatePlanWithGemini:", error);
+    console.error("Error in generatePlanWithGemini (staged planning):", error);
     const isParsingError = error instanceof SyntaxError;
     const message = isParsingError ? "Failed to parse tool-aware plan from Gemini." : "Failed to generate tool-aware plan due to an API error.";
     return { success: false, message: message, details: error.message, rawResponse: rawResponseFromGemini };
@@ -185,71 +214,112 @@ class GeminiStepExecutorTool {
   }
 }
 
-// --- Helper Function: Execute Plan Loop (with tool dispatch) ---
-async function executePlanLoop(userTask, planArray, callGeminiFunc) {
-  const executionLog = [];
+// --- Helper Function: Execute Plan Loop (with staged parallel execution) ---
+async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
+  const overallExecutionLog = [];
   let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
 
-  // 1. Instantiate Tools
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
-  const searchSimulator = new WebSearchSimulatorTool(); // Does not need callGeminiFunc
+  const searchSimulator = new WebSearchSimulatorTool();
   const availableTools = {
     "GeminiStepExecutor": geminiExecutor,
     "WebSearchSimulator": searchSimulator
   };
 
-  for (const planStep of planArray) { // planStep is an object: { stepDescription, toolName }
-    const stepDescription = planStep.stepDescription;
-    const toolName = planStep.toolName;
+  // Outer loop for stages
+  for (const stageObj of planStagesArray) {
+    const currentStageNumber = stageObj.stage;
+    const stepsInStage = stageObj.steps;
+    let stageFailed = false;
 
-    // Validate planStep structure (already partially done in generatePlanWithGemini, but good for robustness)
-    if (typeof stepDescription !== 'string' || !stepDescription.trim() ||
-        typeof toolName !== 'string' || !toolName.trim()) {
-      console.warn("Skipping invalid plan step object in executePlanLoop:", planStep);
-      executionLog.push({
-        step: String(stepDescription || "Invalid step object"),
-        tool: String(toolName || "N/A"),
-        error: "Invalid step object structure. Missing/empty stepDescription or toolName.",
-        status: "skipped"
-      });
-      continue; // Skip this invalid step
+    if (!Array.isArray(stepsInStage) || stepsInStage.length === 0) {
+      console.warn(`Stage ${currentStageNumber} has no steps or invalid steps array. Skipping.`);
+      // Optionally log this as a skipped/empty stage in overallExecutionLog if desired
+      continue;
     }
 
-    // 2. Select Tool
-    const selectedTool = availableTools[toolName];
-    if (!selectedTool) {
-      console.error(`Unknown tool specified in plan: ${toolName}`);
-      executionLog.push({ step: stepDescription, tool: toolName, error: `Unknown tool specified: ${toolName}`, status: "failed" });
-      break; // Terminate loop if tool is unknown, as plan execution cannot proceed reliably
-    }
+    // 3. Parallel Execution of Steps within a Stage
+    const stepPromises = stepsInStage.map(async (planStep) => {
+      const stepDescription = planStep.stepDescription;
+      const toolName = planStep.toolName;
 
-    // 3. Prepare Tool Input & Call Tool's execute Method
-    let stepOutcome;
-    try {
-      if (toolName === "GeminiStepExecutor") {
-        stepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep);
-      } else if (toolName === "WebSearchSimulator") {
-        stepOutcome = await selectedTool.execute({ query: stepDescription });
-      } else {
-        // This case should ideally be caught by the unknown tool check above
-        console.error(`Tool execution logic not implemented for ${toolName} in executePlanLoop`);
-        stepOutcome = { result: null, error: `Tool execution logic not implemented for ${toolName}` };
+      // Validate individual planStep structure
+      if (typeof stepDescription !== 'string' || !stepDescription.trim() ||
+          typeof toolName !== 'string' || !toolName.trim()) {
+        console.warn("Skipping invalid plan step object in stage:", planStep);
+        return {
+          originalStep: { stepDescription: String(stepDescription || "Invalid step"), toolName: String(toolName || "N/A") },
+          outcome: { error: "Invalid step object structure. Missing/empty stepDescription or toolName." },
+          success: false
+        };
       }
-    } catch (toolError) { // Catch errors if tool.execute() itself throws unexpectedly
-        console.error(`Error during ${toolName}.execute():`, toolError);
-        stepOutcome = { result: null, error: toolError.message || "An unexpected error occurred during tool execution."};
+
+      const selectedTool = availableTools[toolName];
+      if (!selectedTool) {
+        console.error(`Unknown tool specified in plan: ${toolName} for step: "${stepDescription}"`);
+        return {
+          originalStep: planStep,
+          outcome: { error: `Unknown tool specified: ${toolName}` },
+          success: false
+        };
+      }
+
+      let currentStepOutcome;
+      try {
+        if (toolName === "GeminiStepExecutor") {
+          currentStepOutcome = await selectedTool.execute(userTask, stepDescription, contextSummaryForNextStep); // All parallel steps in this stage get same initial context
+        } else if (toolName === "WebSearchSimulator") {
+          currentStepOutcome = await selectedTool.execute({ query: stepDescription });
+        } else {
+          currentStepOutcome = { result: null, error: `Tool execution logic not implemented for ${toolName}` };
+        }
+        return { originalStep: planStep, outcome: currentStepOutcome, success: !currentStepOutcome.error };
+      } catch (toolError) {
+        console.error(`Error during ${toolName}.execute() for step "${stepDescription}":`, toolError);
+        return {
+          originalStep: planStep,
+          outcome: { error: toolError.message || "An unexpected error occurred during tool execution." },
+          success: false
+        };
+      }
+    });
+
+    // Wait for all steps in the current stage to complete (or fail individually)
+    const stageStepResults = await Promise.all(stepPromises);
+
+    // 4. Handling Results and Context from Parallel Stage
+    let stageContextAccumulator = ""; // Accumulate context from successful steps in this stage
+
+    for (const stepResult of stageStepResults) {
+      const { originalStep, outcome, success } = stepResult;
+      const logEntry = {
+        stage: currentStageNumber,
+        step: originalStep.stepDescription,
+        tool: originalStep.toolName,
+        status: success ? "completed" : "failed",
+        result: success ? outcome.result : null,
+        error: success ? null : outcome.error,
+      };
+      overallExecutionLog.push(logEntry);
+
+      if (success) {
+        stageContextAccumulator += `Result from Stage ${currentStageNumber}, Step "${originalStep.stepDescription}" (using ${originalStep.toolName}): ${outcome.result}\n\n`;
+      } else {
+        stageFailed = true;
+      }
     }
 
-    // 4. Update executionLog and contextSummaryForNextStep
-    if (stepOutcome.error) {
-      executionLog.push({ step: stepDescription, tool: toolName, error: stepOutcome.error, status: "failed" });
-      break; // Terminate loop on first failure
-    } else {
-      executionLog.push({ step: stepDescription, tool: toolName, result: stepOutcome.result, status: "completed" });
-      contextSummaryForNextStep += `Summary of step "${stepDescription}" (using ${toolName}): ${stepOutcome.result}\n\n`;
+    // Append all context from this stage to the main context summary *after* all parallel steps are processed
+    if (stageContextAccumulator) {
+        contextSummaryForNextStep += stageContextAccumulator;
+    }
+
+    if (stageFailed) {
+      console.log(`Stage ${currentStageNumber} failed. Terminating further plan execution.`);
+      break; // Terminate outer loop for stages
     }
   }
-  return executionLog;
+  return overallExecutionLog;
 }
 
 // --- Main API Endpoint ---

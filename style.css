@@ -153,3 +153,16 @@ button:hover {
   color: #555;
   margin-left: 5px;
 }
+
+.stage-heading {
+  font-weight: bold;
+  font-size: 1.1em;
+  margin-top: 20px; /* More space above a new stage heading */
+  margin-bottom: 10px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #ccc;
+}
+/* Adjust margin for the first stage heading if it's the first child in logUl */
+.execution-log > .stage-heading:first-child {
+  margin-top: 5px;
+}

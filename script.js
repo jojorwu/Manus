@@ -66,11 +66,21 @@ planButton.addEventListener('click', async () => {
       logHeading.textContent = 'Execution Log:';
       statusArea.appendChild(logHeading);
 
-      const logUl = document.createElement('ul'); // Unordered list for log entries
-      logUl.classList.add('execution-log'); // Add class for potential styling
+      const logUl = document.createElement('ul');
+      logUl.classList.add('execution-log');
 
       if (result.executionLog && Array.isArray(result.executionLog) && result.executionLog.length > 0) {
+        let currentStage = null;
         result.executionLog.forEach(entry => {
+          // Check if stage has changed
+          if (entry.stage !== currentStage) {
+            currentStage = entry.stage;
+            const stageHeading = document.createElement('h4');
+            stageHeading.classList.add('stage-heading');
+            stageHeading.textContent = `Stage ${currentStage}`;
+            logUl.appendChild(stageHeading); // Append to logUl before list items of this stage
+          }
+
           const logLi = document.createElement('li');
           // Display Step Description and Tool Name
           logLi.innerHTML = `<strong>Step:</strong> ${entry.step || 'N/A'} <span class="tool-name">(using tool: ${entry.tool || 'N/A'})</span>`;
