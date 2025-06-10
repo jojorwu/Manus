@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Biography Download Agent</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Biography Download Agent</h1>
+  <label for="nameInput">Enter Name:</label>
+  <input type="text" id="nameInput">
+  <button id="downloadButton">Download Biography</button>
+  <div id="statusArea"></div>
+
+  <script>
+    const nameInput = document.getElementById('nameInput');
+    const downloadButton = document.getElementById('downloadButton');
+    const statusArea = document.getElementById('statusArea');
+
+    downloadButton.addEventListener('click', async () => {
+      const name = nameInput.value;
+      statusArea.textContent = ''; // Clear previous messages
+
+      if (!name.trim()) {
+        statusArea.textContent = 'Please enter a name.';
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/download-biography', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: name }),
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+          statusArea.textContent = result.message;
+        } else {
+          statusArea.textContent = `Error: ${result.message || response.statusText}`;
+        }
+      } catch (error) {
+        console.error('Fetch error:', error);
+        statusArea.textContent = 'Failed to send request. Check console for details.';
+      }
+    });
+  </script>
+</body>
+</html>

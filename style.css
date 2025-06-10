@@ -1,0 +1,63 @@
+body {
+  font-family: Arial, Helvetica, sans-serif;
+  margin: 0;
+  padding: 20px;
+  background-color: #f4f4f4;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-height: 100vh;
+}
+
+h1 {
+  color: #333;
+}
+
+label {
+  margin-top: 10px;
+  margin-bottom: 5px;
+  display: block;
+  color: #555;
+}
+
+input[type="text"] {
+  padding: 10px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-sizing: border-box;
+  width: 300px;
+  margin-bottom: 15px;
+}
+
+button {
+  padding: 10px 15px;
+  background-color: #007bff;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 16px;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #0056b3;
+}
+
+#statusArea {
+  margin-top: 20px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  width: 300px;
+  box-sizing: border-box;
+  min-height: 40px; /* Ensure it's visible even when empty */
+  background-color: #e9ecef;
+  border-color: #ced4da;
+  word-wrap: break-word;
+}
+
+/* Style for when statusArea has content */
+#statusArea:not(:empty) {
+  border-color: #ced4da; /* Make border more visible when there's text */
+}
