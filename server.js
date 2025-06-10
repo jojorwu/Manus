@@ -168,6 +168,57 @@ app.get('/test-gemini', async (req, res) => {
   }
 });
 
+// --- Function to parse and validate plan response from Gemini ---
+async function parseStagedPlanResponse(planResponseString, knownToolNames) {
+  let rawResponseForError = planResponseString; // Keep original for error reporting if cleaning fails
+  try {
+    let cleanedPlanResponseString = planResponseString.trim();
+    if (cleanedPlanResponseString.startsWith('```json')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.substring(7).trim();
+    } else if (cleanedPlanResponseString.startsWith('```')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.substring(3).trim();
+    }
+    if (cleanedPlanResponseString.endsWith('```')) {
+      cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
+    }
+    rawResponseForError = cleanedPlanResponseString; // Now refers to the cleaned string
+
+    const parsedPlanStages = JSON.parse(cleanedPlanResponseString);
+
+    if (!Array.isArray(parsedPlanStages) || parsedPlanStages.length === 0) {
+      console.error("Gemini generated an empty or non-array plan (expected array of stages):", cleanedPlanResponseString);
+      return { success: false, message: "Generated plan is empty or not an array of stages.", details: "Gemini returned an empty or non-array plan.", rawResponse: cleanedPlanResponseString };
+    }
+
+    for (const stageObj of parsedPlanStages) {
+      if (typeof stageObj !== 'object' || stageObj === null ||
+          typeof stageObj.stage !== 'number' ||
+          !Array.isArray(stageObj.steps) || stageObj.steps.length === 0) {
+        console.error("Invalid stage structure in plan:", stageObj, "Full plan:", cleanedPlanResponseString);
+        return { success: false, message: "Generated plan contains an invalid stage structure.", details: "Each stage must be an object with a numeric 'stage' and a non-empty 'steps' array.", rawResponse: cleanedPlanResponseString };
+      }
+
+      for (const step of stageObj.steps) {
+        if (typeof step !== 'object' || step === null ||
+            typeof step.stepDescription !== 'string' || !step.stepDescription.trim() ||
+            typeof step.toolName !== 'string' || !step.toolName.trim()) {
+          console.error("Invalid step structure within a stage:", step, "Stage:", stageObj.stage, "Full plan:", cleanedPlanResponseString);
+          return { success: false, message: "Generated plan contains invalid step structures within a stage.", details: "Each step must be an object with non-empty 'stepDescription' and 'toolName' strings.", rawResponse: cleanedPlanResponseString };
+        }
+        if (!knownToolNames.includes(step.toolName)) {
+          console.warn("Plan contains a step with an unknown toolName:", step.toolName, "Step:", step);
+          // Not returning error for unknown tool, execution loop will handle it.
+        }
+      }
+    }
+    return { success: true, planStagesArray: parsedPlanStages, rawResponse: null };
+
+  } catch (error) { // Catches JSON.parse error or errors from string manipulation
+    console.error("Error parsing staged plan response:", error.message, "Raw response for parsing:", rawResponseForError);
+    return { success: false, message: "Failed to parse plan from Gemini's response.", details: error.message, rawResponse: rawResponseForError };
+  }
+}
+
 // --- Helper Function 1: Generate Plan ---
 async function generatePlanWithGemini(userTask, callGeminiFunc) {
   const tools = [
@@ -175,9 +226,10 @@ async function generatePlanWithGemini(userTask, callGeminiFunc) {
     { name: "WebSearchTool", description: "Useful for finding specific, real-time information or facts from the web. Input should be a search query." },
     { name: "CalculatorTool", description: "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm')." }
   ];
+  const toolNames = tools.map(t => t.name);
 
   const toolsDescriptionString = tools.map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
-  const toolNamesArrayStringified = tools.map(tool => `"${tool.name}"`).join(", "); // This will now include "WebSearchTool"
+  const toolNamesArrayStringified = toolNames.map(name => `"${name}"`).join(", ");
 
   const planningPrompt = `User task: '${userTask}'.
 You have the following tools available:
@@ -198,8 +250,8 @@ Example for a task like 'Research impacts of remote work and summarize findings'
   {
     "stage": 1,
     "steps": [
-      { "stepDescription": "Search for articles on productivity in remote work", "toolName": "WebSearchTool" }, // Updated example
-      { "stepDescription": "Search for articles on team collaboration in remote work", "toolName": "WebSearchTool" } // Updated example
+      { "stepDescription": "Search for articles on productivity in remote work", "toolName": "WebSearchTool" },
+      { "stepDescription": "Search for articles on team collaboration in remote work", "toolName": "WebSearchTool" }
     ]
   },
   {
@@ -215,72 +267,25 @@ Example for a task like 'Research impacts of remote work and summarize findings'
     ]
   }
 ]`;
-  let rawResponseFromGemini = "";
 
+  let planResponseString = ""; // For rawResponse in case callGeminiFunc itself fails before returning a string
   try {
-    const planResponseString = await callGeminiFunc(planningPrompt);
-    rawResponseFromGemini = planResponseString;
-    let cleanedPlanResponseString = planResponseString.trim();
-    if (cleanedPlanResponseString.startsWith('```json')) {
-      cleanedPlanResponseString = cleanedPlanResponseString.substring(7).trim();
-    } else if (cleanedPlanResponseString.startsWith('```')) {
-      cleanedPlanResponseString = cleanedPlanResponseString.substring(3).trim();
+    planResponseString = await callGeminiFunc(planningPrompt);
+    // Now, use the dedicated parsing and validation function
+    const parseResult = await parseStagedPlanResponse(planResponseString, toolNames);
+    if (parseResult.success) {
+      return { success: true, plan: parseResult.planStagesArray, rawResponse: null }; // Changed 'plan' to 'planStagesArray' for clarity if needed, but keeping 'plan' for consistency with how it's used.
+    } else {
+      return { success: false, message: parseResult.message, details: parseResult.details, rawResponse: parseResult.rawResponse };
     }
-    if (cleanedPlanResponseString.endsWith('```')) {
-      cleanedPlanResponseString = cleanedPlanResponseString.slice(0, -3).trim();
-    }
-
-    const parsedPlanStages = JSON.parse(cleanedPlanResponseString);
-
-    if (!Array.isArray(parsedPlanStages) || parsedPlanStages.length === 0) {
-      console.error("Gemini generated an empty or non-array plan (expected array of stages):", cleanedPlanResponseString);
-      return { success: false, message: "Generated plan is empty or not an array of stages.", details: "Gemini returned an empty or non-array plan.", rawResponse: cleanedPlanResponseString };
-    }
-
-    // Validate structure of each stage and its steps
-    for (const stageObj of parsedPlanStages) {
-      if (typeof stageObj !== 'object' || stageObj === null ||
-          typeof stageObj.stage !== 'number' ||
-          !Array.isArray(stageObj.steps) || stageObj.steps.length === 0) {
-        console.error("Invalid stage structure in plan:", stageObj, "Full plan:", cleanedPlanResponseString);
-        return { success: false, message: "Generated plan contains an invalid stage structure.", details: "Each stage must be an object with a numeric 'stage' and a non-empty 'steps' array.", rawResponse: cleanedPlanResponseString };
-      }
-
-      for (const step of stageObj.steps) {
-        if (typeof step !== 'object' || step === null ||
-            typeof step.stepDescription !== 'string' || !step.stepDescription.trim() ||
-            typeof step.toolName !== 'string' || !step.toolName.trim()) {
-          console.error("Invalid step structure within a stage:", step, "Stage:", stageObj.stage, "Full plan:", cleanedPlanResponseString);
-          return { success: false, message: "Generated plan contains invalid step structures within a stage.", details: "Each step must be an object with non-empty 'stepDescription' and 'toolName' strings.", rawResponse: cleanedPlanResponseString };
-        }
-        if (!tools.find(t => t.name === step.toolName)) {
-          console.warn("Plan contains a step with an unknown toolName:", step.toolName, "Step:", step);
-        }
-      }
-    }
-
-    return { success: true, plan: parsedPlanStages, rawResponse: null }; // Indicate success
-
-  } catch (error) { // Catches errors from callGeminiFunc (which now throws on API/timeout error) or JSON.parse
-    console.error("Error in generatePlanWithGemini (staged planning):", error.message);
-    if (error.message.includes("Gemini API call timed out")) {
-      return {
-        success: false,
-        message: "Failed to generate plan: Gemini API call timed out.",
-        details: error.message,  // The specific timeout message from callGemini
-        rawResponse: rawResponseFromGemini // This might be empty if timeout occurred before Gemini responded
-      };
-    }
-    // Differentiate between parsing error (if Gemini responded but with bad JSON) vs. other API errors
-    const isParsingError = error instanceof SyntaxError;
-    const message = isParsingError ? "Failed to parse tool-aware plan from Gemini." : "Failed to generate tool-aware plan due to an API error.";
-    // If it's not a parsing error, rawResponseFromGemini might not be set if callGeminiFunc failed before returning a response string.
-    // error.message would be more relevant for details in that case.
+  } catch (error) { // Catches errors from callGeminiFunc (e.g. timeout, direct API error not returning a string)
+    console.error("Error in generatePlanWithGemini (API call stage):", error.message);
+    const message = error.message.includes("Gemini API call timed out") ? "Failed to generate plan: Gemini API call timed out." : "Failed to generate plan due to an API error.";
     return {
       success: false,
       message: message,
       details: error.message,
-      rawResponse: isParsingError ? rawResponseFromGemini : null // Only include rawResponse if it was a parsing issue
+      rawResponse: planResponseString // This might be empty if timeout occurred before Gemini responded
     };
   }
 }
@@ -305,10 +310,73 @@ class GeminiStepExecutorTool {
   }
 }
 
-// --- Helper Function: Execute Plan Loop (with staged parallel execution) ---
-async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
+// --- Actual handleReplanning function ---
+async function handleReplanning(originalTask, originalPlanStagesArray, executionLogSoFar, failedStepDetails, callGeminiFunc, availableToolsMap) {
+  // Reconstruct tool definitions based on the keys in availableToolsMap for the prompt
+  // This assumes a standard description or fetching descriptions if they were stored elsewhere.
+  // For simplicity, using generic descriptions here if not easily available.
+  const toolDefinitions = Object.keys(availableToolsMap).map(name => {
+    let description = "A tool to help achieve the task.";
+    if (name === "GeminiStepExecutor") description = "Useful for general reasoning, text generation, complex instructions, or when no other specific tool seems appropriate.";
+    else if (name === "WebSearchTool") description = "Useful for finding specific, real-time information or facts from the web. Input should be a search query.";
+    else if (name === "CalculatorTool") description = "Useful for evaluating mathematical expressions. Input should be a valid mathematical expression string (e.g., '2+2', 'sqrt(16)', '10 meters to cm').";
+    return { name, description };
+  });
+  const currentToolNames = Object.keys(availableToolsMap);
+
+  const toolsDescriptionString = toolDefinitions
+    .map((tool, index) => `${index + 1}. ${tool.name}: ${tool.description}`).join("\n        ");
+  const toolNamesArrayStringified = currentToolNames.map(name => `"${name}"`).join(", ");
+
+  // Show last 5 log entries for brevity in the prompt, or fewer if not available.
+  const recentLogEntries = executionLogSoFar.slice(-5);
+
+  const replanningPrompt = `You are an AI assistant helping a user achieve a task.
+Original user task: '${originalTask}'
+
+The initial plan you (or another AI) devised was:
+${JSON.stringify(originalPlanStagesArray, null, 2)}
+
+So far, the following steps were executed, with their outcomes (showing recent history):
+${JSON.stringify(recentLogEntries, null, 2)}
+
+Unfortunately, a step failed:
+Stage: ${failedStepDetails.stage}
+Step Description: ${failedStepDetails.stepDescription}
+Tool Used: ${failedStepDetails.toolName}
+Error Message: ${failedStepDetails.error}
+
+Please generate a new, complete plan as a JSON array of 'stages' to achieve the original user task, taking into account the failure. Try to use a different approach for the failed step or around the obstacle.
+You have the following tools available:
+        ${toolsDescriptionString}
+
+Each stage object in the array must have 'stage' (integer, starting from 1 for the new plan segment) and 'steps' (array of step objects). Each step object must have 'stepDescription' (string) and 'toolName' (string from [${toolNamesArrayStringified}]).
+Ensure the output is only the JSON array of stages. The new plan should ideally start from a point that makes sense given the successful execution history, or be a full new plan if necessary. The stage numbering for the new plan should restart from 1.`;
+
+  let replanResponseString = "";
+  try {
+    console.log("Attempting replanning with prompt:", replanningPrompt); // Log the prompt for debugging
+    replanResponseString = await callGeminiFunc(replanningPrompt);
+    const parsedResult = await parseStagedPlanResponse(replanResponseString, currentToolNames);
+
+    if (parsedResult.success) {
+      console.log("Replanning successful, new plan generated:", JSON.stringify(parsedResult.planStagesArray, null, 2));
+      return { success: true, newPlanStagesArray: parsedResult.planStagesArray };
+    } else {
+      console.error("Failed to parse replanned stages:", parsedResult.message, parsedResult.details, "Raw replan response:", parsedResult.rawResponse);
+      return { success: false, error: parsedResult.message || "Failed to generate a valid recovery plan.", details: parsedResult.details, newPlanStagesArray: [], rawResponse: parsedResult.rawResponse };
+    }
+  } catch (error) { // Catches errors from callGeminiFunc (e.g. timeout)
+    console.error("Error during replanning API call:", error.message);
+    const message = error.message.includes("Gemini API call timed out") ? "Replanning failed: Gemini API call timed out." : "Replanning failed due to an API error.";
+    return { success: false, error: message, details: error.message, newPlanStagesArray: [], rawResponse: replanResponseString };
+  }
+}
+
+// --- Helper Function: Execute Plan Loop (with staged parallel execution and replanning) ---
+async function executePlanLoop(userTask, planStagesArray, callGeminiFunc, replanningAttempted = false, initialContextSummary = null) {
   const overallExecutionLog = [];
-  let contextSummaryForNextStep = "No previous steps executed yet.\n\n";
+  let contextSummaryForNextStep = initialContextSummary !== null ? initialContextSummary : "No previous steps executed yet.\n\n";
 
   const geminiExecutor = new GeminiStepExecutorTool(callGeminiFunc);
   const webSearchTool = new WebSearchTool();
@@ -324,10 +392,17 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
     const currentStageNumber = stageObj.stage;
     const stepsInStage = stageObj.steps;
     let stageFailed = false;
+    const contextBeforeThisStage = contextSummaryForNextStep; // Capture context before this stage's results are added
 
     if (!Array.isArray(stepsInStage) || stepsInStage.length === 0) {
       console.warn(`Stage ${currentStageNumber} has no steps or invalid steps array. Skipping.`);
-      // Optionally log this as a skipped/empty stage in overallExecutionLog if desired
+      overallExecutionLog.push({
+        stage: currentStageNumber,
+        step: "Stage Validation",
+        tool: "System",
+        status: "skipped",
+        error: "Stage has no steps or invalid steps array."
+      });
       continue;
     }
 
@@ -411,8 +486,55 @@ async function executePlanLoop(userTask, planStagesArray, callGeminiFunc) {
     }
 
     if (stageFailed) {
-      console.log(`Stage ${currentStageNumber} failed. Terminating further plan execution.`);
-      break; // Terminate outer loop for stages
+      console.log(`Stage ${currentStageNumber} failed.`);
+      if (replanningAttempted) {
+        console.log("Replanning was already attempted or new plan segment also failed. Halting execution.");
+        overallExecutionLog.push({ stage: currentStageNumber, step: "Replanning Halted", tool: "System", error: "Previous replanning attempt did not resolve the issue or new plan segment failed.", status: "system_error" });
+        break; // Terminate outer loop for stages
+      } else {
+        const firstFailedStepResult = stageStepResults.find(r => !r.success);
+        const failedStepDetails = {
+          stage: currentStageNumber,
+          stepDescription: firstFailedStepResult.originalStep.stepDescription,
+          toolName: firstFailedStepResult.originalStep.toolName,
+          error: firstFailedStepResult.outcome.error,
+        };
+
+        overallExecutionLog.push({
+          stage: currentStageNumber,
+          step: "Replanning Triggered",
+          tool: "System",
+          result: `Attempting to replan due to failure in step: '${failedStepDetails.stepDescription}'. Error: ${failedStepDetails.error}`,
+          status: "system_action"
+        });
+
+        // Pass the availableTools map to handleReplanning
+        const replanResult = await handleReplanning(userTask, planStagesArray, overallExecutionLog, failedStepDetails, callGeminiFunc, availableTools);
+
+        if (replanResult.success && replanResult.newPlanStagesArray && replanResult.newPlanStagesArray.length > 0) {
+          overallExecutionLog.push({
+            stage: currentStageNumber, // Log under current stage for context
+            step: "Replanning Successful",
+            tool: "System",
+            result: "New plan segment generated. Attempting execution of new plan segment.",
+            status: "system_action"
+          });
+
+          // Execute the new plan segment, passing the context from *before* the failed stage
+          const newPlanExecutionLog = await executePlanLoop(userTask, replanResult.newPlanStagesArray, callGeminiFunc, true, contextBeforeThisStage);
+          overallExecutionLog.push(...newPlanExecutionLog); // Append results of the new plan
+        } else {
+          overallExecutionLog.push({
+            stage: currentStageNumber,
+            step: "Replanning Failed",
+            tool: "System",
+            error: replanResult.error || "No new plan generated or new plan was empty.",
+            status: "system_error"
+          });
+          console.log("Replanning failed or no new plan was generated. Terminating further plan execution.");
+        }
+        break; // Terminate processing of the *original* plan's further stages
+      }
     }
   }
   return overallExecutionLog;
