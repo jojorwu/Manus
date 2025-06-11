@@ -9,72 +9,17 @@ const UtilityAgent = require('./agents/UtilityAgent');
 const SubTaskQueue = require('./core/SubTaskQueue');
 const ResultsQueue = require('./core/ResultsQueue');
 
-// Импорт классов инструментов (предполагаем, что они определены или будут определены в ./tools/)
-// Важно: README упоминает, что инструменты (WebSearchTool, ReadWebpageTool, CalculatorTool)
-// инстанцируются и передаются агентам. В текущей структуре файлов их нет.
-// Пока что создадим заглушки, если они не будут найдены, или предположим,
-// что они будут предоставлены пользователем или в другом шаге.
-// Для простоты, предположим, что инструменты - это классы, которые нужно инстанцировать.
+// Импорт классов инструментов
+const WebSearchTool = require('./tools/WebSearchTool');
+const ReadWebpageTool = require('./tools/ReadWebpageTool');
+const CalculatorTool = require('./tools/CalculatorTool');
 
-// ЗАГЛУШКИ ДЛЯ ИНСТРУМЕНТОВ (если они не существуют, их нужно будет создать)
-// Это временное решение, так как файлы инструментов не были найдены в репозитории.
-// В идеале, эти классы должны быть в директории ./tools/
-
-class WebSearchTool {
-    async execute(input) {
-        console.warn(`WebSearchTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика поиска
-        return { result: `Search results for "${input.query}" (stub)`, error: null };
-    }
-}
-
-class ReadWebpageTool {
-    async execute(input) {
-        console.warn(`ReadWebpageTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика чтения веб-страницы
-        return { result: `Content of ${input.url} (stub)`, error: null };
-    }
-}
-
-class CalculatorTool {
-    async execute(input) {
-        console.warn(`CalculatorTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика вычислений с использованием mathjs
-        try {
-            const math = require('mathjs');
-            const result = math.evaluate(input.expression);
-            return { result: result, error: null };
-        } catch (e) {
-            return { result: null, error: e.message };
-        }
-    }
-}
-
+// Импорт LLM сервиса
+const geminiLLMService = require('./services/LLMService');
 
 // Инициализация очередей
 const subTaskQueue = new SubTaskQueue();
 const resultsQueue = new ResultsQueue();
-
-// Инициализация LLM сервиса (заглушка)
-// README указывает на использование Gemini API. Реальный вызов будет асинхронным.
-const geminiLLMService = async (prompt) => {
-    console.log(`LLM Service called with prompt (first 100 chars): "${prompt.substring(0,100)}..."`);
-    // Здесь должна быть реальная интеграция с @google/generative-ai
-    // GEMINI_API_KEY должен быть доступен из process.env
-    if (!process.env.GEMINI_API_KEY) {
-        const errorMsg = "GEMINI_API_KEY is not set in .env file. LLM service cannot operate.";
-        console.error(errorMsg);
-        throw new Error(errorMsg);
-    }
-    // Это очень упрощенная заглушка. Реальный ответ должен быть JSON планом или синтезированным текстом.
-    // Для планирования ожидается JSON массив. Для синтеза - строка.
-    // Сейчас вернем пустой массив для планирования, чтобы избежать ошибок парсинга JSON.
-    // И простую строку для синтеза.
-    if (prompt.includes("create a sequential plan")) {
-         return "[]"; // Пустой план, чтобы не было ошибок парсинга
-    }
-    return "LLM synthesized answer (stub).";
-};
 
 // Конфигурация API ключей для агентов (если необходимо для инструментов)
 // README упоминает SEARCH_API_KEY и CSE_ID для WebSearchTool.
