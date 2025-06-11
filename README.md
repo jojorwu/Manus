@@ -8,7 +8,7 @@ This project is a Node.js-based AI agent that leverages the Google Gemini API to
 
 This project consists of two main components: a Node.js backend that houses the AI agent logic, and a modern React frontend for user interaction.
 
-*   **Backend (Root Directory - `server.js`):**
+*   **Backend (Root Directory - `index.js`):**
     *   Built with Node.js and Express.js.
     *   Responsible for all core AI agent functionalities:
         *   Receiving user tasks via API endpoints.
@@ -109,7 +109,7 @@ GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"
 SEARCH_API_KEY="YOUR_GOOGLE_SEARCH_API_KEY_HERE"
 CSE_ID="YOUR_CSE_ID_HERE"
 ```
-*(Note: The `server.js` is configured to use the `dotenv` package to load these variables. Please ensure `dotenv` is listed in your root `package.json` and installed (`npm install dotenv` in the root directory) for this to work seamlessly. If `dotenv` failed to install via subtasks, you may need to install it manually or set these environment variables directly in your shell.)*
+*(Note: The `index.js` is configured to use the `dotenv` package (which is included in `package.json`) to load these variables. Ensure dependencies are installed via `npm install`.)*
 
 ## Development Workflow: Running the Application
 
@@ -122,12 +122,12 @@ This project has two main parts that need to be run simultaneously for developme
     *   Open your terminal in the **project root directory**.
     *   Start the server:
         ```bash
-        node server.js
+        node index.js
         ```
     *   The backend server will typically start on `http://localhost:3000`.
     *   API endpoints (like `/api/generate-plan`) will be available at this address.
     *   Its root path (`/`) provides a JSON status message. Static assets are also served from the root (which could include a production build of the frontend if placed there).
-    *   Changes to `server.js` require a manual restart unless using a tool like `nodemon`.
+    *   Changes to `index.js` require a manual restart unless using a tool like `nodemon`.
 
 **2. Frontend Development Server (New React UI):**
 
@@ -169,13 +169,20 @@ This project is set up to be understandable and extensible.
 
 ### Making Modifications
 
-*   **Backend Logic:** Core AI agent logic is in `server.js`. Tool definitions are also in this file.
+*   **Backend Logic:**
+    *   Main application setup and orchestration: `index.js`
+    *   Core agent definitions (Orchestrator, Research, Utility): `agents/` directory
+    *   Tool definitions (WebSearchTool, CalculatorTool, etc.): `tools/` directory
+    *   LLM service interaction (e.g., `geminiLLMService`): `services/` directory
+    *   Task and result queues: `core/` directory
 *   **Frontend UI:** The React UI is in the `frontend/` directory, primarily within `frontend/src/`. Key components include `App.jsx`, `TaskInputForm.jsx`, and `ResultsDisplay.jsx`.
 *   **Adding New Tools (Backend):**
-    1.  Define your new tool class in `server.js` with an `async execute(inputObject)` method.
-    2.  Instantiate it in `executePlanLoop`'s `availableTools` map.
-    3.  Add its description to the `tools` array in `generatePlanWithGemini`.
-    4.  Update the tool dispatch logic in `executePlanLoop` for the new tool.
+    1.  Define your new tool class in a new file within the `tools/` directory (e.g., `tools/MyNewTool.js`) with an `async execute(inputObject)` method, and export the class.
+    2.  Import your new tool in `index.js` (e.g., `const MyNewTool = require('./tools/MyNewTool');`).
+    3.  Instantiate it in `index.js` where other tools are initialized (e.g., `const myNewTool = new MyNewTool();`).
+    4.  Pass the new tool instance to the relevant agent(s) via their constructor or a dedicated method, typically by adding it to the `toolsMap` provided to the agent in `index.js`.
+    5.  Update the `workerAgentCapabilities` in `agents/OrchestratorAgent.js` to include the description of the new tool for the appropriate agent role, so the Orchestrator knows it exists and can plan to use it.
+    6.  Ensure the agent that will use the tool (e.g., `ResearchAgent.js`, `UtilityAgent.js`, or a new agent) has logic in its `processTaskMessage` method to handle the `tool_name` and call its `execute` method with the correct `sub_task_input`.
 
 ### Contributing (Basic Guidelines)
 
