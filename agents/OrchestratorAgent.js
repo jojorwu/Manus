@@ -26,8 +26,6 @@ async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, kno
             return { success: false, message: "LLM plan is not a JSON array of stages.", rawResponse: cleanedString, stages: [] };
         }
         if (parsedStages.length === 0) {
-            // Можно решить, является ли план без стадий ошибкой или валидным пустым планом.
-            // Для строгости, если задача была, а стадий нет - это ошибка.
             return { success: false, message: "LLM plan is empty (no stages).", rawResponse: cleanedString, stages: [] };
         }
 
@@ -141,7 +139,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
     console.log("OrchestratorAgent: Planning Prompt being sent to LLM:", planningPrompt);
     let planJsonString;
     try {
-      planJsonString = await this.llmService(planningPrompt); // callGemini
+      planJsonString = await this.llmService(planningPrompt);
     } catch (llmError) {
       console.error("OrchestratorAgent: Error from LLM service during planning:", llmError.message);
       return { success: false, message: `Failed to generate plan: ${llmError.message}`, originalTask: userTaskString, executedPlan: [] };
@@ -154,27 +152,21 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
       return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, details: parsedPlanResult.details, originalTask: userTaskString, executedPlan: [], rawResponse: parsedPlanResult.rawResponse };
     }
 
-    // const subTasks = parsedPlanResult.subTasks; // Old: single list of subTasks
-    const planStages = parsedPlanResult.stages; // New: array of stages (which are arrays of subTasks)
-
-    // console.log(`OrchestratorAgent: Parsed plan with ${subTasks.length} sub-tasks.`); // Old
+    const planStages = parsedPlanResult.stages;
     console.log(`OrchestratorAgent: Parsed plan with ${planStages.length} stage(s).`);
 
-
-    const allExecutedStepsInfo = []; // Will store {narrative_step, assigned_agent_role, tool_name, sub_task_input} for each step
-    const allSubTaskResults = []; // Will store the actual outcome of each step execution
+    const allExecutedStepsInfo = [];
+    const executionContext = [];
     let overallSuccess = true;
 
-    // Loop through each stage
     for (let i = 0; i < planStages.length; i++) {
-        const stage = planStages[i];
-        console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${stage.length} sub-task(s).`);
+        const currentStageTaskDefinitions = planStages[i];
+        console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
 
         const stageSubTaskPromises = [];
 
-        // Dispatch all sub-tasks in the current stage
-        for (const subTaskDefinition of stage) {
-            allExecutedStepsInfo.push({ // Store definition for final plan summary
+        for (const subTaskDefinition of currentStageTaskDefinitions) {
+            allExecutedStepsInfo.push({
                 narrative_step: subTaskDefinition.narrative_step,
                 assigned_agent_role: subTaskDefinition.assigned_agent_role,
                 tool_name: subTaskDefinition.tool_name,
@@ -182,6 +174,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             });
 
             const sub_task_id = uuidv4();
+
             const taskMessage = {
                 sub_task_id: sub_task_id,
                 parent_task_id: parentTaskId,
@@ -195,7 +188,6 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             this.subTaskQueue.enqueueTask(taskMessage);
             console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
 
-            // Create a promise that resolves with the result of this sub-task
             const subTaskPromise = new Promise((resolve) => {
                 this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
                     if (error) {
@@ -223,71 +215,96 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             stageSubTaskPromises.push(subTaskPromise);
         }
 
-        // Wait for all sub-tasks in the current stage to complete
         const stageResults = await Promise.all(stageSubTaskPromises);
-        allSubTaskResults.push(...stageResults); // Add all results from this stage to the main list
 
-        // Check if any sub-task in the stage failed
+        stageResults.forEach((resultOfSubTask, index) => {
+            const subTaskDefinition = currentStageTaskDefinitions[index];
+            const contextEntry = {
+                narrative_step: subTaskDefinition.narrative_step,
+                assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                tool_name: subTaskDefinition.tool_name,
+                sub_task_input: subTaskDefinition.sub_task_input,
+                status: resultOfSubTask.status,
+                result_data: resultOfSubTask.result_data,
+                error_details: resultOfSubTask.error_details,
+                sub_task_id: resultOfSubTask.sub_task_id
+            };
+            executionContext.push(contextEntry);
+        });
+
         for (const result of stageResults) {
             if (result.status === "FAILED") {
                 console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`);
                 overallSuccess = false;
-                break; // Exit this stage's result checking loop
+                break;
             }
         }
 
         if (!overallSuccess) {
-            break; // Exit the main stage loop if a sub-task failed
+            break;
         }
         console.log(`OrchestratorAgent: Stage ${i + 1} completed successfully.`);
     }
-
 
     console.log(`OrchestratorAgent: Finished processing all stages for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
 
     let finalOrchestratorResponse = {
       success: overallSuccess,
-      message: "", // Will be set based on synthesis outcome
+      message: "",
       originalTask: userTaskString,
-      plan: allExecutedStepsInfo, // Use the collected definitions for the plan structure
-      executedPlan: allSubTaskResults,
+      plan: allExecutedStepsInfo,
+      executedPlan: executionContext,
       finalAnswer: null
     };
 
-    if (overallSuccess && allSubTaskResults.length > 0) {
-      let synthesisContext = "";
-      allSubTaskResults.forEach(res => {
-        if (res.status === "COMPLETED" && res.result_data) {
-          synthesisContext += `Step: ${res.narrative_step || res.tool_name}\nResult: ${JSON.stringify(res.result_data)}\n---\n`; // Stringify result_data
-        } else if (res.status === "COMPLETED" && !res.result_data) {
-          synthesisContext += `Step: ${res.narrative_step || res.tool_name}\nAction completed (no specific data returned).\n---\n`;
-        }
-      });
+    if (overallSuccess && executionContext.length > 0) {
+        const contextForLLMSynthesis = executionContext.map(entry => ({
+            step_narrative: entry.narrative_step,
+            tool_used: entry.tool_name,
+            input_details: entry.sub_task_input,
+            status: entry.status,
+            outcome_data: entry.result_data,
+            error_info: entry.error_details
+        }));
 
-      if (synthesisContext.trim() === "") {
-        console.log("OrchestratorAgent: No successful results with data to synthesize. Skipping synthesis.");
-        finalOrchestratorResponse.message = "All sub-tasks completed, but no specific data to synthesize for a final answer.";
-        finalOrchestratorResponse.finalAnswer = "No specific data was gathered to form a final answer, but all steps completed.";
-      } else {
-        const synthesisPrompt = `Original user task: '${userTaskString}'.
-The following are the results from executed sub-tasks (processed sequentially or in parallel stages):
----
-${synthesisContext.trim()}
----
-Based on the original user task and the results from the executed sub-tasks, provide a comprehensive and coherent final answer to the user. Integrate the information smoothly. If some steps yielded no specific data but were just actions, acknowledge them if relevant to the narrative.`;
+        const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
 
-        console.log("OrchestratorAgent: Attempting final synthesis with prompt:", synthesisPrompt);
-        try {
-          const synthesizedAnswer = await this.llmService(synthesisPrompt);
-          finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
-          finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
-          console.log("OrchestratorAgent: Final answer synthesized successfully.");
-        } catch (synthError) {
-          console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
-          finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
-          finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
+        if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
+            console.log("OrchestratorAgent: No successful results with actionable data to synthesize. Skipping synthesis.");
+            finalOrchestratorResponse.message = "All sub-tasks were executed, but no specific data was gathered or all steps failed, so a synthesized answer cannot be provided.";
+            finalOrchestratorResponse.finalAnswer = "The process completed, but no specific information was generated to form a final answer, or all steps resulted in errors.";
+        } else {
+            const synthesisPrompt = `The original user task was: "${userTaskString}".
+A plan was executed to address this task. The following is a JSON array detailing each step of the execution. Each object in the array represents a step and includes:
+- 'step_narrative': A human-readable description of the step's purpose.
+- 'tool_used': The name of the tool used for the step.
+- 'input_details': The input provided to the tool for this step.
+- 'status': The execution status of the step ('COMPLETED' or 'FAILED').
+- 'outcome_data': The data returned by the tool if the step completed successfully (can be null).
+- 'error_info': Details of the error if the step failed.
+---
+Execution History (JSON Array):
+${synthesisContextString}
+---
+Based on the original user task and the detailed execution history provided above, synthesize a comprehensive and coherent final answer for the user.
+If a step failed, acknowledge it briefly if relevant, but focus on the information gathered from successful steps to formulate the answer.
+Integrate the information smoothly. If some steps were just actions and yielded no specific data but completed successfully (i.e., 'outcome_data' is null or undefined), acknowledge them if relevant to the overall narrative of the answer.
+Provide only the final answer to the user. Do not repeat the execution history in your answer.`;
+
+            console.log("OrchestratorAgent: Attempting final synthesis with new structured prompt and context.");
+            // console.log("OrchestratorAgent: Synthesis Prompt:", synthesisPrompt);
+
+            try {
+                const synthesizedAnswer = await this.llmService(synthesisPrompt);
+                finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
+                finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
+                console.log("OrchestratorAgent: Final answer synthesized successfully.");
+            } catch (synthError) {
+                console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
+                finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
+                finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
+            }
         }
-      }
     } else if (!overallSuccess) {
       finalOrchestratorResponse.message = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
     } else {
