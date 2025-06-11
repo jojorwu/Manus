@@ -62,8 +62,9 @@ const geminiLLMService = async (prompt) => {
     // Здесь должна быть реальная интеграция с @google/generative-ai
     // GEMINI_API_KEY должен быть доступен из process.env
     if (!process.env.GEMINI_API_KEY) {
-        console.error("GEMINI_API_KEY is not set in .env file.");
-        return "Error: GEMINI_API_KEY not configured.";
+        const errorMsg = "GEMINI_API_KEY is not set in .env file. LLM service cannot operate.";
+        console.error(errorMsg);
+        throw new Error(errorMsg);
     }
     // Это очень упрощенная заглушка. Реальный ответ должен быть JSON планом или синтезированным текстом.
     // Для планирования ожидается JSON массив. Для синтеза - строка.
