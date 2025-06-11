@@ -1,59 +1,68 @@
 const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
 
-// Helper function to parse and validate the LLM's plan response
+// Helper function to parse and validate the LLM's staged plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
-  const MAX_RAW_RESPONSE_LENGTH = 500;
-  let cleanedString = jsonStringResponse;
-  if (typeof jsonStringResponse !== 'string') {
-    // If the LLM service itself returned an error object/non-string
-    const detailsString = String(jsonStringResponse);
-    const trimmedDetails = detailsString.length > MAX_RAW_RESPONSE_LENGTH ? detailsString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : detailsString;
-    return { success: false, message: "LLM did not return a string response for the plan.", details: trimmedDetails, subTasks: [] };
-  }
+    const MAX_RAW_RESPONSE_LENGTH = 500; // Already defined or define here
+    let cleanedString = jsonStringResponse;
 
-  try {
-    // Remove markdown ```json ... ``` wrapper if present
-    if (cleanedString.startsWith('```json')) {
-      cleanedString = cleanedString.substring(7);
-      if (cleanedString.endsWith('```')) {
-        cleanedString = cleanedString.slice(0, -3);
-      }
-    }
-    cleanedString = cleanedString.trim();
-
-    const parsedArray = JSON.parse(cleanedString);
-
-    if (!Array.isArray(parsedArray)) {
-      return { success: false, message: "LLM plan is not a JSON array.", rawResponse: cleanedString, subTasks: [] };
-    }
-    if (parsedArray.length === 0) {
-      return { success: false, message: "LLM plan is empty.", rawResponse: cleanedString, subTasks: [] };
+    if (typeof jsonStringResponse !== 'string') {
+        const detailsString = String(jsonStringResponse);
+        const trimmedDetails = detailsString.length > MAX_RAW_RESPONSE_LENGTH ? detailsString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : detailsString;
+        return { success: false, message: "LLM did not return a string response for the plan.", details: trimmedDetails, stages: [] };
     }
 
-    for (const subTask of parsedArray) {
-      if (typeof subTask !== 'object' || subTask === null) {
-        return { success: false, message: "Invalid sub-task structure: not an object.", rawResponse: cleanedString, subTasks: [] };
-      }
-      if (!subTask.assigned_agent_role || typeof subTask.assigned_agent_role !== 'string' || !knownAgentRoles.includes(subTask.assigned_agent_role)) {
-        return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, subTasks: [] };
-      }
-      if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !(knownToolsByRole[subTask.assigned_agent_role] && knownToolsByRole[subTask.assigned_agent_role].includes(subTask.tool_name))) {
-        return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, subTasks: [] };
-      }
-      if (typeof subTask.sub_task_input !== 'object' || subTask.sub_task_input === null) {
-        // Allow empty object for tools that might not need input, but must be an object
-        return { success: false, message: "Invalid 'sub_task_input': must be an object.", rawResponse: cleanedString, subTasks: [] };
-      }
-      if (!subTask.narrative_step || typeof subTask.narrative_step !== 'string' || !subTask.narrative_step.trim()) {
-        return { success: false, message: "Missing or empty 'narrative_step'.", rawResponse: cleanedString, subTasks: [] };
-      }
+    try {
+        if (cleanedString.startsWith('```json')) {
+            cleanedString = cleanedString.substring(7);
+            if (cleanedString.endsWith('```')) {
+                cleanedString = cleanedString.slice(0, -3);
+            }
+        }
+        cleanedString = cleanedString.trim();
+
+        const parsedStages = JSON.parse(cleanedString);
+
+        if (!Array.isArray(parsedStages)) {
+            return { success: false, message: "LLM plan is not a JSON array of stages.", rawResponse: cleanedString, stages: [] };
+        }
+        if (parsedStages.length === 0) {
+            // Можно решить, является ли план без стадий ошибкой или валидным пустым планом.
+            // Для строгости, если задача была, а стадий нет - это ошибка.
+            return { success: false, message: "LLM plan is empty (no stages).", rawResponse: cleanedString, stages: [] };
+        }
+
+        for (const stage of parsedStages) {
+            if (!Array.isArray(stage)) {
+                return { success: false, message: "Invalid stage in plan: not an array.", rawResponse: cleanedString, stages: [] };
+            }
+            if (stage.length === 0) {
+                return { success: false, message: "Invalid stage in plan: stage is empty.", rawResponse: cleanedString, stages: [] };
+            }
+            for (const subTask of stage) {
+                if (typeof subTask !== 'object' || subTask === null) {
+                    return { success: false, message: "Invalid sub-task structure: not an object.", rawResponse: cleanedString, stages: [] };
+                }
+                if (!subTask.assigned_agent_role || typeof subTask.assigned_agent_role !== 'string' || !knownAgentRoles.includes(subTask.assigned_agent_role)) {
+                    return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
+                }
+                const agentTools = knownToolsByRole[subTask.assigned_agent_role];
+                if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !agentTools || !agentTools.includes(subTask.tool_name)) {
+                    return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
+                }
+                if (typeof subTask.sub_task_input !== 'object' || subTask.sub_task_input === null) {
+                    return { success: false, message: "Invalid 'sub_task_input': must be an object.", rawResponse: cleanedString, stages: [] };
+                }
+                if (!subTask.narrative_step || typeof subTask.narrative_step !== 'string' || !subTask.narrative_step.trim()) {
+                    return { success: false, message: "Missing or empty 'narrative_step'.", rawResponse: cleanedString, stages: [] };
+                }
+            }
+        }
+        return { success: true, stages: parsedStages };
+    } catch (e) {
+        const trimmedRawResponse = cleanedString.length > MAX_RAW_RESPONSE_LENGTH ? cleanedString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : cleanedString;
+        console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", trimmedRawResponse);
+        return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: trimmedRawResponse, stages: [] };
     }
-    return { success: true, subTasks: parsedArray };
-  } catch (e) {
-    const trimmedRawResponse = cleanedString.length > MAX_RAW_RESPONSE_LENGTH ? cleanedString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : cleanedString;
-    console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", trimmedRawResponse);
-    return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: trimmedRawResponse, subTasks: [] };
-  }
 }
 
 
@@ -108,15 +117,26 @@ class OrchestratorAgent {
     const planningPrompt = `User task: '${userTaskString}'.
 Available agent capabilities:
 ${formattedAgentCapabilitiesString}
-Based on the user task and available agents, create a sequential plan consisting of sub-tasks to achieve the user's goal.
-Your output MUST be a JSON array of sub-task objects. Each object in the array must have the following keys:
+Based on the user task and available agents, create a multi-stage execution plan.
+The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
+Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
+Each sub-task object in an inner array must have the following keys:
 1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}]).
 2. 'tool_name': String (must be a tool available to the assigned agent, as listed in its capabilities).
 3. 'sub_task_input': Object (the input for the specified tool, matching its described input format).
 4. 'narrative_step': String (a short, human-readable description of this step's purpose in the context of the overall user task).
-Example of a sub-task object for a ResearchAgent using WebSearchTool:
-{ "assigned_agent_role": "ResearchAgent", "tool_name": "WebSearchTool", "sub_task_input": { "query": "history of AI" }, "narrative_step": "Search for the history of AI." }
-Produce ONLY the JSON array of sub-tasks. Do not include any other text before or after the JSON array.`;
+
+Example of a valid two-stage plan:
+[
+  [
+    { "assigned_agent_role": "ResearchAgent", "tool_name": "WebSearchTool", "sub_task_input": { "query": "weather in Paris" }, "narrative_step": "Search for weather in Paris." },
+    { "assigned_agent_role": "ResearchAgent", "tool_name": "WebSearchTool", "sub_task_input": { "query": "currency exchange rate USD to EUR" }, "narrative_step": "Search for USD to EUR exchange rate." }
+  ],
+  [
+    { "assigned_agent_role": "UtilityAgent", "tool_name": "CalculatorTool", "sub_task_input": { "expression": "100 * 1.1" }, "narrative_step": "Calculate something based on previous results." }
+  ]
+]
+Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
     console.log("OrchestratorAgent: Planning Prompt being sent to LLM:", planningPrompt);
     let planJsonString;
@@ -134,83 +154,102 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
       return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, details: parsedPlanResult.details, originalTask: userTaskString, executedPlan: [], rawResponse: parsedPlanResult.rawResponse };
     }
 
-    const subTasks = parsedPlanResult.subTasks;
+    // const subTasks = parsedPlanResult.subTasks; // Old: single list of subTasks
+    const planStages = parsedPlanResult.stages; // New: array of stages (which are arrays of subTasks)
 
-    console.log(`OrchestratorAgent: Parsed plan with ${subTasks.length} sub-tasks.`);
+    // console.log(`OrchestratorAgent: Parsed plan with ${subTasks.length} sub-tasks.`); // Old
+    console.log(`OrchestratorAgent: Parsed plan with ${planStages.length} stage(s).`);
 
-    const allSubTaskResults = [];
+
+    const allExecutedStepsInfo = []; // Will store {narrative_step, assigned_agent_role, tool_name, sub_task_input} for each step
+    const allSubTaskResults = []; // Will store the actual outcome of each step execution
     let overallSuccess = true;
 
-    for (const subTaskDefinition of subTasks) {
-      const sub_task_id = uuidv4();
-      const taskMessage = {
-        sub_task_id: sub_task_id,
-        parent_task_id: parentTaskId,
-        assigned_agent_role: subTaskDefinition.assigned_agent_role,
-        tool_name: subTaskDefinition.tool_name,
-        sub_task_input: subTaskDefinition.sub_task_input,
-        narrative_step: subTaskDefinition.narrative_step,
-        // context_summary: null, // Context will be handled by a different system later if needed per sub-task
-        // api_keys_config_ref: null
-      };
+    // Loop through each stage
+    for (let i = 0; i < planStages.length; i++) {
+        const stage = planStages[i];
+        console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${stage.length} sub-task(s).`);
 
-      console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
-      this.subTaskQueue.enqueueTask(taskMessage);
-      console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}"`);
+        const stageSubTaskPromises = [];
 
-      const stepResultOutcome = await new Promise((resolve) => {
-        this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
-          if (error) {
-            console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id}:`, error.message);
-            resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
-          } else if (resultMsg) {
-             // Ensure we only process the result for the specific sub_task_id we are waiting for
-            if (resultMsg.sub_task_id === sub_task_id) {
-                console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id}. Status: ${resultMsg.status}`);
-                resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
-            } else {
-                // This case should ideally not occur if ResultsQueue.subscribeOnce filters correctly.
-                // Receiving a result for a different sub_task_id than expected by this specific subscriber
-                // is an anomaly. Instead of re-queueing (which could lead to loops),
-                // we'll treat it as an error for this step.
-                const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId}. This indicates an issue with result routing or subscription logic.`;
-                console.error(errorMessage);
-                // Убедимся, что taskMessage доступна в этой области
-                // const currentTaskMessage = taskMessage; // Если taskMessage переопределяется, но она должна быть из for loop
-                resolve({
-                    sub_task_id: sub_task_id, // Используем ожидаемый sub_task_id, так как для него ошибка
-                    narrative_step: taskMessage.narrative_step,
-                    tool_name: taskMessage.tool_name,
-                    assigned_agent_role: taskMessage.assigned_agent_role,
-                    status: "FAILED",
-                    error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
-                });
+        // Dispatch all sub-tasks in the current stage
+        for (const subTaskDefinition of stage) {
+            allExecutedStepsInfo.push({ // Store definition for final plan summary
+                narrative_step: subTaskDefinition.narrative_step,
+                assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                tool_name: subTaskDefinition.tool_name,
+                sub_task_input: subTaskDefinition.sub_task_input
+            });
+
+            const sub_task_id = uuidv4();
+            const taskMessage = {
+                sub_task_id: sub_task_id,
+                parent_task_id: parentTaskId,
+                assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                tool_name: subTaskDefinition.tool_name,
+                sub_task_input: subTaskDefinition.sub_task_input,
+                narrative_step: subTaskDefinition.narrative_step,
+            };
+
+            console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
+            this.subTaskQueue.enqueueTask(taskMessage);
+            console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
+
+            // Create a promise that resolves with the result of this sub-task
+            const subTaskPromise = new Promise((resolve) => {
+                this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
+                    if (error) {
+                        console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1}):`, error.message);
+                        resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
+                    } else if (resultMsg) {
+                        if (resultMsg.sub_task_id === sub_task_id) {
+                            console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`);
+                            resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
+                        } else {
+                            const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId} (Stage ${i+1}). This indicates an issue with result routing or subscription logic.`;
+                            console.error(errorMessage);
+                            resolve({
+                                sub_task_id: sub_task_id,
+                                narrative_step: taskMessage.narrative_step,
+                                tool_name: taskMessage.tool_name,
+                                assigned_agent_role: taskMessage.assigned_agent_role,
+                                status: "FAILED",
+                                error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
+                            });
+                        }
+                    }
+                }, sub_task_id);
+            });
+            stageSubTaskPromises.push(subTaskPromise);
+        }
+
+        // Wait for all sub-tasks in the current stage to complete
+        const stageResults = await Promise.all(stageSubTaskPromises);
+        allSubTaskResults.push(...stageResults); // Add all results from this stage to the main list
+
+        // Check if any sub-task in the stage failed
+        for (const result of stageResults) {
+            if (result.status === "FAILED") {
+                console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`);
+                overallSuccess = false;
+                break; // Exit this stage's result checking loop
             }
-          }
-        }, sub_task_id); // Subscribe specifically for this sub_task_id
-      });
+        }
 
-      allSubTaskResults.push(stepResultOutcome);
-
-      if (stepResultOutcome.status === "FAILED") {
-        console.error(`Orchestrator: Sub-task ${sub_task_id} ("${stepResultOutcome.narrative_step}") failed. Halting further sub-task dispatches for this parent task.`);
-        overallSuccess = false;
-        break;
-      }
+        if (!overallSuccess) {
+            break; // Exit the main stage loop if a sub-task failed
+        }
+        console.log(`OrchestratorAgent: Stage ${i + 1} completed successfully.`);
     }
 
-    console.log(`OrchestratorAgent: Finished processing all sub-tasks for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
+
+    console.log(`OrchestratorAgent: Finished processing all stages for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
 
     let finalOrchestratorResponse = {
       success: overallSuccess,
       message: "", // Will be set based on synthesis outcome
       originalTask: userTaskString,
-      plan: subTasks.map(st => ({
-        narrative_step: st.narrative_step,
-        assigned_agent_role: st.assigned_agent_role,
-        tool_name: st.tool_name,
-        sub_task_input: st.sub_task_input
-      })),
+      plan: allExecutedStepsInfo, // Use the collected definitions for the plan structure
       executedPlan: allSubTaskResults,
       finalAnswer: null
     };
@@ -219,11 +258,10 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
       let synthesisContext = "";
       allSubTaskResults.forEach(res => {
         if (res.status === "COMPLETED" && res.result_data) {
-          synthesisContext += `Step: ${res.narrative_step || res.tool_name}\nResult: ${res.result_data}\n---\n`;
+          synthesisContext += `Step: ${res.narrative_step || res.tool_name}\nResult: ${JSON.stringify(res.result_data)}\n---\n`; // Stringify result_data
         } else if (res.status === "COMPLETED" && !res.result_data) {
           synthesisContext += `Step: ${res.narrative_step || res.tool_name}\nAction completed (no specific data returned).\n---\n`;
         }
-        // Optionally, could include failed steps in context for synthesis if desired, but typically focus on successes.
       });
 
       if (synthesisContext.trim() === "") {
@@ -232,7 +270,7 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
         finalOrchestratorResponse.finalAnswer = "No specific data was gathered to form a final answer, but all steps completed.";
       } else {
         const synthesisPrompt = `Original user task: '${userTaskString}'.
-The following are the results from executed sub-tasks:
+The following are the results from executed sub-tasks (processed sequentially or in parallel stages):
 ---
 ${synthesisContext.trim()}
 ---
@@ -240,7 +278,7 @@ Based on the original user task and the results from the executed sub-tasks, pro
 
         console.log("OrchestratorAgent: Attempting final synthesis with prompt:", synthesisPrompt);
         try {
-          const synthesizedAnswer = await this.llmService(synthesisPrompt); // callGemini
+          const synthesizedAnswer = await this.llmService(synthesisPrompt);
           finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
           finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
           console.log("OrchestratorAgent: Final answer synthesized successfully.");
@@ -248,13 +286,11 @@ Based on the original user task and the results from the executed sub-tasks, pro
           console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
           finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
           finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
-          // Keep success: true as sub-tasks did complete, but synthesis is an add-on.
-          // Alternatively, could set success: false here if synthesis is critical.
         }
       }
     } else if (!overallSuccess) {
       finalOrchestratorResponse.message = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
-    } else { // overallSuccess is true but allSubTaskResults is empty (shouldn't happen if plan was not empty)
+    } else {
       finalOrchestratorResponse.message = "No sub-tasks were executed, though the process was marked successful.";
     }
 
