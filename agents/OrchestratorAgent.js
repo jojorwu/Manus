@@ -2,10 +2,13 @@ const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
 
 // Helper function to parse and validate the LLM's plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
+  const MAX_RAW_RESPONSE_LENGTH = 500;
   let cleanedString = jsonStringResponse;
   if (typeof jsonStringResponse !== 'string') {
     // If the LLM service itself returned an error object/non-string
-    return { success: false, message: "LLM did not return a string response for the plan.", details: String(jsonStringResponse), subTasks: [] };
+    const detailsString = String(jsonStringResponse);
+    const trimmedDetails = detailsString.length > MAX_RAW_RESPONSE_LENGTH ? detailsString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : detailsString;
+    return { success: false, message: "LLM did not return a string response for the plan.", details: trimmedDetails, subTasks: [] };
   }
 
   try {
@@ -47,8 +50,9 @@ async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, kno
     }
     return { success: true, subTasks: parsedArray };
   } catch (e) {
-    console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", cleanedString);
-    return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: cleanedString, subTasks: [] };
+    const trimmedRawResponse = cleanedString.length > MAX_RAW_RESPONSE_LENGTH ? cleanedString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : cleanedString;
+    console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", trimmedRawResponse);
+    return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: trimmedRawResponse, subTasks: [] };
   }
 }
 
