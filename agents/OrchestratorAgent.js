@@ -1,13 +1,14 @@
 const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
 
-const { v4: uuidv4 } = require('uuid'); // Ensure uuid is available
-
 // Helper function to parse and validate the LLM's plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
+  const MAX_RAW_RESPONSE_LENGTH = 500;
   let cleanedString = jsonStringResponse;
   if (typeof jsonStringResponse !== 'string') {
     // If the LLM service itself returned an error object/non-string
-    return { success: false, message: "LLM did not return a string response for the plan.", details: String(jsonStringResponse), subTasks: [] };
+    const detailsString = String(jsonStringResponse);
+    const trimmedDetails = detailsString.length > MAX_RAW_RESPONSE_LENGTH ? detailsString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : detailsString;
+    return { success: false, message: "LLM did not return a string response for the plan.", details: trimmedDetails, subTasks: [] };
   }
 
   try {
@@ -49,8 +50,9 @@ async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, kno
     }
     return { success: true, subTasks: parsedArray };
   } catch (e) {
-    console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", cleanedString);
-    return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: cleanedString, subTasks: [] };
+    const trimmedRawResponse = cleanedString.length > MAX_RAW_RESPONSE_LENGTH ? cleanedString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : cleanedString;
+    console.error("Error parsing sub-task plan JSON:", e.message, "Raw response:", trimmedRawResponse);
+    return { success: false, message: "Failed to parse LLM plan: " + e.message, rawResponse: trimmedRawResponse, subTasks: [] };
   }
 }
 
@@ -133,9 +135,6 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
     }
 
     const subTasks = parsedPlanResult.subTasks;
-    if (subTasks.length === 0) { // Should be caught by parseSubTaskPlanResponse, but as a safeguard
-        return { success: true, message: "LLM generated an empty plan. No sub-tasks to execute.", originalTask: userTaskString, executedPlan: [] };
-    }
 
     console.log(`OrchestratorAgent: Parsed plan with ${subTasks.length} sub-tasks.`);
 
@@ -169,12 +168,22 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
                 console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id}. Status: ${resultMsg.status}`);
                 resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
             } else {
-                // This should ideally not happen if subscribeOnce correctly handles sub_task_id filtering
-                // or if only one sub-task is awaited at a time under a parentTaskId by subscribeOnce.
-                // If it does, re-queue the mismatched result and let this specific subscription time out or resolve correctly.
-                console.warn(`Orchestrator: Mismatched sub_task_id in result queue for parent_task_id ${parentTaskId}. Expected ${sub_task_id}, got ${resultMsg.sub_task_id}. Re-queueing.`);
-                this.resultsQueue.enqueueResult(resultMsg);
-                // This specific promise for sub_task_id will continue to wait for its correct result or timeout.
+                // This case should ideally not occur if ResultsQueue.subscribeOnce filters correctly.
+                // Receiving a result for a different sub_task_id than expected by this specific subscriber
+                // is an anomaly. Instead of re-queueing (which could lead to loops),
+                // we'll treat it as an error for this step.
+                const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId}. This indicates an issue with result routing or subscription logic.`;
+                console.error(errorMessage);
+                // Убедимся, что taskMessage доступна в этой области
+                // const currentTaskMessage = taskMessage; // Если taskMessage переопределяется, но она должна быть из for loop
+                resolve({
+                    sub_task_id: sub_task_id, // Используем ожидаемый sub_task_id, так как для него ошибка
+                    narrative_step: taskMessage.narrative_step,
+                    tool_name: taskMessage.tool_name,
+                    assigned_agent_role: taskMessage.assigned_agent_role,
+                    status: "FAILED",
+                    error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
+                });
             }
           }
         }, sub_task_id); // Subscribe specifically for this sub_task_id

@@ -49,26 +49,33 @@ const EventEmitter = require('events');
        if (existingResultIndex !== -1) {
            const existingResult = this.results.splice(existingResultIndex, 1)[0]; // Consume it
            console.log(`ResultsQueue: Immediately providing existing result for parent_task_id ${parentTaskId}` + (sub_task_id ? ` sub_task_id ${sub_task_id}` : ''));
+           // Таймер не создавался, поэтому очищать его не нужно.
            callback(null, existingResult);
            return;
        }
 
+       // Если результат не найден немедленно, устанавливаем таймер и подписку
        const timer = setTimeout(() => {
-         if (this.subscribers[resultKey] && (!sub_task_id || this.subscribers[resultKey].sub_task_id === sub_task_id)) {
-            delete this.subscribers[resultKey];
+         // Этот колбэк вызывается только по таймауту.
+         // Проверяем, существует ли подписчик и относится ли он к текущему sub_task_id,
+         // чтобы избежать удаления "не того" подписчика, если ключ (parentTaskId) был переиспользован.
+         const currentSubscriber = this.subscribers[resultKey];
+         if (currentSubscriber && currentSubscriber.sub_task_id === sub_task_id) {
+            delete this.subscribers[resultKey]; // Удаляем подписчика
             const timeoutError = new Error(`Timeout waiting for result of parent_task_id ${parentTaskId}` + (sub_task_id ? ` sub_task_id ${sub_task_id}` : ''));
             console.error(timeoutError.message);
-            callback(timeoutError, null);
+            callback(timeoutError, null); // Вызываем оригинальный коллбэк с ошибкой таймаута
          }
        }, timeout);
 
+       // Сохраняем подписчика. Его колбэк будет вызван, когда результат поступит через enqueueResult.
        this.subscribers[resultKey] = {
            callback: (err, resultMessage) => {
-               clearTimeout(timer);
-               // No need to delete this.subscribers[resultKey] here, already done by enqueue or timeout
+               clearTimeout(timer); // Очищаем таймер, так как результат пришел до таймаута
+               // Подписчик будет удален в enqueueResult после этого вызова.
                callback(err, resultMessage);
            },
-           sub_task_id: sub_task_id // Store expected sub_task_id if any
+           sub_task_id: sub_task_id // Сохраняем sub_task_id для точной идентификации при таймауте
        };
      }
    }
