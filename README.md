@@ -63,6 +63,13 @@ This project consists of two main components: a Node.js backend that houses the 
     *   HTTP Client: `axios`
 *   **Frontend (`frontend/` directory):** React, Vite, Tailwind CSS, Shadcn/UI, `axios`
 
+## Design Documents
+
+Detailed conceptual designs for key architectural aspects of this project can be found in the `docs/` directory:
+
+*   **[Multi-Agent System Design](./docs/multi_agent_design.md):** Outlines the architecture for the multi-agent system, including agent roles, task queue mechanisms, inter-agent communication, and API key management.
+*   **[Persistent Task Memory Design](./docs/persistent_memory_design.md):** Describes the conceptual design for saving agent task states to files for persistence, including data to persist, directory/file structure, content schemas, and agent interaction logic.
+
 ## Setup and Installation
 
 ### Prerequisites
