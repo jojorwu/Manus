@@ -154,6 +154,7 @@ Produce ONLY the JSON array of sub-tasks. Do not include any other text before o
         // api_keys_config_ref: null
       };
 
+      console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
       this.subTaskQueue.enqueueTask(taskMessage);
       console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}"`);
 

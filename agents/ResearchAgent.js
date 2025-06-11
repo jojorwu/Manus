@@ -15,6 +15,7 @@ class ResearchAgent {
 
   async processTaskMessage(taskMessage) {
     console.log(`ResearchAgent (${this.agentRole}): Received task ID ${taskMessage.sub_task_id}, tool: ${taskMessage.tool_name}`);
+    console.log('ResearchAgent: Full taskMessage received:', JSON.stringify(taskMessage, null, 2));
 
     const { tool_name, sub_task_input, sub_task_id, parent_task_id } = taskMessage;
     let outcome = { result: null, error: `Unknown tool '${tool_name}' for ResearchAgent or invalid input.` };
