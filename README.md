@@ -108,7 +108,8 @@ The API (`/api/generate-plan`) now supports a `"SYNTHESIZE_ONLY"` mode that can 
 This initial beta version has the following known limitations:
 
 *   **Tool Implementations**:
-    *   `WebSearchTool` and `ReadWebpageTool` are currently stubs and do not perform real web searches or content fetching. They require full implementation to be useful.
+    *   `ReadWebpageTool` is currently a stub and does not perform real content fetching. It requires full implementation to be useful.
+    *   `WebSearchTool` has been implemented to use the Google Custom Search Engine API for web searches.
     *   `CalculatorTool` is functional for basic mathematical expressions.
 *   **Task State Loading**:
     *   The `SYNTHESIZE_ONLY` mode's file search logic for `taskIdToLoad` is basic and may be inefficient if many dated directories exist. A more robust lookup mechanism (e.g., an index or requiring more specific path information) is needed.
