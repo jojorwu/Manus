@@ -31,9 +31,9 @@ class WebSearchTool {
                     return { result: "No search results found.", error: null };
                 }
                 const formattedResults = response.data.items.map(item => ({
-                    title: item.title,
-                    link: item.link,
-                    snippet: item.snippet,
+                    title: item.title || "",
+                    link: item.link || "",
+                    snippet: item.snippet || "",
                 }));
                 return { result: formattedResults, error: null };
             } else {

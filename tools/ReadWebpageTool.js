@@ -35,7 +35,7 @@ class ReadWebpageTool {
                     partialHtmlContent = jsonString.substring(0, MAX_CONTENT_LENGTH);
                 } catch (e) {
                     console.warn(`ReadWebpageTool: Could not stringify object from URL: ${input.url}`, e);
-                    return { result: null, error: { category: "UNEXPECTED_CONTENT_TYPE", message: `ReadWebpageTool could not stringify content of type object for URL: ${input.url}`, details: { originalError: e.message } } };
+                    return { result: null, error: { category: "UNEXPECTED_CONTENT_TYPE", message: `ReadWebpageTool failed to JSON.stringify content of type object for URL: ${input.url}`, details: { originalError: e.message } } };
                 }
             } else {
                 // For other unexpected data types (null, boolean, number, undefined)
