@@ -6,12 +6,24 @@ class WebSearchTool {
     }
 
     async execute(input) {
-        console.warn(`WebSearchTool (stub) called with:`, input);
-        if (!input || typeof input.query !== 'string') {
-            return { result: null, error: "Invalid input for WebSearchTool: 'query' string is required." };
+        // console.log(`WebSearchTool: Received input for execute:`, input); // Debug log
+        if (!input || typeof input.query !== 'string' || input.query.trim() === "") {
+            // console.error("WebSearchTool: Invalid input. 'query' string is required and cannot be empty."); // Debug log
+            return { result: null, error: "Invalid input for WebSearchTool: 'query' string is required and cannot be empty." };
         }
-        // В реальной реализации здесь будет логика поиска
-        return { result: `Search results for "${input.query}" (stub)`, error: null };
+        try {
+            // В реальной реализации здесь будет логика поиска
+            // Например, вызов внешнего API
+            // if (input.query.toLowerCase().includes("error_test")) { // Для тестирования ошибок
+            //     throw new Error("Simulated API error during search.");
+            // }
+            const searchResults = `Search results for "${input.query}" (stub)`;
+            // console.log(`WebSearchTool: Successfully processed query "${input.query}".`); // Debug log
+            return { result: searchResults, error: null };
+        } catch (e) {
+            console.error(`WebSearchTool: Unexpected error searching for "${input.query}": ${e.message}`, e);
+            return { result: null, error: `Unexpected error during web search: ${e.message}` };
+        }
     }
 }
 

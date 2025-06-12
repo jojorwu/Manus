@@ -181,7 +181,6 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     console.log(`OrchestratorAgent: Received task: '${userTaskString ? userTaskString.substring(0,100)+'...' : 'N/A'}', parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
 
     if (executionMode === "SYNTHESIZE_ONLY") {
-        // ... (existing SYNTHESIZE_ONLY logic remains unchanged) ...
         if (!taskIdToLoad) {
             return { success: false, message: "SYNTHESIZE_ONLY mode requires a taskIdToLoad.", originalTask: userTaskString, executedPlan: [], finalAnswer: null };
         }
@@ -197,20 +196,33 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 try { await fs.promises.access(tryPath); stateFilePath = tryPath; break; } catch (fileAccessError) {}
             }
         } catch (baseDirError) { console.warn(`OrchestratorAgent: Error accessing saved tasks base directory ${savedTasksBaseDir}: ${baseDirError.message}`); }
+
         if (!stateFilePath) {
-             console.warn(`OrchestratorAgent: State file for taskId '${taskIdToLoad}' not found.`);
+             console.warn(`OrchestratorAgent (SYNTHESIZE_ONLY): State file for taskId '${taskIdToLoad}' not found.`);
              return { success: false, message: `State file for task ID '${taskIdToLoad}' not found. Cannot synthesize.`, originalTask: null, executedPlan: [], finalAnswer: null };
         }
-        console.log(`OrchestratorAgent: Attempting to load state from ${stateFilePath} for SYNTHESIZE_ONLY mode.`);
-        const loadResult = await loadTaskState(stateFilePath);
-        if (!loadResult.success || !loadResult.taskState) return { success: false, message: `Failed to load task state for taskId '${taskIdToLoad}': ${loadResult.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
-        loadedState = loadResult.taskState;
+
+        console.log(`OrchestratorAgent (SYNTHESIZE_ONLY): Attempting to load state from ${stateFilePath}.`);
+        try {
+            const loadResult = await loadTaskState(stateFilePath);
+            if (!loadResult.success || !loadResult.taskState) {
+                console.error(`OrchestratorAgent (SYNTHESIZE_ONLY): Failed to load task state from ${stateFilePath}: ${loadResult.message}`);
+                return { success: false, message: `Failed to load task state for taskId '${taskIdToLoad}': ${loadResult.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
+            }
+            loadedState = loadResult.taskState;
+        } catch (loadError) {
+            console.error(`OrchestratorAgent (SYNTHESIZE_ONLY): Critical error loading task state from ${stateFilePath}: ${loadError.message}`);
+            return { success: false, message: `Critical error loading task state for taskId '${taskIdToLoad}': ${loadError.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
+        }
+
         const originalUserTaskString = loadedState.userTaskString;
         if (!loadedState.executionContext || loadedState.executionContext.length === 0) return { success: false, message: `No execution context found for taskId '${taskIdToLoad}'. Cannot synthesize.`, originalTask: originalUserTaskString, executedPlan: loadedState.executionContext, finalAnswer: null };
+
         const executionContextForSynthesis = loadedState.executionContext.map(entry => ({ ...entry, outcome_data: entry.processed_result_data !== undefined ? entry.processed_result_data : entry.result_data }));
         const contextForLLMSynthesis = executionContextForSynthesis.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.outcome_data, error_info: entry.error_details }));
         const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
         let finalAnswer = null; let synthesisMessage = "";
+
         if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
             console.log("OrchestratorAgent (SYNTHESIZE_ONLY): No successful results with actionable data to synthesize.");
             synthesisMessage = "Loaded task state contained no specific data to synthesize from, or all steps had failed.";
@@ -244,24 +256,19 @@ Based on the original user task and the detailed execution history, synthesize a
         let parsedPlanResult = null;
         const templatePlan = await this.tryGetPlanFromTemplate(userTaskString);
 
-        const knownAgentRoles = []; // Define here to be in scope for LLM planning if needed
-        const knownToolsByRole = {}; // Define here for the same reason
+        const knownAgentRoles = [];
+        const knownToolsByRole = {};
 
         if (templatePlan) {
             console.log("OrchestratorAgent: Using plan from template.");
-            // Validate template plan structure (basic validation, more can be added if needed)
             if (Array.isArray(templatePlan) && templatePlan.every(stage => Array.isArray(stage))) {
-                 // Here, we assume the template is validly structured regarding sub-task fields.
-                 // A more robust solution might run the templatePlan through a light version of parseSubTaskPlanResponse
-                 // or ensure templates are always valid. For now, we trust the pre-defined templates.
                 parsedPlanResult = { success: true, stages: templatePlan };
             } else {
                 console.error("OrchestratorAgent: Template plan is not in the expected format (array of stages). Falling back to LLM.");
-                // parsedPlanResult will remain null, forcing LLM planning
             }
         }
 
-        if (!parsedPlanResult) { // If no template plan or template was invalid
+        if (!parsedPlanResult) {
             console.log("OrchestratorAgent: No valid matching template found, proceeding with LLM-based planning.");
 
             let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
@@ -301,13 +308,16 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             } catch (llmError) {
                 console.error(`OrchestratorAgent (${executionMode}): Error from LLM service during planning:`, llmError.message);
                 const errorState = { taskId: parentTaskId, userTaskString, status: "FAILED_PLANNING", plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: `LLM service error: ${llmError.message}` }};
-                // ... (save error state logic)
                 const nowError = new Date(); const monthError = String(nowError.getMonth() + 1).padStart(2, '0'); const dayError = String(nowError.getDate()).padStart(2, '0'); const yearError = nowError.getFullYear();
                 const dateDirError = `tasks_${monthError}${dayError}${yearError}`;
                 const rootDirError = path.join(__dirname, '..');
                 const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
                 const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
-                await saveTaskState(errorState, taskStateFilePathError);
+                try {
+                    await saveTaskState(errorState, taskStateFilePathError);
+                } catch (saveError) {
+                    console.error(`OrchestratorAgent (${executionMode}): Failed to save error task state for ${parentTaskId} (LLM error): ${saveError.message}`);
+                }
                 return { success: false, message: `Failed to generate plan: ${llmError.message}`, taskId: parentTaskId, originalTask: userTaskString };
             }
             parsedPlanResult = await parseSubTaskPlanResponse(planJsonString, knownAgentRoles, knownToolsByRole);
@@ -318,13 +328,16 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             const TPSR_Raw_Response = parsedPlanResult ? parsedPlanResult.rawResponse : null;
             console.error(`OrchestratorAgent (${executionMode}): Failed to obtain a valid plan: ${TPSR_Error_Message}`);
             const errorState = { taskId: parentTaskId, userTaskString, status: "FAILED_PLANNING", plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: TPSR_Error_Message }, rawLLMResponse: TPSR_Raw_Response };
-            // ... (save error state logic) ...
             const nowError = new Date(); const monthError = String(nowError.getMonth() + 1).padStart(2, '0'); const dayError = String(nowError.getDate()).padStart(2, '0'); const yearError = nowError.getFullYear();
             const dateDirError = `tasks_${monthError}${dayError}${yearError}`;
             const rootDirError = path.join(__dirname, '..');
             const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
             const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
-            await saveTaskState(errorState, taskStateFilePathError);
+            try {
+                await saveTaskState(errorState, taskStateFilePathError);
+            } catch (saveError) {
+                console.error(`OrchestratorAgent (${executionMode}): Failed to save error task state for ${parentTaskId} (parse error): ${saveError.message}`);
+            }
             return { success: false, message: TPSR_Error_Message, taskId: parentTaskId, originalTask: userTaskString, rawResponse: TPSR_Raw_Response };
         }
 
@@ -333,14 +346,18 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 
         if (executionMode === "PLAN_ONLY") {
             const taskStateToSave = { taskId: parentTaskId, userTaskString, status: "PLAN_GENERATED", plan: planStages, executionContext: [], finalAnswer: null, errorSummary: null };
-            // ... (save state logic) ...
             const now = new Date(); const month = String(now.getMonth() + 1).padStart(2, '0'); const day = String(now.getDate()).padStart(2, '0'); const year = now.getFullYear();
             const dateDir = `tasks_${month}${day}${year}`;
             const rootDir = path.join(__dirname, '..');
             const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
             const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
-            await saveTaskState(taskStateToSave, taskStateFilePath);
-            return { success: true, message: "Plan generated and saved successfully.", taskId: parentTaskId, originalTask: userTaskString, plan: planStages };
+            try {
+                await saveTaskState(taskStateToSave, taskStateFilePath);
+                return { success: true, message: "Plan generated and saved successfully.", taskId: parentTaskId, originalTask: userTaskString, plan: planStages };
+            } catch (saveError) {
+                console.error(`OrchestratorAgent (PLAN_ONLY): Failed to save task state for ${parentTaskId}: ${saveError.message}`);
+                return { success: true, message: "Plan generated, but failed to save task state: " + saveError.message, taskId: parentTaskId, originalTask: userTaskString, plan: planStages };
+            }
         }
 
         // --- EXECUTE_FULL_PLAN specific logic continues ---
@@ -349,7 +366,6 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
         let overallSuccess = true;
 
         for (let i = 0; i < planStages.length; i++) {
-            // ... (existing stage execution logic, including summarization call) ...
             const currentStageTaskDefinitions = planStages[i];
             console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
             const stageSubTaskPromises = [];
@@ -393,7 +409,6 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
         let finalOrchestratorResponse = { success: overallSuccess, message: "", originalTask: userTaskString, plan: allExecutedStepsInfo, executedPlan: executionContext, finalAnswer: null };
 
         if (overallSuccess && executionContext.length > 0) {
-            // ... (existing synthesis logic, ensure it uses entry.processed_result_data) ...
             const contextForLLMSynthesis = executionContext.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.processed_result_data, error_info: entry.error_details }));
             const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
             if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
@@ -433,7 +448,6 @@ Based on the original user task and the detailed execution history provided abov
         }
 
         if (executionMode === "EXECUTE_FULL_PLAN") {
-            // ... (existing saveTaskState logic for EXECUTE_FULL_PLAN) ...
             const taskStateToSave = { taskId: parentTaskId, userTaskString, createdAt: null, updatedAt: null, status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"), currentStageIndex: null, plan: finalOrchestratorResponse.plan, executionContext: finalOrchestratorResponse.executedPlan, finalAnswer: finalOrchestratorResponse.finalAnswer, errorSummary: null };
             if (!finalOrchestratorResponse.success) {
                 taskStateToSave.errorSummary = { failedAtStage: null, reason: finalOrchestratorResponse.message };
@@ -447,7 +461,13 @@ Based on the original user task and the detailed execution history provided abov
             const rootDir = path.join(__dirname, '..');
             const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
             const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
-            await saveTaskState(taskStateToSave, taskStateFilePath);
+            try {
+                await saveTaskState(taskStateToSave, taskStateFilePath);
+            } catch (saveError) {
+                console.error(`OrchestratorAgent (EXECUTE_FULL_PLAN): Failed to save final task state for ${parentTaskId}: ${saveError.message}`);
+                finalOrchestratorResponse.message += ` (Warning: Failed to save final task state: ${saveError.message})`;
+                // The success status of finalOrchestratorResponse should reflect the execution, not the save status.
+            }
         }
         return finalOrchestratorResponse;
     } else {

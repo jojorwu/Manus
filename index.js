@@ -32,6 +32,14 @@ const agentApiKeysConfig = {
     // Другие ключи по мере необходимости
 };
 
+// Проверка наличия ключей для WebSearchTool
+if (!process.env.SEARCH_API_KEY) {
+    console.warn("WARNING: SEARCH_API_KEY is not set in .env file. WebSearchTool may not function correctly.");
+}
+if (!process.env.CSE_ID) {
+    console.warn("WARNING: CSE_ID is not set in .env file. WebSearchTool may not function correctly.");
+}
+
 // Инициализация инструментов
 const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // Предполагаем, что конструктор принимает конфиг
 const readWebpageTool = new ReadWebpageTool();
@@ -117,6 +125,10 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID.");
+    // Проверка наличия GEMINI_API_KEY при запуске сервера
+    if (!process.env.GEMINI_API_KEY) {
+        console.warn("WARNING: GEMINI_API_KEY is not set in .env file. LLM-based features will not work.");
+    }
     console.log("Available agents: Orchestrator, Research, Utility.");
     console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
