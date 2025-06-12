@@ -61,7 +61,110 @@ async function loadTaskState(filePath) {
     }
 }
 
+/**
+ * Saves an array of journal entries to a JSONL file asynchronously.
+ * Each entry is a JSON string on a new line.
+ * Creates the directory if it doesn't exist.
+ *
+ * @param {string} parentTaskId - The ID of the parent task.
+ * @param {Array<Object>} journalEntries - An array of journal entry objects.
+ * @param {string} tasksBaseDir - The base directory for saved tasks (e.g., 'saved_tasks').
+ * @returns {Promise<{success: boolean, message: string, filePath?: string, error?: any}>}
+ */
+async function saveTaskJournal(parentTaskId, journalEntries, tasksBaseDir) {
+    try {
+        const now = new Date();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const year = now.getFullYear();
+        const dateDirName = `tasks_${month}${day}${year}`;
+
+        const dateDirPath = path.join(tasksBaseDir, dateDirName);
+        await fs.promises.mkdir(dateDirPath, { recursive: true });
+
+        const fileName = `task_journal_${parentTaskId}.jsonl`;
+        const filePath = path.join(dateDirPath, fileName);
+
+        // Convert each entry to a JSON string and join with newlines
+        // Ensure a newline at the very end for proper JSONL format
+        const jsonlData = journalEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+
+        await fs.promises.writeFile(filePath, jsonlData, 'utf8');
+
+        console.log(`TaskStateUtil: Task journal saved successfully to ${filePath}`);
+        return { success: true, message: `Task journal saved to ${filePath}`, filePath: filePath };
+    } catch (error) {
+        console.error(`TaskStateUtil: Error saving task journal for parentTaskId ${parentTaskId}. Error: ${error.message}`);
+        return { success: false, message: `Failed to save task journal for parentTaskId ${parentTaskId}`, error: error };
+    }
+}
+
+/**
+ * Loads task journal entries from a JSONL file asynchronously.
+ * Searches for the file in dated subdirectories.
+ *
+ * @param {string} parentTaskId - The ID of the parent task.
+ * @param {string} tasksBaseDir - The base directory for saved tasks (e.g., 'saved_tasks').
+ * @returns {Promise<{success: boolean, message: string, journalEntries?: Array<Object>, error?: any}>}
+ */
+async function loadTaskJournal(parentTaskId, tasksBaseDir) {
+    const fileName = `task_journal_${parentTaskId}.jsonl`;
+    let foundFilePath = null;
+
+    try {
+        // Check if tasksBaseDir itself exists
+        try {
+            await fs.promises.access(tasksBaseDir, fs.constants.F_OK);
+        } catch (baseDirError) {
+            console.warn(`TaskStateUtil: Base tasks directory not found at ${tasksBaseDir}. Cannot load journal.`);
+            return { success: false, message: `Base tasks directory not found: ${tasksBaseDir}`, journalEntries: null };
+        }
+
+        const allDirents = await fs.promises.readdir(tasksBaseDir, { withFileTypes: true });
+        const dateDirs = allDirents
+            .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_'))
+            .map(dirent => dirent.name)
+            .sort((a, b) => b.localeCompare(a)); // Sort to check newest first
+
+        for (const dateDir of dateDirs) {
+            const tryPath = path.join(tasksBaseDir, dateDir, fileName);
+            try {
+                await fs.promises.access(tryPath, fs.constants.F_OK);
+                foundFilePath = tryPath;
+                break;
+            } catch (fileAccessError) {
+                // File not in this directory, continue searching
+            }
+        }
+
+        if (!foundFilePath) {
+            const message = `TaskStateUtil: Journal file ${fileName} not found in any dated subdirectory under ${tasksBaseDir}.`;
+            // console.log(message); // It's normal for a journal not to exist yet.
+            return { success: true, message: message, journalEntries: null }; // Return true, but null entries
+        }
+
+        const fileContent = await fs.promises.readFile(foundFilePath, 'utf8');
+        if (!fileContent.trim()) {
+            console.log(`TaskStateUtil: Journal file ${foundFilePath} is empty.`);
+            return { success: true, message: `Journal file ${foundFilePath} is empty.`, journalEntries: [] };
+        }
+
+        const lines = fileContent.trim().split('\n');
+        const journalEntries = lines.map(line => JSON.parse(line));
+
+        console.log(`TaskStateUtil: Task journal loaded successfully from ${foundFilePath}`);
+        return { success: true, message: `Task journal loaded from ${foundFilePath}`, journalEntries: journalEntries };
+
+    } catch (error) {
+        console.error(`TaskStateUtil: Error loading task journal ${fileName}. Error: ${error.message}`);
+        return { success: false, message: `Failed to load task journal ${fileName}`, error: error, journalEntries: null };
+    }
+}
+
+
 module.exports = {
     saveTaskState,
-    loadTaskState
+    loadTaskState,
+    saveTaskJournal,
+    loadTaskJournal
 };
