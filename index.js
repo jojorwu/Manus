@@ -63,22 +63,38 @@ app.use(express.json());
 
 // API эндпоинт для задач
 app.post('/api/generate-plan', async (req, res) => {
-    const { task } = req.body;
-    if (!task || typeof task !== 'string') {
-        return res.status(400).json({ success: false, message: "Invalid task: 'task' must be a non-empty string." });
+    const { task, taskIdToLoad, mode } = req.body;
+
+    // Определяем режим по умолчанию, если не указан
+    const effectiveMode = mode || "EXECUTE_FULL_PLAN";
+
+    if (effectiveMode === "EXECUTE_FULL_PLAN") {
+        if (!task || typeof task !== 'string' || task.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for EXECUTE_FULL_PLAN mode." });
+        }
+    } else if (effectiveMode === "SYNTHESIZE_ONLY") {
+        if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'taskIdToLoad' must be a non-empty string for SYNTHESIZE_ONLY mode." });
+        }
+        // В этом режиме 'task' не обязателен, так как он будет загружен из состояния
+    } else {
+        return res.status(400).json({ success: false, message: `Invalid request: Unknown mode '${effectiveMode}'.` });
     }
 
-    const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой задачи
+    const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой сессии обработки
 
     try {
-        console.log(`Received task: "${task}", parentTaskId: ${parentTaskId}`);
-        // Передаем задачу Оркестратору
-        const result = await orchestratorAgent.handleUserTask(task, parentTaskId);
-        console.log("Orchestrator result:", result);
+        // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
+        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, generated parentTaskId: ${parentTaskId}`);
+
+        // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
+        // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.
+        const result = await orchestratorAgent.handleUserTask(task, parentTaskId, taskIdToLoad, effectiveMode);
+        console.log("Orchestrator result:", result); // Consider logging less for very large results
         res.json(result);
     } catch (error) {
-        console.error("Error in /api/generate-plan:", error);
-        res.status(500).json({ success: false, message: "Internal server error", error: error.message });
+        console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error);
+        res.status(500).json({ success: false, message: "Internal server error", error: error.message, parentTaskId: parentTaskId });
     }
 });
 
@@ -94,5 +110,5 @@ app.listen(PORT, () => {
     console.log("Available agents: Orchestrator, Research, Utility.");
     console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
-    console.log("API endpoint for tasks: POST /api/generate-plan");
+    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY.");
 });

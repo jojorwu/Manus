@@ -1,7 +1,8 @@
 const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
 const fs = require('fs');
 const path = require('path');
-const { saveTaskState } = require('../utils/taskStateUtil'); // Путь к utils
+const { saveTaskState } = require('../utils/taskStateUtil');
+const { loadTaskState } = require('../utils/taskStateUtil'); // Added import for loadTaskState
 
 // Helper function to parse and validate the LLM's staged plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
@@ -91,8 +92,104 @@ class OrchestratorAgent {
     }
   }
 
-  async handleUserTask(userTaskString, parentTaskId) {
-    console.log(`OrchestratorAgent: Received task '${userTaskString}' with parentTaskId: ${parentTaskId}`);
+  async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
+    console.log(`OrchestratorAgent: Received task: '${userTaskString ? userTaskString.substring(0,100)+'...' : 'N/A'}', parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
+
+    if (executionMode === "SYNTHESIZE_ONLY") {
+        if (!taskIdToLoad) {
+            return { success: false, message: "SYNTHESIZE_ONLY mode requires a taskIdToLoad.", originalTask: userTaskString, executedPlan: [], finalAnswer: null };
+        }
+
+        let loadedState = null;
+        let stateFilePath = null;
+        const savedTasksBaseDir = path.join(__dirname, '..', 'saved_tasks');
+
+        if (fs.existsSync(savedTasksBaseDir)) {
+            const dateDirs = fs.readdirSync(savedTasksBaseDir, { withFileTypes: true })
+                               .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_'))
+                               .map(dirent => dirent.name)
+                               .sort((a, b) => b.localeCompare(a));
+
+            for (const dateDir of dateDirs) {
+                const tryPath = path.join(savedTasksBaseDir, dateDir, `task_state_${taskIdToLoad}.json`);
+                if (fs.existsSync(tryPath)) {
+                    stateFilePath = tryPath;
+                    break;
+                }
+            }
+        }
+
+        if (!stateFilePath) {
+             console.warn(`OrchestratorAgent: State file for taskId '${taskIdToLoad}' not found.`);
+             return { success: false, message: `State file for task ID '${taskIdToLoad}' not found. Cannot synthesize.`, originalTask: null, executedPlan: [], finalAnswer: null };
+        }
+
+        console.log(`OrchestratorAgent: Attempting to load state from ${stateFilePath} for SYNTHESIZE_ONLY mode.`);
+        const loadResult = loadTaskState(stateFilePath);
+
+        if (!loadResult.success || !loadResult.taskState) {
+            return { success: false, message: `Failed to load task state for taskId '${taskIdToLoad}': ${loadResult.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
+        }
+
+        loadedState = loadResult.taskState;
+
+        // Use originalUserTaskString from loaded state for the synthesis prompt
+        const originalUserTaskString = loadedState.userTaskString;
+
+        if (!loadedState.executionContext || loadedState.executionContext.length === 0) {
+            return { success: false, message: `No execution context found for taskId '${taskIdToLoad}'. Cannot synthesize.`, originalTask: originalUserTaskString, executedPlan: loadedState.executionContext, finalAnswer: null };
+        }
+
+        const executionContextForSynthesis = loadedState.executionContext;
+
+        const contextForLLMSynthesis = executionContextForSynthesis.map(entry => ({
+            step_narrative: entry.narrative_step,
+            tool_used: entry.tool_name,
+            input_details: entry.sub_task_input,
+            status: entry.status,
+            outcome_data: entry.result_data,
+            error_info: entry.error_details
+        }));
+        const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
+
+        let finalAnswer = null;
+        let synthesisMessage = "";
+
+        if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
+            console.log("OrchestratorAgent (SYNTHESIZE_ONLY): No successful results with actionable data to synthesize.");
+            synthesisMessage = "Loaded task state contained no specific data to synthesize from, or all steps had failed.";
+            finalAnswer = "No specific information was generated from the previous execution to form a new final answer.";
+        } else {
+            const synthesisPrompt = `The original user task was: "${originalUserTaskString}".
+A plan was previously executed for this task. The following is a JSON array detailing each step of that execution:
+---
+Execution History (JSON Array):
+${synthesisContextString}
+---
+Based on the original user task and the detailed execution history, synthesize a comprehensive and coherent final answer for the user.
+Provide only the final answer.`;
+            try {
+                finalAnswer = await this.llmService(synthesisPrompt);
+                synthesisMessage = "Synthesized answer from loaded task state.";
+                console.log("OrchestratorAgent (SYNTHESIZE_ONLY): Final answer synthesized successfully.");
+            } catch (synthError) {
+                console.error("OrchestratorAgent (SYNTHESIZE_ONLY): Error during final answer synthesis:", synthError.message);
+                finalAnswer = "Error during final answer synthesis from loaded state: " + synthError.message;
+                synthesisMessage = "Error during synthesis from loaded state.";
+            }
+        }
+        return {
+            success: true,
+            message: synthesisMessage,
+            originalTask: originalUserTaskString,
+            plan: loadedState.plan,
+            executedPlan: executionContextForSynthesis,
+            finalAnswer: finalAnswer
+        };
+    }
+
+    // --- EXECUTE_FULL_PLAN mode logic starts here ---
+    // (userTaskString is guaranteed to be present by index.js for this mode)
 
     let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
     const knownAgentRoles = [];
@@ -100,6 +197,7 @@ class OrchestratorAgent {
 
     if (!this.workerAgentCapabilities || this.workerAgentCapabilities.length === 0) {
         console.error("OrchestratorAgent: No worker agent capabilities defined. Cannot proceed with planning.");
+        // This check is also important for EXECUTE_FULL_PLAN mode
         return { success: false, message: "Internal Server Error: No worker agent capabilities configured.", originalTask: userTaskString, executedPlan: [] };
     }
 
@@ -255,7 +353,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
     let finalOrchestratorResponse = {
       success: overallSuccess,
       message: "",
-      originalTask: userTaskString,
+      originalTask: userTaskString, // This should be the actual userTaskString for EXECUTE_FULL_PLAN
       plan: allExecutedStepsInfo,
       executedPlan: executionContext,
       finalAnswer: null
@@ -315,44 +413,48 @@ Provide only the final answer to the user. Do not repeat the execution history i
       finalOrchestratorResponse.message = "No sub-tasks were executed, though the process was marked successful.";
     }
 
-    // --- Save Task State Logic ---
-    const taskStateToSave = {
-        taskId: parentTaskId,
-        userTaskString: userTaskString,
-        createdAt: null,
-        updatedAt: null,
-        status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"),
-        currentStageIndex: null,
-        plan: finalOrchestratorResponse.plan,
-        executionContext: finalOrchestratorResponse.executedPlan,
-        finalAnswer: finalOrchestratorResponse.finalAnswer,
-        errorSummary: null
-    };
-
-    if (!finalOrchestratorResponse.success) {
-        taskStateToSave.errorSummary = {
-            failedAtStage: null, // Placeholder
-            reason: finalOrchestratorResponse.message
+    // --- Save Task State Logic (only for EXECUTE_FULL_PLAN mode) ---
+    // The taskStateToSave.userTaskString should be the one used for planning.
+    // For SYNTHESIZE_ONLY, we don't re-save.
+    if (executionMode === "EXECUTE_FULL_PLAN") {
+        const taskStateToSave = {
+            taskId: parentTaskId,
+            userTaskString: userTaskString, // This is the original task string for this execution
+            createdAt: null,
+            updatedAt: null,
+            status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"),
+            currentStageIndex: null, // Placeholder
+            plan: finalOrchestratorResponse.plan,
+            executionContext: finalOrchestratorResponse.executedPlan,
+            finalAnswer: finalOrchestratorResponse.finalAnswer,
+            errorSummary: null
         };
-        if (taskStateToSave.status === "FAILED_EXECUTION" && finalOrchestratorResponse.executedPlan && finalOrchestratorResponse.executedPlan.length > 0) {
-            const lastStep = finalOrchestratorResponse.executedPlan[finalOrchestratorResponse.executedPlan.length - 1];
-            if (lastStep && lastStep.error_details) {
-                taskStateToSave.errorSummary.reason = `Last failed step: ${lastStep.narrative_step}. Error: ${lastStep.error_details.message}`;
+
+        if (!finalOrchestratorResponse.success) {
+            taskStateToSave.errorSummary = {
+                failedAtStage: null, // Placeholder
+                reason: finalOrchestratorResponse.message
+            };
+            if (taskStateToSave.status === "FAILED_EXECUTION" && finalOrchestratorResponse.executedPlan && finalOrchestratorResponse.executedPlan.length > 0) {
+                const lastStep = finalOrchestratorResponse.executedPlan[finalOrchestratorResponse.executedPlan.length - 1];
+                if (lastStep && lastStep.error_details) {
+                    taskStateToSave.errorSummary.reason = `Last failed step: ${lastStep.narrative_step}. Error: ${lastStep.error_details.message}`;
+                }
             }
         }
+
+        const now = new Date();
+        const month = String(now.getMonth() + 1).padStart(2, '0');
+        const day = String(now.getDate()).padStart(2, '0');
+        const year = now.getFullYear();
+        const dateDir = `tasks_${month}${day}${year}`;
+
+        const rootDir = path.join(__dirname, '..');
+        const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
+        const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
+
+        saveTaskState(taskStateToSave, taskStateFilePath);
     }
-
-    const now = new Date();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    const year = now.getFullYear();
-    const dateDir = `tasks_${month}${day}${year}`;
-
-    const rootDir = path.join(__dirname, '..');
-    const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
-    const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
-
-    saveTaskState(taskStateToSave, taskStateFilePath);
     // --- End Save Task State Logic ---
 
     return finalOrchestratorResponse;

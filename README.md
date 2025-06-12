@@ -16,6 +16,12 @@ This project consists of two main components: a Node.js backend that houses the 
         *   Managing and dispatching tasks to various tools (e.g., Web Search, Calculator, Webpage Reader, GeminiStepExecutor).
         *   Handling the execution flow, including staged/parallel execution and context management.
     *   Exposes an API (currently `/api/generate-plan`) that the frontend consumes.
+        The `/api/generate-plan` endpoint accepts a POST request with a JSON body.
+        - `task` (string, required for `EXECUTE_FULL_PLAN` mode): The user's task description.
+        - `mode` (string, optional, defaults to "EXECUTE_FULL_PLAN"): Specifies the operational mode.
+            - `"EXECUTE_FULL_PLAN"`: Generates a new plan, executes it, saves the task state, and returns the synthesized answer.
+            - `"SYNTHESIZE_ONLY"`: Loads a previously saved task state using `taskIdToLoad`, re-synthesizes the final answer based on its `executionContext` and `userTaskString`, and returns the result. Does not re-execute or re-save the plan.
+        - `taskIdToLoad` (string, required for `SYNTHESIZE_ONLY` mode): The ID of a previously saved task state to load.
     *   Its root path (`/`) now returns a simple JSON health/status message, and it serves static assets (which could include a production build of the frontend if placed in the root).
 
 *   **Frontend (`frontend/` Directory):**
@@ -89,7 +95,7 @@ To facilitate debugging, analysis, and to lay the groundwork for future features
     *   `finalAnswer`: The final synthesized answer provided to the user (if any).
     *   `errorSummary`: A summary of the error if the task failed.
 
-This persistence mechanism is handled by the `OrchestratorAgent` upon completion (successful or failed) of a task. Currently, the API (`/api/generate-plan`) does not support loading or resuming tasks from these saved states, but this feature can be implemented in the future.
+The API (`/api/generate-plan`) now supports a `"SYNTHESIZE_ONLY"` mode that can load these saved task states to re-synthesize answers or analyze previous executions. Full task resumption is a potential future enhancement.
 
 ## Technology Stack
 
