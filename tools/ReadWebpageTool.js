@@ -8,7 +8,7 @@ class ReadWebpageTool {
 
     async execute(input) {
         if (!input || typeof input.url !== 'string' || input.url.trim() === "") {
-            return { result: null, error: "Invalid input for ReadWebpageTool: 'url' string is required." };
+            return { result: null, error: { category: "INVALID_INPUT", message: "Invalid input for ReadWebpageTool: 'url' string is required and cannot be empty." } };
         }
 
         try {
@@ -33,25 +33,24 @@ class ReadWebpageTool {
             } else {
                 // For other unexpected data types
                 console.warn(`ReadWebpageTool received unexpected data type: ${typeof htmlContent} for URL: ${input.url}`);
-                return { result: null, error: "Failed to read webpage: unexpected content type." };
+                return { result: null, error: { category: "UNEXPECTED_CONTENT_TYPE", message: `ReadWebpageTool received unexpected data type: ${typeof htmlContent} for URL: ${input.url}` } };
             }
 
             return { result: partialHtmlContent + (originalLength > 2000 ? "..." : ""), error: null };
 
         } catch (error) {
-            console.error(`Error reading webpage ${input.url}:`, error);
-            let errorMessage = "Failed to read webpage: " + error.message;
+            console.error(`Error reading webpage ${input.url}:`, error.message); // Log only message for brevity here
             if (error.response) {
-                // Include status code if available
-                errorMessage += ` (Status: ${error.response.status})`;
-                // Log more detailed error if present
-                if (error.response.data) {
-                     console.error("Error response data:", typeof error.response.data === 'string' ? error.response.data.substring(0,500) : error.response.data);
-                }
+                // Server responded with an error status code (4xx or 5xx)
+                console.error("Error response data:", typeof error.response.data === 'string' ? error.response.data.substring(0,200) : error.response.data);
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: `Failed to read webpage: Server responded with status ${error.response.status}`, details: { httpStatusCode: error.response.status, originalError: error.message } } };
             } else if (error.request) {
-                errorMessage = "Failed to read webpage: No response received from server.";
+                // No response was received from the server
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: "Failed to read webpage: No response received from server.", details: { originalError: error.message } } };
+            } else {
+                // Other errors (e.g., setup issues, network problems before request was made)
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: "Failed to read webpage: " + error.message, details: { originalError: error.message } } };
             }
-            return { result: null, error: errorMessage };
         }
     }
 }
