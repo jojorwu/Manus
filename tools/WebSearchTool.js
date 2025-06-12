@@ -9,11 +9,11 @@ class WebSearchTool {
 
     async execute(input) {
         if (!this.apiKey || !this.cseId) {
-            return { result: null, error: { category: "CONFIGURATION_ERROR", message: "WebSearchTool is not configured with API key or CSE ID." } };
+            return { result: null, error: "WebSearchTool is not configured with API key or CSE ID." };
         }
 
         if (!input || typeof input.query !== 'string') {
-            return { result: null, error: { category: "INVALID_INPUT", message: "Invalid input for WebSearchTool: 'query' string is required." } };
+            return { result: null, error: "Invalid input for WebSearchTool: 'query' string is required." };
         }
 
         const apiUrl = "https://www.googleapis.com/customsearch/v1";
@@ -39,12 +39,15 @@ class WebSearchTool {
             } else {
                 // Handle cases where items might be missing or not in the expected format,
                 // though the API usually returns an empty items array for no results.
-                return { result: "No search results found.", error: null }; // No change here, as it's a valid "empty" result.
+                return { result: "No search results found.", error: null };
             }
         } catch (error) {
             console.error("Error during web search API call:", error);
-            let errMsg = (error.response && error.response.data && error.response.data.error && error.response.data.error.message) ? error.response.data.error.message : error.message;
-            return { result: null, error: { category: "API_ERROR", message: "API request failed: " + errMsg, details: { originalError: error.message, statusCode: error.response ? error.response.status : undefined } } };
+            let errorMessage = "API request failed: " + error.message;
+            if (error.response && error.response.data && error.response.data.error && error.response.data.error.message) {
+                errorMessage = "API request failed: " + error.response.data.error.message;
+            }
+            return { result: null, error: errorMessage };
         }
     }
 }

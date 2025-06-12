@@ -10,13 +10,24 @@ We will define the following initial agent roles:
 
 *   **`OrchestratorAgent`**
     *   **Primary Functions:**
-        *   Acts as the central coordinator. Receives high-level tasks from the user via the API.
-        *   **Task Decomposition & Planning:** Uses an LLM (Gemini) to break tasks into sub-tasks, assigning each to an appropriate worker agent role and specifying a tool if applicable.
-        *   **Task Assignment:** Places sub-task messages onto a `SubTaskQueue`.
-        *   **Result Aggregation & Synthesis:** Monitors a `ResultsQueue` for completed sub-tasks. Synthesizes results into a final user response (likely using an LLM).
-        *   Handles overall error management and may trigger sub-task level replanning.
-    *   **Tools It Might Use Directly:** LLM (Gemini) for planning and synthesis.
-    *   **API Key Management:** Configured with its own primary Gemini API key.
+        *   Acts as the high-level coordinator for user tasks. Receives tasks via the API.
+        *   **Planning Delegation:** Utilizes the `PlanManager` component to generate or retrieve execution plans. `PlanManager` is responsible for:
+            *   Checking for matching pre-defined plan templates.
+            *   If no template matches, constructing a detailed prompt for an LLM (Gemini) based on agent capabilities and the user task.
+            *   Calling the LLM service to generate a multi-stage plan.
+            *   Validating the structure and content of the plan returned by the LLM.
+        *   **Execution Delegation:** Utilizes the `PlanExecutor` component to carry out the steps defined in the generated plan. `PlanExecutor` is responsible for:
+            *   Iterating through plan stages and steps.
+            *   Dispatching tasks intended for worker agents (like `ResearchAgent`, `UtilityAgent`) to the `SubTaskQueue`.
+            *   Awaiting results from worker agents via the `ResultsQueue`.
+            *   Directly handling special Orchestrator-level actions defined in the plan (e.g., `ExploreSearchResults`, `GeminiStepExecutor` for direct LLM calls by the Orchestrator). This includes using tools like `ReadWebpageTool` internally for `ExploreSearchResults`.
+            *   Summarizing data from completed steps (where appropriate) using an LLM.
+            *   Aggregating all execution results into a comprehensive `executionContext`.
+        *   **Final Response Synthesis:** After `PlanExecutor` completes, `OrchestratorAgent` uses the final `executionContext` to synthesize a user-facing response, typically using an LLM.
+        *   **State Management:** Manages the overall task state, including loading and saving task progress and results (e.g., using `loadTaskState`, `saveTaskState`).
+        *   Handles overall error management based on outcomes from `PlanManager` and `PlanExecutor`.
+    *   **Tools It Might Use Directly:** LLM (Gemini) for final response synthesis. (Note: Planning and specific step executions involving LLM calls are now delegated to `PlanManager` and `PlanExecutor`).
+    *   **API Key Management:** Configured with its own primary Gemini API key, which is then passed to and utilized by `PlanManager` and `PlanExecutor` for their LLM interactions.
 
 *   **`ResearchAgent`**
     *   **Primary Functions:** Specialized in information gathering. Picks up research-related tasks from the `SubTaskQueue`. Executes tasks using its tools and posts results to the `ResultsQueue`.
@@ -57,17 +68,23 @@ A task queue-based system will manage communication and task distribution.
 
 ## 4. Inter-Agent Communication Flow & Task Lifecycle
 
-1.  User submits task via frontend to a backend API endpoint (e.g., `/api/process-multi-agent-task`).
+1.  User submits task via frontend to a backend API endpoint (e.g., `/api/generate-plan`).
 2.  API routes task to `OrchestratorAgent`; `parent_task_id` generated.
-3.  `OrchestratorAgent` uses LLM to decompose task into sub-task definitions (including `assigned_agent_role`, `tool_name`, `sub_task_input`).
-4.  `OrchestratorAgent` creates task messages and enqueues them onto `SubTaskQueue`. It tracks dispatched `sub_task_id`s.
-5.  Worker agents (e.g., `ResearchAgent`, `UtilityAgent`) monitor `SubTaskQueue`, dequeue messages matching their role.
-6.  Worker agent executes the sub-task using specified tool and input, utilizing its configured API keys if needed.
+3.  `OrchestratorAgent` invokes `PlanManager` to obtain an execution plan.
+    *   `PlanManager` attempts to use a template or generates a new plan using an LLM.
+    *   `PlanManager` validates the plan and returns it to `OrchestratorAgent`.
+4.  If a valid plan is obtained, `OrchestratorAgent` invokes `PlanExecutor` with the plan.
+    *   `PlanExecutor` iterates through stages and steps:
+        *   For tasks assigned to worker agents, `PlanExecutor` enqueues them onto `SubTaskQueue` and awaits results via `ResultsQueue`.
+        *   For special Orchestrator actions (e.g., `ExploreSearchResults`), `PlanExecutor` handles them directly (e.g., by calling `ReadWebpageTool` internally or an LLM for `GeminiStepExecutor` steps).
+    *   `PlanExecutor` collects all results and summarizations into an `executionContext`.
+5.  Worker agents (`ResearchAgent`, `UtilityAgent`) monitor `SubTaskQueue`, dequeue messages matching their role.
+6.  Worker agent executes the sub-task using specified tool and input.
 7.  Worker agent constructs a result message and enqueues it onto `ResultsQueue`.
-8.  `OrchestratorAgent` monitors `ResultsQueue`, dequeues results, correlates them.
-    *   If a sub-task FAILED, Orchestrator may trigger recovery/replanning for that sub-task.
-9.  Once all necessary sub-tasks are resolved, `OrchestratorAgent` uses LLM to synthesize aggregated results into a final response.
-10. Orchestrator returns final response to API endpoint, then to user.
+8.  `PlanExecutor` receives results from `ResultsQueue` (for worker agent tasks) and combines them with results from directly handled Orchestrator actions. If a sub-task FAILED, `PlanExecutor` may halt execution of subsequent stages and report failure.
+9.  Once `PlanExecutor` completes, `OrchestratorAgent` receives the final `executionContext` (including status of all steps).
+10. `OrchestratorAgent` uses an LLM to synthesize a final response based on the `executionContext`.
+11. `OrchestratorAgent` saves the final task state and returns the response to the API endpoint, then to the user.
 
 ## 5. Managing Multiple API Keys
 
@@ -87,8 +104,10 @@ A task queue-based system will manage communication and task distribution.
     ├── UtilityAgent.js
     └── BaseAgent.js      # (Optional)
     core/
-    ├── SubTaskQueue.js   # (In-memory initially)
-    └── ResultsQueue.js # (In-memory initially)
+    ├── PlanManager.js    # Handles plan generation, template usage, and validation.
+    ├── PlanExecutor.js   # Handles execution of planned steps, including special Orchestrator actions and queue interactions.
+    ├── SubTaskQueue.js   # (In-memory initially) for dispatching tasks to worker agents.
+    └── ResultsQueue.js # (In-memory initially) for receiving results from worker agents.
     tools/                # (Optional future refactor for tool classes)
     ├── WebSearchTool.js
     ├── CalculatorTool.js
@@ -97,10 +116,10 @@ A task queue-based system will manage communication and task distribution.
     server.js             # Express server, API, initialization
     ...
     ```
-*   **`agents/*.js`:** Define individual agent classes, their logic, and tool usage.
-*   **`core/*.js`:** Implementations for in-memory queues.
+*   **`agents/*.js`:** Define individual agent classes. `OrchestratorAgent.js` acts as the central coordinator, delegating to core components.
+*   **`core/*.js`:** Contains core components like `PlanManager`, `PlanExecutor`, and queue implementations.
 *   **`server.js`:**
-    *   Requires and instantiates agent and queue classes.
+    *   Requires and instantiates agent classes (including `OrchestratorAgent`) and queue classes.
     *   Sets up Express API endpoint(s) that delegate tasks to `OrchestratorAgent`.
     *   Initializes worker agents and starts their "listening" process on the `SubTaskQueue`.
     *   Manages loading of API keys from `.env` and passes them to relevant constructors.
