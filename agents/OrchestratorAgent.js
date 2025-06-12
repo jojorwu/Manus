@@ -3,6 +3,7 @@ const path = require('path');
 const { saveTaskState, loadTaskState, saveTaskJournal } = require('../utils/taskStateUtil');
 const PlanManager = require('../core/PlanManager');
 const PlanExecutor = require('../core/PlanExecutor');
+const ReadWebpageTool = require('../tools/ReadWebpageTool');
 // uuidv4 is not directly used by OrchestratorAgent after refactoring.
 // It's used by PlanExecutor for sub-task IDs it generates.
 
@@ -32,7 +33,7 @@ class OrchestratorAgent {
         this.subTaskQueue,
         this.resultsQueue,
         this.llmService,
-        { /* Tools can be passed here if PlanExecutor needs them directly */ }
+        { readWebpageTool: new ReadWebpageTool() }
     );
   }
 
@@ -178,70 +179,12 @@ class OrchestratorAgent {
             currentWorkingContext.summaryOfProgress = `Execution completed. Success: ${overallSuccess}. ${currentWorkingContext.keyFindings.length} findings, ${currentWorkingContext.errorsEncountered.length} errors.`;
             currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Review errors and potentially replan.";
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_AFTER_EXECUTION", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
-
-            // --- LLM-based CWC Update ---
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective.", { parentTaskId }));
-            const MAX_FINDINGS_FOR_CWC_PROMPT = 5;
-            const MAX_ERRORS_FOR_CWC_PROMPT = 3;
-
-            const recentFindingsSummary = currentWorkingContext.keyFindings.slice(-MAX_FINDINGS_FOR_CWC_PROMPT).map(f => ({ narrative: f.sourceStepNarrative, tool: f.sourceToolName, dataPreview: String(f.data).substring(0,100)+"..." }) );
-            const recentErrorsSummary = currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT).map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage}));
-
-            const cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
-The previous summary of progress was: "${currentWorkingContext.summaryOfProgress}".
-The previous next objective was: "${currentWorkingContext.nextObjective}".
-Recent plan execution overall success: ${overallSuccess}.
-Recent key findings:
-${JSON.stringify(recentFindingsSummary, null, 2)}
-Recent errors encountered:
-${JSON.stringify(recentErrorsSummary, null, 2)}
-
-Based on this, provide an updated summary of progress and the immediate next objective for the overall task.
-Return ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).
-Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "updatedNextObjective": "Synthesize findings considering errors." }`;
-
-            try {
-                const cwcUpdateResponse = await this.llmService(cwcUpdatePrompt);
-                const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
-
-                if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
-                    currentWorkingContext.summaryOfProgress = parsedCwcUpdate.updatedSummaryOfProgress;
-                    currentWorkingContext.nextObjective = parsedCwcUpdate.updatedNextObjective;
-                    currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_BY_LLM", "CWC summary and next objective updated by LLM.", { parentTaskId, newSummary: currentWorkingContext.summaryOfProgress, newObjective: currentWorkingContext.nextObjective }));
-                } else {
-                    throw new Error("LLM response for CWC update missing required fields.");
-                }
-            } catch (cwcLlmError) {
-                console.error(`OrchestratorAgent: Error updating CWC with LLM: ${cwcLlmError.message}`);
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_ERROR", `LLM CWC update failed: ${cwcLlmError.message}`, { parentTaskId, error: cwcLlmError.message }));
-                // CWC summary and nextObjective remain as they were (simple programmatic updates)
-            }
-            // --- End of LLM-based CWC Update ---
         }
 
         let finalAnswer = null;
         let responseMessage = "";
 
-        // Retrieve pre-synthesized answer if available
-        const preSynthesizedFinalAnswer = executionResult.finalAnswer;
-        const wasFinalAnswerPreSynthesized = executionResult.finalAnswerSynthesized;
-
-        if (wasFinalAnswerPreSynthesized) {
-            finalAnswer = preSynthesizedFinalAnswer;
-            responseMessage = "Task completed. Final answer was generated during plan execution.";
-            finalJournalEntries.push(this._createOrchestratorJournalEntry(
-                "FINAL_SYNTHESIS_SKIPPED",
-                "Final answer was pre-synthesized by PlanExecutor.",
-                { parentTaskId, answerPreview: String(finalAnswer).substring(0,100) + "..." }
-            ));
-            console.log("OrchestratorAgent: Final answer was pre-synthesized by PlanExecutor.");
-            if (currentWorkingContext) {
-               currentWorkingContext.summaryOfProgress = "Task completed. Final answer pre-synthesized by PlanExecutor.";
-               currentWorkingContext.nextObjective = "Task finished.";
-               currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-            }
-        } else if (overallSuccess && executionContext && executionContext.length > 0) {
+        if (overallSuccess && executionContext && executionContext.length > 0) {
             finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_START", "Starting final synthesis of answer.", { parentTaskId }));
             const contextForLLMSynthesis = executionContext.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.processed_result_data, error_info: entry.error_details }));
             const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
@@ -280,25 +223,8 @@ Based on the original user task, execution history, and current working context,
         currentWorkingContext.summaryOfProgress = `Final synthesis attempt concluded: ${responseMessage}`;
         currentWorkingContext.lastUpdatedAt = new Date().toISOString();
         finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED", "CWC updated after synthesis attempt.", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
-        }
-         // This block handles cases where synthesis was skipped due to pre-synthesized answer, or no execution/overall failure
-         else if (!wasFinalAnswerPreSynthesized) {
-            if (!overallSuccess) { // This implies execution failed
-                 responseMessage = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
-                 finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_ABORTED", responseMessage, { parentTaskId }));
-            } else { // No overall success, but also no specific data to synthesize, or no execution context
-                 responseMessage = "No execution steps were performed or no actionable data produced; no final answer synthesized.";
-                 finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED", responseMessage, { parentTaskId }));
-            }
-            if (currentWorkingContext) { // Update CWC for these non-synthesis scenarios too
-                currentWorkingContext.summaryOfProgress = responseMessage;
-                currentWorkingContext.nextObjective = "Task finished with no new answer synthesized by Orchestrator.";
-                currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-            }
-        }
 
-
-        const taskStatusToSave = overallSuccess ? "COMPLETED" : "FAILED_EXECUTION";
+        const taskStatusToSave = overallSuccess ? "COMPLETED" : "FAILED_EXECUTION"; // Or FAILED_PLANNING if that was the case
         const taskStateToSave = {
             taskId: parentTaskId,
             userTaskString: currentOriginalTask,
@@ -306,21 +232,16 @@ Based on the original user task, execution history, and current working context,
             plan: planStages,
             executionContext: executionContext,
             finalAnswer: finalAnswer,
-            errorSummary: overallSuccess ? null : { reason: responseMessage, ...(executionResult && executionResult.updatesForWorkingContext && executionResult.updatesForWorkingContext.errorsEncountered && executionResult.updatesForWorkingContext.errorsEncountered.length > 0 ? { lastKnownError: executionResult.updatesForWorkingContext.errorsEncountered[executionResult.updatesForWorkingContext.errorsEncountered.length -1] } : {} ) },
+            errorSummary: overallSuccess ? null : { reason: responseMessage },
             currentWorkingContext
         };
-        if (planResult && planResult.source === 'template') {
-            taskStateToSave.plan_source = 'template';
-        } else if (planResult) {
+        if (planResult && planResult.source === 'template') taskStateToSave.plan_source = 'template';
+        else if (planResult) { // from LLM
             taskStateToSave.plan_source = 'LLM';
             taskStateToSave.raw_llm_response = planResult.rawResponse;
         }
 
-        // Ensure final CWC update before saving state
-        if(currentWorkingContext) currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-
-
-        await saveTaskState(taskStateToSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`));
+        await saveTaskState(taskStateToSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`)); // Placeholder path
         finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "TASK_COMPLETED_SUCCESSFULLY" : "TASK_FAILED_FINAL", `Task processing finished. Overall Success: ${overallSuccess}`, { parentTaskId, finalStatus: taskStatusToSave }));
         await saveTaskJournal(parentTaskId, finalJournalEntries, path.join(__dirname, '..', 'saved_tasks'));
 

@@ -11,8 +11,6 @@ class PlanExecutor {
         // If ReadWebpageTool is not passed in tools, _handleExploreSearchResults will instantiate it.
     }
 
-    }
-
     _createJournalEntry(type, message, details = {}, source = "PlanExecutor") {
         return {
             timestamp: new Date().toISOString(),
