@@ -17,11 +17,12 @@ This project consists of two main components: a Node.js backend that houses the 
         *   Handling the execution flow, including staged/parallel execution and context management.
     *   Exposes an API (currently `/api/generate-plan`) that the frontend consumes.
         The `/api/generate-plan` endpoint accepts a POST request with a JSON body.
-        - `task` (string, required for `EXECUTE_FULL_PLAN` mode): The user's task description.
+        - `task` (string, required for `EXECUTE_FULL_PLAN` and `PLAN_ONLY` modes): The user's task description.
         - `mode` (string, optional, defaults to "EXECUTE_FULL_PLAN"): Specifies the operational mode.
             - `"EXECUTE_FULL_PLAN"`: Generates a new plan, executes it, saves the task state, and returns the synthesized answer.
             - `"SYNTHESIZE_ONLY"`: Loads a previously saved task state using `taskIdToLoad`, re-synthesizes the final answer based on its `executionContext` and `userTaskString`, and returns the result. Does not re-execute or re-save the plan.
-        - `taskIdToLoad` (string, required for `SYNTHESIZE_ONLY` mode): The ID of a previously saved task state to load.
+            - `"PLAN_ONLY"`: Receives a user `task`, generates a multi-stage execution plan, saves the task state (including the plan and a status like "PLAN_GENERATED"), and returns the `taskId` and the generated `plan` to the user. Does not execute the plan.
+        - `taskIdToLoad` (string, required for `SYNTHESIZE_ONLY` mode): The ID of a previously saved task state to load. Not used in `PLAN_ONLY` mode.
     *   Its root path (`/`) now returns a simple JSON health/status message, and it serves static assets (which could include a production build of the frontend if placed in the root).
 
 *   **Frontend (`frontend/` Directory):**
