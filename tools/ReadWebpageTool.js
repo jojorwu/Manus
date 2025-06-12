@@ -45,7 +45,9 @@ class ReadWebpageTool {
                 // Include status code if available
                 errorMessage += ` (Status: ${error.response.status})`;
                 // Log more detailed error if present (e.g. to a debug log or tracing system)
-                // console.error("Error response data:", typeof error.response.data === 'string' ? error.response.data.substring(0,500) : error.response.data);
+                if (error.response.data) { // Взято из main, полезно для диагностики
+                     console.error("Error response data:", typeof error.response.data === 'string' ? error.response.data.substring(0,500) : error.response.data);
+                }
             } else if (error.request) {
                 errorMessage = "Failed to read webpage: No response received from server.";
             }
