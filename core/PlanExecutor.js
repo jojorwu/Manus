@@ -1,14 +1,17 @@
 // core/PlanExecutor.js
 const { v4: uuidv4 } = require('uuid');
-const ReadWebpageTool = require('../tools/ReadWebpageTool'); // Required for _handleExploreSearchResults
+const ReadWebpageTool = require('../tools/ReadWebpageTool'); // Fallback if not in tools
+const AdvancedWebpageReaderTool = require('../tools/AdvancedWebpageReaderTool'); // Fallback if not in tools
 
 class PlanExecutor {
     constructor(subTaskQueue, resultsQueue, llmService, tools = {}) {
         this.subTaskQueue = subTaskQueue;
         this.resultsQueue = resultsQueue;
         this.llmService = llmService;
-        this.tools = tools; // Expects { ReadWebpageTool: instance } or similar if passed
-        // If ReadWebpageTool is not passed in tools, _handleExploreSearchResults will instantiate it.
+        this.tools = tools;
+        // Expected tools for _handleExploreSearchResults:
+        // this.tools.AdvancedWebpageReaderTool
+        // this.tools.ReadWebpageTool
     }
 
     _createJournalEntry(type, message, details = {}, source = "PlanExecutor") {
@@ -21,7 +24,7 @@ class PlanExecutor {
         };
     }
 
-    async _summarizeStepData(dataToSummarize, userTaskString, narrativeStep, subTaskId, parentTaskId) { // Removed journalEntries
+    async _summarizeStepData(dataToSummarize, userTaskString, narrativeStep, subTaskId, parentTaskId) {
         const MAX_DATA_LENGTH = 1000;
         let dataString;
 
@@ -32,12 +35,11 @@ class PlanExecutor {
                 dataString = JSON.stringify(dataToSummarize);
             } catch (e) {
                 console.warn(`PlanExecutor.summarizeDataWithLLM: Could not stringify data for step "${narrativeStep}". Using raw data type. Error: ${e.message}`);
-                return dataToSummarize; // Return original data if stringification fails
+                return dataToSummarize;
             }
         }
 
         if (dataString.length > MAX_DATA_LENGTH) {
-            // Journaling for summarization START/SUCCESS/FAILURE will be handled in executePlan
             console.log(`PlanExecutor._summarizeStepData: Data for step "${narrativeStep}" (SubTaskID: ${subTaskId}) is too long (${dataString.length} chars), attempting summarization.`);
             const summarizationPrompt = `The original user task was: "${userTaskString}".
 A step in the execution plan, described as "${narrativeStep}", produced the following data:
@@ -56,7 +58,6 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 }
             } catch (error) {
                 console.error(`PlanExecutor._summarizeStepData: Error during summarization for step "${narrativeStep}" (SubTaskID: ${subTaskId}): ${error.message}`);
-                // Return original (truncated) data in case of error, actual error logging will be in executePlan
                 return dataString.substring(0, MAX_DATA_LENGTH) + (dataString.length > MAX_DATA_LENGTH ? "... (original data was too long, summarization error occurred)" : "");
             }
         }
@@ -67,28 +68,36 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         console.log(`PlanExecutor: Handling special step ExploreSearchResults: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id})`);
         let previousSearchResults = null;
         for (let k = executionContext.length - 1; k >= 0; k--) {
-            const potentialResults = executionContext[k].processed_result_data || executionContext[k].raw_result_data;
-            if (executionContext[k].tool_name === "WebSearchTool" && executionContext[k].status === "COMPLETED" && potentialResults) {
-                if (Array.isArray(potentialResults)) {
-                    previousSearchResults = potentialResults;
-                } else if (typeof potentialResults === 'object' && Array.isArray(potentialResults.result)) {
-                    previousSearchResults = potentialResults.result;
+            // Prioritize raw_result_data for links, especially if processed_result_data is a summary string.
+            const rawResults = executionContext[k].raw_result_data;
+            const processedResults = executionContext[k].processed_result_data;
+            let potentialResultsToParse = null;
+
+            if (executionContext[k].tool_name === "WebSearchTool" && executionContext[k].status === "COMPLETED") {
+                if (rawResults) { // Prefer raw_result_data if it exists for WebSearchTool
+                    potentialResultsToParse = rawResults;
+                } else if (processedResults) { // Fallback to processed_result_data
+                    potentialResultsToParse = processedResults;
                 }
-                break;
+
+                if (potentialResultsToParse) {
+                    if (Array.isArray(potentialResultsToParse)) {
+                        previousSearchResults = potentialResultsToParse;
+                        break;
+                    } else if (typeof potentialResultsToParse === 'object' && Array.isArray(potentialResultsToParse.result)) {
+                        previousSearchResults = potentialResultsToParse.result;
+                        break;
+                    }
+                }
             }
         }
 
         if (!previousSearchResults || !Array.isArray(previousSearchResults) || previousSearchResults.length === 0) {
-            console.warn("PlanExecutor.ExploreSearchResults: No valid search results found from previous steps or results are not an array.");
+            console.warn("PlanExecutor.ExploreSearchResults: No valid array of search results found from previous WebSearchTool steps.");
             return {
-                sub_task_id: sub_task_id,
-                narrative_step: subTaskDefinition.narrative_step,
-                tool_name: "ExploreSearchResults",
-                assigned_agent_role: "Orchestrator",
-                sub_task_input: subTaskDefinition.sub_task_input,
-                status: "COMPLETED",
-                result_data: "No search results available to explore or results format was incompatible.",
-                error_details: null
+                sub_task_id: sub_task_id, narrative_step: subTaskDefinition.narrative_step, tool_name: "ExploreSearchResults",
+                assigned_agent_role: "Orchestrator", sub_task_input: subTaskDefinition.sub_task_input, status: "COMPLETED",
+                result_data: "No valid search results array available to explore.", error_details: null
             };
         }
 
@@ -98,33 +107,54 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             .filter(link => typeof link === 'string' && link.trim() !== '');
 
         if (linksToRead.length === 0) {
-            return { sub_task_id: sub_task_id, narrative_step: subTaskDefinition.narrative_step, tool_name: "ExploreSearchResults", assigned_agent_role: "Orchestrator", sub_task_input: subTaskDefinition.sub_task_input, status: "COMPLETED", result_data: "No valid links found in search results to explore.", error_details: null };
+            return {
+                sub_task_id: sub_task_id, narrative_step: subTaskDefinition.narrative_step, tool_name: "ExploreSearchResults",
+                assigned_agent_role: "Orchestrator", sub_task_input: subTaskDefinition.sub_task_input, status: "COMPLETED",
+                result_data: "No valid links found in search results to explore.", error_details: null
+            };
+        }
+
+        let webpageReader;
+        if (this.tools && this.tools.AdvancedWebpageReaderTool) {
+            webpageReader = this.tools.AdvancedWebpageReaderTool;
+            console.log(`PlanExecutor._handleExploreSearchResults: Using AdvancedWebpageReaderTool.`);
+        } else if (this.tools && this.tools.ReadWebpageTool) {
+            webpageReader = this.tools.ReadWebpageTool;
+            console.log(`PlanExecutor._handleExploreSearchResults: AdvancedWebpageReaderTool not found, falling back to ReadWebpageTool.`);
+        } else {
+            webpageReader = new ReadWebpageTool(); // Fallback, though ideally tools are always provided.
+            console.warn(`PlanExecutor._handleExploreSearchResults: No webpage reader tool found in this.tools, instantiating ReadWebpageTool directly.`);
         }
 
         let aggregatedContent = "";
-        const webpageReader = this.tools.ReadWebpageTool || new ReadWebpageTool();
+        // let aggregatedImages = []; // If we decide to collect images
 
         for (const url of linksToRead) {
             try {
-                console.log(`PlanExecutor._handleExploreSearchResults: Reading URL - ${url} for SubTaskID: ${sub_task_id}`);
+                console.log(`PlanExecutor._handleExploreSearchResults: Reading URL - ${url} for SubTaskID: ${sub_task_id} using ${webpageReader.constructor.name}`);
                 const readResult = await webpageReader.execute({ url });
-                if (readResult.error) {
-                    aggregatedContent += `Error reading ${url}: ${readResult.error}\n---\n`;
-                } else if (readResult.result) {
-                    aggregatedContent += `Content from ${url}:\n${readResult.result}\n---\n`;
+
+                if (readResult.success && readResult.text) {
+                    aggregatedContent += `Content from ${url}:\n${readResult.text}\n---\n`;
+                    // if (readResult.images && readResult.images.length > 0) {
+                    //     aggregatedImages.push({url: url, images: readResult.images});
+                    // }
+                } else if (readResult.error) {
+                    let errorMessage = readResult.error;
+                    if (readResult.details) errorMessage += ` (Details: ${readResult.details})`;
+                    aggregatedContent += `Error reading ${url}: ${errorMessage}\n---\n`;
+                } else {
+                    aggregatedContent += `Could not retrieve content or empty content from ${url}.\n---\n`;
                 }
             } catch (e) {
                 aggregatedContent += `Exception while reading ${url}: ${e.message}\n---\n`;
             }
         }
         return {
-            sub_task_id: sub_task_id,
-            narrative_step: subTaskDefinition.narrative_step,
-            tool_name: "ExploreSearchResults",
-            assigned_agent_role: "Orchestrator",
-            sub_task_input: subTaskDefinition.sub_task_input,
-            status: "COMPLETED",
+            sub_task_id: sub_task_id, narrative_step: subTaskDefinition.narrative_step, tool_name: "ExploreSearchResults",
+            assigned_agent_role: "Orchestrator", sub_task_input: subTaskDefinition.sub_task_input, status: "COMPLETED",
             result_data: aggregatedContent || "No content could be fetched from the explored pages.",
+            // images_data: aggregatedImages, // If returning images
             error_details: null
         };
     }
@@ -150,7 +180,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 }
                 promptInput = promptInput.replace(placeholder, valueToInject);
             }
-            if (promptInput.includes("{{previous_step_output}}")) { // Fallback for simple template
+            if (promptInput.includes("{{previous_step_output}}")) {
                  if (executionContext.length > 0) {
                     const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput));
@@ -182,8 +212,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     async executePlan(planStages, parentTaskId, userTaskString) {
         const journalEntries = [];
         const executionContext = [];
-        const collectedKeyFindings = []; // Initialize for CurrentWorkingContext
-        const collectedErrors = [];    // Initialize for CurrentWorkingContext
+        const collectedKeyFindings = [];
+        const collectedErrors = [];
         let overallSuccess = true;
 
         journalEntries.push(this._createJournalEntry(
@@ -221,7 +251,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                         stageSubTaskPromises.push(this._handleGeminiStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, executionContext, parentTaskId));
                     }
                 } else {
-                    const sub_task_id = uuidv4(); // Pre-generate sub_task_id
+                    const sub_task_id = uuidv4();
                     const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input, narrative_step: stepNarrative };
 
                     journalEntries.push(this._createJournalEntry(
@@ -265,7 +295,6 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             for (let j = 0; j < stageResults.length; j++) {
                 const resultOfSubTask = stageResults[j];
                 const originalSubTaskDef = currentStageTaskDefinitions[j];
-                // Use sub_task_id from resultOfSubTask as it's now passed to/returned by orchestrator steps too
                 const subTaskIdForResult = resultOfSubTask.sub_task_id;
 
                 let processedData = resultOfSubTask.result_data;
@@ -274,9 +303,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
                     resultOfSubTask.assigned_agent_role !== "Orchestrator") {
                     journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step}`, summarizationLogDetails));
-                    const originalDataForPreview = resultOfSubTask.result_data; // Keep original for preview if summarization fails
+                    const originalDataForPreview = resultOfSubTask.result_data;
                     try {
-                        // Call _summarizeStepData without journalEntries param
                         const summary = await this._summarizeStepData(resultOfSubTask.result_data, userTaskString, resultOfSubTask.narrative_step, subTaskIdForResult, parentTaskId);
                         if (summary !== resultOfSubTask.result_data) {
                              journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_SUCCESS", `Successfully summarized data for step: ${resultOfSubTask.narrative_step}`, { ...summarizationLogDetails, summarizedDataPreview: String(summary).substring(0,100) + "..."}));
@@ -285,7 +313,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     } catch (summarizationError) {
                         journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_FAILED", `Summarization failed for step: ${resultOfSubTask.narrative_step}`, { ...summarizationLogDetails, errorMessage: summarizationError.message }));
                          console.error(`PlanExecutor: Error during _summarizeStepData call for SubTaskID ${subTaskIdForResult}: ${summarizationError.message}`);
-                        processedData = originalDataForPreview; // Use original data if summarization threw an error
+                        processedData = originalDataForPreview;
                     }
                 }
 
@@ -308,18 +336,13 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 if (contextEntry.status === "COMPLETED") {
                     journalEntries.push(this._createJournalEntry("EXECUTION_STEP_COMPLETED", `Step completed: ${contextEntry.narrative_step}`, { ...logDetails, processedResultDataPreview: String(dataPreviewForLog).substring(0, 100) + "..." }));
 
-                    // Collect Key Finding for CurrentWorkingContext
                     const findingData = contextEntry.processed_result_data || contextEntry.raw_result_data;
-                    if (findingData || (typeof findingData === 'boolean' || typeof findingData === 'number')) { // Ensure data is not null/undefined, allow boolean/numbers
+                    if (findingData || (typeof findingData === 'boolean' || typeof findingData === 'number')) {
                         let dataToStore = findingData;
                         const MAX_FINDING_DATA_LENGTH = 500;
                         if (typeof findingData === 'string' && findingData.length > MAX_FINDING_DATA_LENGTH) {
                             dataToStore = findingData.substring(0, MAX_FINDING_DATA_LENGTH) + "...";
                         } else if (typeof findingData === 'object') {
-                            // Optionally stringify and truncate objects if they can be very large
-                            // For now, keeping small objects as is.
-                            // dataToStore = JSON.stringify(findingData);
-                            // if (dataToStore.length > MAX_FINDING_DATA_LENGTH) dataToStore = dataToStore.substring(0, MAX_FINDING_DATA_LENGTH) + "...";
                         }
                         const keyFinding = {
                             findingId: uuidv4(),
@@ -337,10 +360,9 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                         firstFailedStepErrorDetails = contextEntry.error_details || { message: "Unknown error in failed step." };
                         if (!firstFailedStepErrorDetails.sub_task_id && contextEntry.sub_task_id) firstFailedStepErrorDetails.sub_task_id = contextEntry.sub_task_id;
                     }
-                    // Collect Error for CurrentWorkingContext
                     if (contextEntry.error_details) {
                         const encounteredError = {
-                            errorId: uuidv4(), // Add an ID for errors as well
+                            errorId: uuidv4(),
                             sourceStepNarrative: contextEntry.narrative_step,
                             sourceToolName: contextEntry.tool_name,
                             errorMessage: contextEntry.error_details.message || JSON.stringify(contextEntry.error_details),

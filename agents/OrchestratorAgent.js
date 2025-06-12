@@ -8,7 +8,7 @@ const ReadWebpageTool = require('../tools/ReadWebpageTool');
 // It's used by PlanExecutor for sub-task IDs it generates.
 
 class OrchestratorAgent {
-  constructor(subTaskQueue, resultsQueue, llmService, agentApiKeysConfig) {
+  constructor(subTaskQueue, resultsQueue, llmService, agentApiKeysConfig, planExecutorTools = null) { // Added planExecutorTools
     this.subTaskQueue = subTaskQueue;
     this.resultsQueue = resultsQueue;
     this.llmService = llmService;
@@ -29,11 +29,12 @@ class OrchestratorAgent {
         this.workerAgentCapabilities,
         path.join(__dirname, '..', 'config', 'plan_templates')
     );
+    const toolsForExecutor = planExecutorTools || { readWebpageTool: new ReadWebpageTool() }; // Default if not provided
     this.planExecutor = new PlanExecutor(
         this.subTaskQueue,
         this.resultsQueue,
         this.llmService,
-        { readWebpageTool: new ReadWebpageTool() }
+        toolsForExecutor // Pass the received map or default
     );
   }
 

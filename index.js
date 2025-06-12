@@ -40,7 +40,12 @@ const advancedWebpageReaderTool = new AdvancedWebpageReaderTool(); // New Tool I
 const calculatorTool = new CalculatorTool();
 
 // Инициализация агентов
-const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig);
+const planExecutorTools = {
+    readWebpageTool: readWebpageTool,
+    advancedWebpageReaderTool: advancedWebpageReaderTool
+    // Add other tools PlanExecutor might directly use for orchestrator-level actions if any
+};
+const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig, planExecutorTools);
 
 const researchAgentTools = {
     "WebSearchTool": webSearchTool,
