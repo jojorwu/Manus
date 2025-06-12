@@ -178,6 +178,46 @@ class OrchestratorAgent {
             currentWorkingContext.summaryOfProgress = `Execution completed. Success: ${overallSuccess}. ${currentWorkingContext.keyFindings.length} findings, ${currentWorkingContext.errorsEncountered.length} errors.`;
             currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Review errors and potentially replan.";
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_AFTER_EXECUTION", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
+
+            // --- LLM-based CWC Update ---
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective.", { parentTaskId }));
+            const MAX_FINDINGS_FOR_CWC_PROMPT = 5;
+            const MAX_ERRORS_FOR_CWC_PROMPT = 3;
+
+            const recentFindingsSummary = currentWorkingContext.keyFindings.slice(-MAX_FINDINGS_FOR_CWC_PROMPT).map(f => ({ narrative: f.sourceStepNarrative, tool: f.sourceToolName, dataPreview: String(f.data).substring(0,100)+"..." }) );
+            const recentErrorsSummary = currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT).map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage}));
+
+            const cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
+The previous summary of progress was: "${currentWorkingContext.summaryOfProgress}".
+The previous next objective was: "${currentWorkingContext.nextObjective}".
+Recent plan execution overall success: ${overallSuccess}.
+Recent key findings:
+${JSON.stringify(recentFindingsSummary, null, 2)}
+Recent errors encountered:
+${JSON.stringify(recentErrorsSummary, null, 2)}
+
+Based on this, provide an updated summary of progress and the immediate next objective for the overall task.
+Return ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).
+Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "updatedNextObjective": "Synthesize findings considering errors." }`;
+
+            try {
+                const cwcUpdateResponse = await this.llmService(cwcUpdatePrompt);
+                const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
+
+                if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
+                    currentWorkingContext.summaryOfProgress = parsedCwcUpdate.updatedSummaryOfProgress;
+                    currentWorkingContext.nextObjective = parsedCwcUpdate.updatedNextObjective;
+                    currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_BY_LLM", "CWC summary and next objective updated by LLM.", { parentTaskId, newSummary: currentWorkingContext.summaryOfProgress, newObjective: currentWorkingContext.nextObjective }));
+                } else {
+                    throw new Error("LLM response for CWC update missing required fields.");
+                }
+            } catch (cwcLlmError) {
+                console.error(`OrchestratorAgent: Error updating CWC with LLM: ${cwcLlmError.message}`);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_ERROR", `LLM CWC update failed: ${cwcLlmError.message}`, { parentTaskId, error: cwcLlmError.message }));
+                // CWC summary and nextObjective remain as they were (simple programmatic updates)
+            }
+            // --- End of LLM-based CWC Update ---
         }
 
         let finalAnswer = null;
