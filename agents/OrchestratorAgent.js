@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
 const fs = require('fs');
 const path = require('path');
+const { saveTaskState } = require('../utils/taskStateUtil'); // Путь к utils
 
 // Helper function to parse and validate the LLM's staged plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
@@ -83,8 +84,6 @@ class OrchestratorAgent {
         console.error("OrchestratorAgent: Falling back to default/empty capabilities. This may impact planning.");
         this.workerAgentCapabilities = [];
     }
-    // The console.log below was here, moved it after capabilities are attempted to be loaded.
-    // console.log("OrchestratorAgent initialized with worker capabilities."); // Original position
     if (this.workerAgentCapabilities.length > 0) {
         console.log(`OrchestratorAgent initialized with ${this.workerAgentCapabilities.length} worker capabilities loaded.`);
     } else {
@@ -315,6 +314,46 @@ Provide only the final answer to the user. Do not repeat the execution history i
     } else {
       finalOrchestratorResponse.message = "No sub-tasks were executed, though the process was marked successful.";
     }
+
+    // --- Save Task State Logic ---
+    const taskStateToSave = {
+        taskId: parentTaskId,
+        userTaskString: userTaskString,
+        createdAt: null,
+        updatedAt: null,
+        status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"),
+        currentStageIndex: null,
+        plan: finalOrchestratorResponse.plan,
+        executionContext: finalOrchestratorResponse.executedPlan,
+        finalAnswer: finalOrchestratorResponse.finalAnswer,
+        errorSummary: null
+    };
+
+    if (!finalOrchestratorResponse.success) {
+        taskStateToSave.errorSummary = {
+            failedAtStage: null, // Placeholder
+            reason: finalOrchestratorResponse.message
+        };
+        if (taskStateToSave.status === "FAILED_EXECUTION" && finalOrchestratorResponse.executedPlan && finalOrchestratorResponse.executedPlan.length > 0) {
+            const lastStep = finalOrchestratorResponse.executedPlan[finalOrchestratorResponse.executedPlan.length - 1];
+            if (lastStep && lastStep.error_details) {
+                taskStateToSave.errorSummary.reason = `Last failed step: ${lastStep.narrative_step}. Error: ${lastStep.error_details.message}`;
+            }
+        }
+    }
+
+    const now = new Date();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const year = now.getFullYear();
+    const dateDir = `tasks_${month}${day}${year}`;
+
+    const rootDir = path.join(__dirname, '..');
+    const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
+    const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
+
+    saveTaskState(taskStateToSave, taskStateFilePath);
+    // --- End Save Task State Logic ---
 
     return finalOrchestratorResponse;
   }
