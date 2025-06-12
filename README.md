@@ -57,7 +57,8 @@ This project consists of two main components: a Node.js backend that houses the 
     *   **CalculatorTool:** For evaluating mathematical expressions.
     *   **ReadWebpageTool:** For fetching and extracting textual content from web URLs.
 *   **Staged and Parallel Execution:** Plans are structured into stages that are executed sequentially. Sub-tasks within the same stage are executed in parallel (using `Promise.all()`), allowing for faster completion of independent tasks within a phase of work. The LLM is responsible for generating plans in this staged format.
-*   **Contextual Memory & Summarization:** Information from completed steps is carried forward. Long contexts are automatically summarized using Gemini to maintain efficiency.
+*   **Contextual Memory & Summarization:** Information from completed steps is carried forward. (Note: The "Long contexts are automatically summarized using Gemini to maintain efficiency" part of this point refers to a more general context summarization, not the specific step-result summarization described next).
+*   **Context-Aware Result Summarization**: For tasks generating extensive data from tools, individual step results may be summarized by an LLM before being passed to the final answer synthesis. This helps manage context window limitations and focuses the LLM on the most pertinent information. The full, raw data from each step is still preserved in the saved task state.
 *   **Multi-Stage Replanning:** If a step fails, the agent can attempt a focused "step fix" or a more comprehensive "full replan" using Gemini.
 *   **Modern Web Interface:** A React/Vite/Tailwind/Shadcn/UI frontend for task submission and detailed progress/result viewing, located in the `frontend/` directory.
 

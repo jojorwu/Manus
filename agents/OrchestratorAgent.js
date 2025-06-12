@@ -92,6 +92,57 @@ class OrchestratorAgent {
     }
   }
 
+  /**
+   * Summarizes provided data using the LLM service if it exceeds a certain length.
+   * @param {any} dataToSummarize - The data to potentially summarize.
+   * @param {string} userTaskString - The original user task string for context.
+   * @param {string} narrativeStep - The narrative of the step whose data is being summarized.
+   * @returns {Promise<string | any>} - Summarized string data or original data if not summarized.
+   */
+  async summarizeDataWithLLM(dataToSummarize, userTaskString, narrativeStep) {
+    const MAX_DATA_LENGTH = 1000;
+    let dataString;
+
+    if (typeof dataToSummarize === 'string') {
+        dataString = dataToSummarize;
+    } else {
+        try {
+            dataString = JSON.stringify(dataToSummarize);
+        } catch (e) {
+            console.warn(`OrchestratorAgent.summarizeDataWithLLM: Could not stringify data for step "${narrativeStep}". Using raw data type. Error: ${e.message}`);
+            return dataToSummarize;
+        }
+    }
+
+    if (dataString.length > MAX_DATA_LENGTH) {
+        console.log(`OrchestratorAgent.summarizeDataWithLLM: Data for step "${narrativeStep}" is too long (${dataString.length} chars), attempting summarization.`);
+        const summarizationPrompt = `The original user task was: "${userTaskString}".
+A step in the execution plan, described as "${narrativeStep}", produced the following data:
+---
+${dataString.substring(0, MAX_DATA_LENGTH)}... (data truncated for this prompt if originally longer)
+---
+Please summarize this data concisely, keeping in mind its relevance to the original user task and the step description.
+The summary should be a string, suitable for inclusion as context for a final answer synthesis.
+Focus on extracting key information and outcomes.
+Provide only the summary text.`;
+
+        try {
+            const summary = await this.llmService(summarizationPrompt);
+            if (typeof summary === 'string' && summary.trim() !== "") {
+                 console.log(`OrchestratorAgent.summarizeDataWithLLM: Summarization successful for step "${narrativeStep}".`);
+                return summary;
+            } else {
+                console.warn(`OrchestratorAgent.summarizeDataWithLLM: LLM returned empty or non-string summary for step "${narrativeStep}". Original data (or its beginning) will be used.`);
+                return dataString.substring(0, MAX_DATA_LENGTH) + (dataString.length > MAX_DATA_LENGTH ? "... (original data was too long and summarization failed)" : "");
+            }
+        } catch (error) {
+            console.error(`OrchestratorAgent.summarizeDataWithLLM: Error during summarization for step "${narrativeStep}": ${error.message}`);
+            return dataString.substring(0, MAX_DATA_LENGTH) + (dataString.length > MAX_DATA_LENGTH ? "... (original data was too long and summarization failed)" : "");
+        }
+    }
+    return dataToSummarize;
+  }
+
   async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
     console.log(`OrchestratorAgent: Received task: '${userTaskString ? userTaskString.substring(0,100)+'...' : 'N/A'}', parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
 
@@ -132,7 +183,7 @@ class OrchestratorAgent {
         }
 
         console.log(`OrchestratorAgent: Attempting to load state from ${stateFilePath} for SYNTHESIZE_ONLY mode.`);
-        const loadResult = await loadTaskState(stateFilePath); // Added await
+        const loadResult = await loadTaskState(stateFilePath);
 
         if (!loadResult.success || !loadResult.taskState) {
             return { success: false, message: `Failed to load task state for taskId '${taskIdToLoad}': ${loadResult.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
@@ -145,13 +196,22 @@ class OrchestratorAgent {
             return { success: false, message: `No execution context found for taskId '${taskIdToLoad}'. Cannot synthesize.`, originalTask: originalUserTaskString, executedPlan: loadedState.executionContext, finalAnswer: null };
         }
 
-        const executionContextForSynthesis = loadedState.executionContext;
+        // For SYNTHESIZE_ONLY, we use the processed_result_data if it exists, otherwise fall back to result_data
+        // This assumes that if summarization was done, it was stored in processed_result_data.
+        // If this mode is about re-synthesizing from the *original* raw output, this logic might need adjustment
+        // or ensure `processed_result_data` is what we want to re-synthesize from.
+        const executionContextForSynthesis = loadedState.executionContext.map(entry => ({
+            ...entry, // copy all fields
+            // Ensure outcome_data for synthesis uses processed_result_data if available
+            outcome_data: entry.processed_result_data !== undefined ? entry.processed_result_data : entry.result_data
+        }));
+
         const contextForLLMSynthesis = executionContextForSynthesis.map(entry => ({
             step_narrative: entry.narrative_step,
             tool_used: entry.tool_name,
             input_details: entry.sub_task_input,
             status: entry.status,
-            outcome_data: entry.result_data,
+            outcome_data: entry.outcome_data, // Use the potentially re-mapped outcome_data
             error_info: entry.error_details
         }));
         const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
@@ -240,7 +300,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             const rootDirError = path.join(__dirname, '..');
             const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
             const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
-            await saveTaskState(errorState, taskStateFilePathError); // Added await
+            await saveTaskState(errorState, taskStateFilePathError);
             return { success: false, message: `Failed to generate plan: ${llmError.message}`, taskId: parentTaskId, originalTask: userTaskString };
         }
 
@@ -254,7 +314,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             const rootDirError = path.join(__dirname, '..');
             const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
             const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
-            await saveTaskState(errorState, taskStateFilePathError); // Added await
+            await saveTaskState(errorState, taskStateFilePathError);
             return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, taskId: parentTaskId, originalTask: userTaskString, rawResponse: parsedPlanResult.rawResponse };
         }
 
@@ -274,7 +334,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
         const rootDir = path.join(__dirname, '..');
         const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
         const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
-        await saveTaskState(taskStateToSave, taskStateFilePath); // Added await
+        await saveTaskState(taskStateToSave, taskStateFilePath);
 
         return {
             success: true,
@@ -412,20 +472,36 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 
             const stageResults = await Promise.all(stageSubTaskPromises);
 
-            stageResults.forEach((resultOfSubTask, index) => {
-                const subTaskDefinition = currentStageTaskDefinitions[index];
+            // Process results for the current stage, including summarization
+            const stageContextEntries = [];
+            for (let j = 0; j < stageResults.length; j++) { // Changed from forEach to allow await
+                const resultOfSubTask = stageResults[j];
+                const subTaskDefinition = currentStageTaskDefinitions[j];
+
+                let processedData = resultOfSubTask.result_data;
+                if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data) {
+                    processedData = await this.summarizeDataWithLLM(
+                        resultOfSubTask.result_data,
+                        userTaskString,
+                        subTaskDefinition.narrative_step
+                    );
+                }
+
                 const contextEntry = {
                     narrative_step: subTaskDefinition.narrative_step,
                     assigned_agent_role: subTaskDefinition.assigned_agent_role,
                     tool_name: subTaskDefinition.tool_name,
                     sub_task_input: subTaskDefinition.sub_task_input,
                     status: resultOfSubTask.status,
-                    result_data: resultOfSubTask.result_data,
+                    processed_result_data: processedData,
+                    raw_result_data: resultOfSubTask.result_data, // Optionally keep raw data
                     error_details: resultOfSubTask.error_details,
                     sub_task_id: resultOfSubTask.sub_task_id
                 };
-                executionContext.push(contextEntry);
-            });
+                stageContextEntries.push(contextEntry);
+            }
+            executionContext.push(...stageContextEntries);
+
 
             for (const result of stageResults) {
                 if (result.status === "FAILED") {
@@ -458,7 +534,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
                 tool_used: entry.tool_name,
                 input_details: entry.sub_task_input,
                 status: entry.status,
-                outcome_data: entry.result_data,
+                outcome_data: entry.processed_result_data, // Use processed_result_data
                 error_info: entry.error_details
             }));
 
@@ -544,7 +620,7 @@ Provide only the final answer to the user. Do not repeat the execution history i
             const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
             const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
 
-            await saveTaskState(taskStateToSave, taskStateFilePath); // Added await
+            await saveTaskState(taskStateToSave, taskStateFilePath);
         }
         // --- End Save Task State Logic ---
 
