@@ -19,66 +19,63 @@ class ResearchAgent {
     console.log('ResearchAgent: Full taskMessage received:', JSON.stringify(taskMessage, null, 2));
 
     const { tool_name, sub_task_input, sub_task_id, parent_task_id } = taskMessage;
-    let outcome = { result: null, error: `Unknown tool '${tool_name}' for ResearchAgent or invalid input.` };
+    let outcome = { result: null, error: null }; // Initialize with no error
     let status = "FAILED"; // Default status
+    let executionPromise = null;
 
     const selectedTool = this.toolsMap[tool_name];
 
     if (selectedTool) {
       try {
-        let validInput = false;
-        let executionPromise = null;
-
-        if (tool_name === "WebSearchTool") {
-            if (sub_task_input && typeof sub_task_input.query === 'string') {
-                validInput = true;
-                executionPromise = selectedTool.execute(sub_task_input);
-            } else {
-                outcome = { result: null, error: "Invalid input for WebSearchTool: 'query' string is required." };
-            }
-        } else if (tool_name === "ReadWebpageTool") {
-            if (sub_task_input && typeof sub_task_input.url === 'string') {
-                validInput = true;
-                executionPromise = selectedTool.execute(sub_task_input);
-            } else {
-                outcome = { result: null, error: "Invalid input for ReadWebpageTool: 'url' string is required." };
-            }
+        if (tool_name === "WebSearchTool" || tool_name === "ReadWebpageTool") {
+            executionPromise = selectedTool.execute(sub_task_input);
         } else {
-            // This case should ideally not be hit if Orchestrator assigns valid tools
-            outcome = { result: null, error: `Tool '${tool_name}' not specifically handled by ResearchAgent logic, though it exists in toolsMap.` };
+            // Tool is in toolsMap but not explicitly handled by this agent's if/else logic
+            outcome.error = { category: "UNSUPPORTED_TOOL", message: `Tool '${tool_name}' is present but not explicitly supported by ResearchAgent's current logic.` };
         }
 
-        if (validInput && executionPromise) {
+        if (executionPromise) {
             const timeoutPromise = new Promise((_, reject) =>
                 setTimeout(() => reject(new Error(`Tool '${tool_name}' execution timed out after ${TOOL_EXECUTION_TIMEOUT_MS}ms`)), TOOL_EXECUTION_TIMEOUT_MS)
             );
-            // Promise.race will either resolve with the tool's outcome or reject with the timeout error
             outcome = await Promise.race([executionPromise, timeoutPromise]);
         }
-        // If validInput was false, outcome already contains the validation error.
-        // If executionPromise was null (but validInput true - an unlikely scenario), this block is skipped, outcome might be default error.
+        // If executionPromise was null (tool not supported), outcome already has the error.
 
-        // Determine status based on the outcome
-        if (validInput && executionPromise && outcome && outcome.error === null) {
+        // Determine status based on the outcome.error
+        if (outcome && outcome.error === null) {
             status = "COMPLETED";
-        } else if (validInput && executionPromise && outcome && outcome.error) {
-            // Error came from the tool itself (not a timeout caught in the catch block below)
-            // or from the timeoutPromise if it resolved with an error object (which it doesn't, it rejects)
-            // Status remains "FAILED", outcome already contains the error.
-        } else if (!validInput) {
-            // Input validation failed, status is "FAILED", outcome has the validation error.
+        } else { // outcome.error is not null (or outcome itself might be null)
+            status = "FAILED";
+            // This block ensures that if status is FAILED, outcome.error is consistently a structured error object.
+            // It handles edge cases where:
+            // 1. A tool might have returned a non-null but improperly structured error (e.g., a string instead of an object).
+            // 2. The 'outcome' object itself was unexpectedly null or undefined after tool execution.
+            // In such cases, a generic AGENT_INTERNAL_ERROR is created.
+            if (outcome && !outcome.error) { // Case 1: outcome exists, but outcome.error is falsey (e.g. undefined, null, empty string from tool)
+                outcome.error = { category: "AGENT_INTERNAL_ERROR", message: `Tool '${tool_name}' execution failed or returned an invalid error structure.` };
+            } else if (!outcome) { // Case 2: outcome itself is null or undefined.
+                outcome = { result: null, error: { category: "AGENT_INTERNAL_ERROR", message: `Outcome object was null after tool '${tool_name}' execution.` } };
+            }
+            // If outcome.error is already a structured error from the tool, it will be preserved.
         }
-        // Any other scenario (e.g. executionPromise existed but outcome is somehow undefined) will also default to FAILED status.
 
       } catch (e) { // This catch block handles rejections from Promise.race (i.e., timeout) or other unexpected errors.
         console.error(`ResearchAgent: Error executing or timeout for tool ${tool_name} for task ${sub_task_id}:`, e.message);
-        // Ensure outcome reflects the error from the catch block
-        outcome = { result: null, error: e.message || "An unexpected error occurred during tool execution or timeout." };
-        // status remains "FAILED" (as initialized)
+        status = "FAILED"; // Ensure status is FAILED
+        if (e.message && e.message.toLowerCase().includes("timed out")) {
+            outcome.error = { category: "TOOL_TIMEOUT", message: e.message, details: { originalError: e.toString() } };
+        } else {
+            outcome.error = { category: "AGENT_INTERNAL_ERROR", message: e.message || "An unexpected error occurred in ResearchAgent.", details: { originalError: e.toString() } };
+        }
+        // Ensure result is null in case of an error
+        outcome.result = null;
       }
     } else {
         console.error(`ResearchAgent: Tool '${tool_name}' not found in toolsMap for task ${sub_task_id}.`);
-        // outcome is already set to "Unknown tool..."
+        outcome.error = { category: "TOOL_NOT_FOUND", message: `Tool '${tool_name}' not found in ResearchAgent's toolsMap.` };
+        status = "FAILED"; // Ensure status is FAILED
+        outcome.result = null; // Ensure result is null
     }
 
     const resultMessage = {
@@ -87,7 +84,7 @@ class ResearchAgent {
       worker_agent_role: this.agentRole,
       status: status,
       result_data: outcome.result, // This will be null if there was an error
-      error_details: outcome.error ? { message: outcome.error } : null
+      error_details: outcome.error // outcome.error is now the structured error object or null
     };
 
     console.log(`ResearchAgent (${this.agentRole}): Enqueuing result for sub_task_id ${sub_task_id}. Status: ${status}`);

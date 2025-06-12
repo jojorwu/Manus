@@ -1,6 +1,8 @@
 // tools/ReadWebpageTool.js
 const axios = require('axios');
 
+const MAX_CONTENT_LENGTH = 2000;
+
 class ReadWebpageTool {
     constructor() {
         // console.log("ReadWebpageTool initialized.");
@@ -8,7 +10,7 @@ class ReadWebpageTool {
 
     async execute(input) {
         if (!input || typeof input.url !== 'string' || input.url.trim() === "") {
-            return { result: null, error: "Invalid input for ReadWebpageTool: 'url' string is required." };
+            return { result: null, error: { category: "INVALID_INPUT", message: "Invalid input for ReadWebpageTool: 'url' string is required and cannot be empty." } };
         }
 
         try {
@@ -24,34 +26,49 @@ class ReadWebpageTool {
 
             if (typeof htmlContent === 'string') {
                 originalLength = htmlContent.length;
-                partialHtmlContent = htmlContent.substring(0, 2000);
-            } else if (typeof htmlContent === 'object') {
+                partialHtmlContent = htmlContent.substring(0, MAX_CONTENT_LENGTH);
+            } else if (typeof htmlContent === 'object' && htmlContent !== null) {
                 // If the response is an object (e.g. JSON), stringify it.
-                const jsonString = JSON.stringify(htmlContent);
-                originalLength = jsonString.length;
-                partialHtmlContent = jsonString.substring(0, 2000);
+                try {
+                    const jsonString = JSON.stringify(htmlContent);
+                    originalLength = jsonString.length;
+                    partialHtmlContent = jsonString.substring(0, MAX_CONTENT_LENGTH);
+                } catch (e) {
+                    console.warn(`ReadWebpageTool: Could not stringify object from URL: ${input.url}`, e);
+                    return { result: null, error: { category: "UNEXPECTED_CONTENT_TYPE", message: `ReadWebpageTool could not stringify content of type object for URL: ${input.url}`, details: { originalError: e.message } } };
+                }
             } else {
-                // For other unexpected data types
+                // For other unexpected data types (null, boolean, number, undefined)
                 console.warn(`ReadWebpageTool received unexpected data type: ${typeof htmlContent} for URL: ${input.url}`);
-                return { result: null, error: "Failed to read webpage: unexpected content type." };
+                return { result: null, error: { category: "UNEXPECTED_CONTENT_TYPE", message: `ReadWebpageTool received unexpected data type: ${typeof htmlContent} for URL: ${input.url}` } };
             }
 
-            return { result: partialHtmlContent + (originalLength > 2000 ? "..." : ""), error: null };
+            return { result: partialHtmlContent + (originalLength > MAX_CONTENT_LENGTH ? "..." : ""), error: null };
 
         } catch (error) {
-            console.error(`Error reading webpage ${input.url}:`, error);
-            let errorMessage = "Failed to read webpage: " + error.message;
+            console.error(`Error reading webpage ${input.url}:`, error.message); // Log only message for brevity here
             if (error.response) {
-                // Include status code if available
-                errorMessage += ` (Status: ${error.response.status})`;
-                // Log more detailed error if present
-                if (error.response.data) {
-                     console.error("Error response data:", typeof error.response.data === 'string' ? error.response.data.substring(0,500) : error.response.data);
-                }
+                // Server responded with an error status code (4xx or 5xx)
+                let responseDataLog = error.response.data;
+                if (typeof responseDataLog === 'string') {
+                    responseDataLog = responseDataLog.substring(0, 500) + (responseDataLog.length > 500 ? "..." : "");
+                } else if (typeof responseDataLog === 'object' && responseDataLog !== null) {
+                    try {
+                        const jsonString = JSON.stringify(responseDataLog);
+                        responseDataLog = jsonString.substring(0, 500) + (jsonString.length > 500 ? "..." : "");
+                    } catch (e) {
+                        responseDataLog = "[Could not stringify object]";
+                    }
+                } // Non-string/non-object types will be logged as is by console.error
+                console.error("Error response data snippet:", responseDataLog);
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: `Failed to read webpage: Server responded with status ${error.response.status}`, details: { httpStatusCode: error.response.status, originalError: error.message } } };
             } else if (error.request) {
-                errorMessage = "Failed to read webpage: No response received from server.";
+                // No response was received from the server
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: "Failed to read webpage: No response received from server.", details: { originalError: error.message } } };
+            } else {
+                // Other errors (e.g., setup issues, network problems before request was made)
+                return { result: null, error: { category: "RESOURCE_ACCESS_ERROR", message: "Failed to read webpage: " + error.message, details: { originalError: error.message } } };
             }
-            return { result: null, error: errorMessage };
         }
     }
 }
