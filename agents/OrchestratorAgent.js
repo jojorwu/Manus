@@ -183,7 +183,25 @@ class OrchestratorAgent {
         let finalAnswer = null;
         let responseMessage = "";
 
-        if (overallSuccess && executionContext && executionContext.length > 0) {
+        // Retrieve pre-synthesized answer if available
+        const preSynthesizedFinalAnswer = executionResult.finalAnswer;
+        const wasFinalAnswerPreSynthesized = executionResult.finalAnswerSynthesized;
+
+        if (wasFinalAnswerPreSynthesized) {
+            finalAnswer = preSynthesizedFinalAnswer;
+            responseMessage = "Task completed. Final answer was generated during plan execution.";
+            finalJournalEntries.push(this._createOrchestratorJournalEntry(
+                "FINAL_SYNTHESIS_SKIPPED",
+                "Final answer was pre-synthesized by PlanExecutor.",
+                { parentTaskId, answerPreview: String(finalAnswer).substring(0,100) + "..." }
+            ));
+            console.log("OrchestratorAgent: Final answer was pre-synthesized by PlanExecutor.");
+            if (currentWorkingContext) {
+               currentWorkingContext.summaryOfProgress = "Task completed. Final answer pre-synthesized by PlanExecutor.";
+               currentWorkingContext.nextObjective = "Task finished.";
+               currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+            }
+        } else if (overallSuccess && executionContext && executionContext.length > 0) {
             finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_START", "Starting final synthesis of answer.", { parentTaskId }));
             const contextForLLMSynthesis = executionContext.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.processed_result_data, error_info: entry.error_details }));
             const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
@@ -222,8 +240,25 @@ Based on the original user task, execution history, and current working context,
         currentWorkingContext.summaryOfProgress = `Final synthesis attempt concluded: ${responseMessage}`;
         currentWorkingContext.lastUpdatedAt = new Date().toISOString();
         finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED", "CWC updated after synthesis attempt.", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
+        }
+         // This block handles cases where synthesis was skipped due to pre-synthesized answer, or no execution/overall failure
+         else if (!wasFinalAnswerPreSynthesized) {
+            if (!overallSuccess) { // This implies execution failed
+                 responseMessage = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
+                 finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_ABORTED", responseMessage, { parentTaskId }));
+            } else { // No overall success, but also no specific data to synthesize, or no execution context
+                 responseMessage = "No execution steps were performed or no actionable data produced; no final answer synthesized.";
+                 finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED", responseMessage, { parentTaskId }));
+            }
+            if (currentWorkingContext) { // Update CWC for these non-synthesis scenarios too
+                currentWorkingContext.summaryOfProgress = responseMessage;
+                currentWorkingContext.nextObjective = "Task finished with no new answer synthesized by Orchestrator.";
+                currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+            }
+        }
 
-        const taskStatusToSave = overallSuccess ? "COMPLETED" : "FAILED_EXECUTION"; // Or FAILED_PLANNING if that was the case
+
+        const taskStatusToSave = overallSuccess ? "COMPLETED" : "FAILED_EXECUTION";
         const taskStateToSave = {
             taskId: parentTaskId,
             userTaskString: currentOriginalTask,
@@ -231,16 +266,21 @@ Based on the original user task, execution history, and current working context,
             plan: planStages,
             executionContext: executionContext,
             finalAnswer: finalAnswer,
-            errorSummary: overallSuccess ? null : { reason: responseMessage },
+            errorSummary: overallSuccess ? null : { reason: responseMessage, ...(executionResult && executionResult.updatesForWorkingContext && executionResult.updatesForWorkingContext.errorsEncountered && executionResult.updatesForWorkingContext.errorsEncountered.length > 0 ? { lastKnownError: executionResult.updatesForWorkingContext.errorsEncountered[executionResult.updatesForWorkingContext.errorsEncountered.length -1] } : {} ) },
             currentWorkingContext
         };
-        if (planResult && planResult.source === 'template') taskStateToSave.plan_source = 'template';
-        else if (planResult) { // from LLM
+        if (planResult && planResult.source === 'template') {
+            taskStateToSave.plan_source = 'template';
+        } else if (planResult) {
             taskStateToSave.plan_source = 'LLM';
             taskStateToSave.raw_llm_response = planResult.rawResponse;
         }
 
-        await saveTaskState(taskStateToSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`)); // Placeholder path
+        // Ensure final CWC update before saving state
+        if(currentWorkingContext) currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+
+
+        await saveTaskState(taskStateToSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`));
         finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "TASK_COMPLETED_SUCCESSFULLY" : "TASK_FAILED_FINAL", `Task processing finished. Overall Success: ${overallSuccess}`, { parentTaskId, finalStatus: taskStatusToSave }));
         await saveTaskJournal(parentTaskId, finalJournalEntries, path.join(__dirname, '..', 'saved_tasks'));
 
