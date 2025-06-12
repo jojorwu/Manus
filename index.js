@@ -12,6 +12,7 @@ const ResultsQueue = require('./core/ResultsQueue');
 // Импорт классов инструментов
 const WebSearchTool = require('./tools/WebSearchTool');
 const ReadWebpageTool = require('./tools/ReadWebpageTool');
+const AdvancedWebpageReaderTool = require('./tools/AdvancedWebpageReaderTool'); // New Tool
 const CalculatorTool = require('./tools/CalculatorTool');
 
 // Импорт LLM сервиса
@@ -33,8 +34,9 @@ const agentApiKeysConfig = {
 };
 
 // Инициализация инструментов
-const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // Предполагаем, что конструктор принимает конфиг
+const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch);
 const readWebpageTool = new ReadWebpageTool();
+const advancedWebpageReaderTool = new AdvancedWebpageReaderTool(); // New Tool Instance
 const calculatorTool = new CalculatorTool();
 
 // Инициализация агентов
@@ -42,7 +44,8 @@ const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, gemi
 
 const researchAgentTools = {
     "WebSearchTool": webSearchTool,
-    "ReadWebpageTool": readWebpageTool
+    "ReadWebpageTool": readWebpageTool,
+    "AdvancedWebpageReaderTool": advancedWebpageReaderTool // Added to ResearchAgent
 };
 const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, researchAgentTools, agentApiKeysConfig);
 
@@ -118,7 +121,7 @@ app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID.");
     console.log("Available agents: Orchestrator, Research, Utility.");
-    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
+    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool, AdvancedWebpageReaderTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
     console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
 });
