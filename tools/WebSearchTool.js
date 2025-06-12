@@ -25,6 +25,36 @@ class WebSearchTool extends BaseTool {
             q: input.query,
         };
 
+        if (input.numResults !== undefined) {
+            if (typeof input.numResults !== 'number' || !Number.isInteger(input.numResults) || input.numResults < 1 || input.numResults > 10) {
+                return this._errorResponse(
+                    "INVALID_INPUT",
+                    "Optional parameter 'numResults' must be an integer between 1 and 10.",
+                    { valueProvided: input.numResults }
+                );
+            }
+            queryParams.num = input.numResults;
+        }
+
+        if (input.siteToSearch !== undefined) {
+            if (typeof input.siteToSearch !== 'string') {
+                return this._errorResponse(
+                    "INVALID_INPUT",
+                    "Optional parameter 'siteToSearch' must be a string.",
+                    { valueProvided: input.siteToSearch }
+                );
+            }
+            const trimmedSiteToSearch = input.siteToSearch.trim();
+            if (trimmedSiteToSearch === "") {
+                return this._errorResponse(
+                    "INVALID_INPUT",
+                    "Optional parameter 'siteToSearch' cannot be an empty string when provided.",
+                    { valueProvided: input.siteToSearch }
+                );
+            }
+            queryParams.siteSearch = trimmedSiteToSearch;
+        }
+
         try {
             const response = await axios.get(apiUrl, { params: queryParams });
 
