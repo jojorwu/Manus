@@ -391,6 +391,243 @@ Based on the original user task and the detailed execution history provided abov
         }
         return { success: true, message: synthesisMessage, originalTask: originalUserTaskString, plan: loadedState.plan, executedPlan: executionContextForSynthesis, finalAnswer: finalAnswer };
 
+    } else if (executionMode === ExecutionModes.EXECUTE_PLANNED_TASK) {
+        logger.info(`OrchestratorAgent: Starting EXECUTE_PLANNED_TASK for taskIdToLoad: ${taskIdToLoad}`, { parentTaskId, taskIdToLoad });
+
+        if (!taskIdToLoad) {
+            logger.warn("OrchestratorAgent: EXECUTE_PLANNED_TASK mode requires a taskIdToLoad, but it was not provided.", { parentTaskId });
+            return { success: false, message: "EXECUTE_PLANNED_TASK mode requires a taskIdToLoad.", taskId: null };
+        }
+
+        let loadedState = null;
+        let stateFilePath = null;
+        const savedTasksBaseDir = path.join(__dirname, '..', 'saved_tasks');
+
+        try {
+            // Similar logic to SYNTHESIZE_ONLY for finding the task state file
+            await fs.promises.access(savedTasksBaseDir);
+            const allDirents = await fs.promises.readdir(savedTasksBaseDir, { withFileTypes: true });
+            const dateDirs = allDirents.filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_')).map(dirent => dirent.name).sort((a, b) => b.localeCompare(a)); // Sort to check recent first
+            for (const dateDir of dateDirs) {
+                const tryPath = path.join(savedTasksBaseDir, dateDir, `task_state_${taskIdToLoad}.json`);
+                try {
+                    await fs.promises.access(tryPath);
+                    stateFilePath = tryPath;
+                    break;
+                } catch (fileAccessError) { /* File not in this dateDir, try next */ }
+            }
+        } catch (baseDirError) {
+            logger.warn(`OrchestratorAgent: Error accessing saved tasks base directory ${savedTasksBaseDir} for EXECUTE_PLANNED_TASK.`, { error: baseDirError.message, stack: baseDirError.stack, taskIdToLoad });
+            // Continue to stateFilePath check, which will handle the "not found" case
+        }
+
+        if (!stateFilePath) {
+            logger.error(`OrchestratorAgent: State file for taskId '${taskIdToLoad}' not found for EXECUTE_PLANNED_TASK.`, { taskIdToLoad });
+            return { success: false, message: `Failed to load task state for taskIdToLoad: '${taskIdToLoad}'. File not found.`, taskId: taskIdToLoad };
+        }
+
+        logger.info(`OrchestratorAgent: Attempting to load state from ${stateFilePath} for EXECUTE_PLANNED_TASK mode.`, { stateFilePath, taskIdToLoad });
+        const loadResult = await loadTaskState(stateFilePath);
+
+        if (!loadResult.success || !loadResult.taskState) {
+            logger.error(`OrchestratorAgent: Failed to load task state for taskId '${taskIdToLoad}' in EXECUTE_PLANNED_TASK.`, { taskIdToLoad, message: loadResult.message });
+            return { success: false, message: `Failed to load task state for taskIdToLoad: '${taskIdToLoad}'. ${loadResult.message}`, taskId: taskIdToLoad };
+        }
+        loadedState = loadResult.taskState;
+        const loadedUserTaskString = loadedState.userTaskString; // Renamed to avoid conflict if userTaskString is passed in req.body (though not used)
+        const planStages = loadedState.plan;
+
+        if (!planStages || !Array.isArray(planStages) || planStages.length === 0) {
+            logger.error(`OrchestratorAgent: No valid plan found in the loaded task state for taskId '${taskIdToLoad}'.`, { taskIdToLoad, loadedPlan: planStages });
+            return { success: false, message: "No valid plan found in the loaded task state.", taskId: taskIdToLoad, originalTask: loadedUserTaskString };
+        }
+
+        logger.info(`OrchestratorAgent: Loaded plan with ${planStages.length} stage(s) for task ID ${taskIdToLoad}. Current status: ${loadedState.status}`, { taskIdToLoad, stageCount: planStages.length, status: loadedState.status });
+
+        if (loadedState.status === TaskStatuses.COMPLETED || loadedState.status === TaskStatuses.FAILED_EXECUTION) {
+            logger.warn(`OrchestratorAgent: Task ${taskIdToLoad} is being re-executed but was already marked as ${loadedState.status}. Proceeding with re-execution.`, { taskIdToLoad, status: loadedState.status });
+        }
+
+
+        // --- Plan Execution Logic (similar to EXECUTE_FULL_PLAN) ---
+        const allExecutedStepsInfo = []; // This might be redundant if planStages already has full detail, but good for consistency in response.
+        const executionContext = [];
+        let overallSuccess = true;
+        // parentTaskId for sub-tasks should be the original taskIdToLoad to maintain linkage if needed,
+        // or a new one could be generated if we want to treat this execution run separately in logs.
+        // Using taskIdToLoad as parent for sub-tasks for now.
+        const currentExecutionParentId = taskIdToLoad;
+
+
+        for (let i = 0; i < planStages.length; i++) {
+            const currentStageTaskDefinitions = planStages[i]; // Each stage is an array of sub-tasks
+            logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`, { currentExecutionParentId, stage: i + 1, totalStages: planStages.length, subTaskCount: currentStageTaskDefinitions.length });
+
+            const stageSubTaskPromises = [];
+            for (const subTaskDefinition of currentStageTaskDefinitions) {
+                // Add to allExecutedStepsInfo for the final response structure.
+                // The plan from loadedState might already have this, but let's be consistent.
+                allExecutedStepsInfo.push({ narrative_step: subTaskDefinition.narrative_step, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input });
+
+                const sub_task_id = uuidv4(); // Generate a new unique ID for this specific sub-task execution instance
+                const taskMessage = {
+                    sub_task_id,
+                    parent_task_id: currentExecutionParentId, // Link to the overall task being executed
+                    assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                    tool_name: subTaskDefinition.tool_name,
+                    sub_task_input: subTaskDefinition.sub_task_input,
+                    narrative_step: subTaskDefinition.narrative_step
+                };
+
+                logger.debug('OrchestratorAgent (EXECUTE_PLANNED_TASK): Dispatching taskMessage:', { currentExecutionParentId, taskMessage });
+                this.subTaskQueue.enqueueTask(taskMessage);
+                logger.info(`Orchestrator (EXECUTE_PLANNED_TASK): Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`, { currentExecutionParentId, subTaskId: sub_task_id, stage: i + 1 });
+
+                const subTaskPromise = new Promise((resolve) => {
+                    this.resultsQueue.subscribeOnce(currentExecutionParentId, (error, resultMsg) => {
+                        if (error) {
+                            logger.error(`Orchestrator (EXECUTE_PLANNED_TASK): Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1})`, { currentExecutionParentId, subTaskId: sub_task_id, stage: i+1, error: error.message });
+                            resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: TaskStatuses.FAILED, error_details: { message: error.message || "Timeout or unknown error" } });
+                        } else if (resultMsg) {
+                            if (resultMsg.sub_task_id === sub_task_id) {
+                                logger.info(`Orchestrator (EXECUTE_PLANNED_TASK): Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`, { currentExecutionParentId, subTaskId: sub_task_id, stage: i+1, status: resultMsg.status });
+                                resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
+                            } else {
+                                const errorMessage = `Orchestrator (EXECUTE_PLANNED_TASK): Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${currentExecutionParentId} (Stage ${i+1}).`;
+                                logger.error(errorMessage, { currentExecutionParentId, expectedSubTaskId: sub_task_id, receivedSubTaskId: resultMsg.sub_task_id, stage: i+1 });
+                                resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: TaskStatuses.FAILED, error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage } });
+                            }
+                        }
+                    }, sub_task_id); // Crucially, subscribe with the specific sub_task_id
+                });
+                stageSubTaskPromises.push(subTaskPromise);
+            }
+
+            const stageResults = await Promise.all(stageSubTaskPromises);
+            const stageContextEntries = [];
+            for (let j = 0; j < stageResults.length; j++) {
+                const resultOfSubTask = stageResults[j];
+                const subTaskDefinition = currentStageTaskDefinitions[j]; // Get corresponding definition
+                let processedData = resultOfSubTask.result_data;
+                if (resultOfSubTask.status === TaskStatuses.COMPLETED && resultOfSubTask.result_data) {
+                    // Use loadedUserTaskString for context in summarization
+                    processedData = await this.summarizeDataWithLLM(resultOfSubTask.result_data, loadedUserTaskString, subTaskDefinition.narrative_step);
+                }
+                const contextEntry = {
+                    narrative_step: subTaskDefinition.narrative_step,
+                    assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                    tool_name: subTaskDefinition.tool_name,
+                    sub_task_input: subTaskDefinition.sub_task_input,
+                    status: resultOfSubTask.status,
+                    processed_result_data: processedData,
+                    raw_result_data: resultOfSubTask.result_data, // Keep raw data for full record
+                    error_details: resultOfSubTask.error_details,
+                    sub_task_id: resultOfSubTask.sub_task_id // The ID of this execution instance
+                };
+                stageContextEntries.push(contextEntry);
+            }
+            executionContext.push(...stageContextEntries); // Add all entries from this stage
+
+            for (const result of stageResults) {
+                if (result.status === TaskStatuses.FAILED) {
+                    logger.error(`Orchestrator (EXECUTE_PLANNED_TASK): Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages.`, { currentExecutionParentId, subTaskId: result.sub_task_id, narrativeStep: result.narrative_step, stage: i + 1, errorDetails: result.error_details });
+                    overallSuccess = false;
+                    break; // Break from looping through stages
+                }
+            }
+            if (!overallSuccess) break; // Break from stage loop if a sub-task failed
+            logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Stage ${i + 1} completed. Overall success so far: ${overallSuccess}`, { currentExecutionParentId, stage: i + 1, overallSuccess });
+        }
+
+        logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Finished processing all stages for taskId: ${taskIdToLoad}. Overall execution success: ${overallSuccess}`, { taskIdToLoad, overallSuccess });
+
+        let synthesizedAnswer = null;
+        let finalMessage = "";
+
+        if (overallSuccess && executionContext.length > 0) {
+            const contextForLLMSynthesis = executionContext.map(entry => ({
+                step_narrative: entry.narrative_step,
+                tool_used: entry.tool_name,
+                input_details: entry.sub_task_input,
+                status: entry.status,
+                outcome_data: entry.processed_result_data, // Use summarized/processed data for synthesis
+                error_info: entry.error_details
+            }));
+
+            logger.debug(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Context for final LLM synthesis for task ${taskIdToLoad}:`, { contextForLLMSynthesis });
+
+            if (contextForLLMSynthesis.every(e => e.status === TaskStatuses.FAILED || (e.status === TaskStatuses.COMPLETED && (e.outcome_data === null || e.outcome_data === undefined)))) {
+                logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): No successful results with actionable data to synthesize for task ${taskIdToLoad}.`, { taskIdToLoad });
+                finalMessage = "Executed planned task, but no specific data was gathered or all steps failed, so a new synthesized answer cannot be provided.";
+                synthesizedAnswer = "The planned process completed, but no new specific information was generated to form a final answer, or all steps resulted in errors during this execution.";
+            } else {
+                const synthesisPrompt = this._buildSynthesisPrompt(loadedUserTaskString, JSON.stringify(contextForLLMSynthesis, null, 2));
+                logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Attempting final synthesis for task ${taskIdToLoad}.`, { taskIdToLoad });
+                try {
+                    synthesizedAnswer = await this.llmService(synthesisPrompt);
+                    finalMessage = "Executed planned task and synthesized final answer.";
+                    logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Final answer synthesized successfully for task ${taskIdToLoad}.`, { taskIdToLoad });
+                } catch (synthError) {
+                    logger.error(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Error during final answer synthesis for task ${taskIdToLoad}.`, { taskIdToLoad, error: synthError.message, stack: synthError.stack });
+                    synthesizedAnswer = "Error during final answer synthesis from executed plan: " + synthError.message;
+                    finalMessage = "Executed planned task, but final answer synthesis failed.";
+                }
+            }
+        } else if (!overallSuccess) {
+            finalMessage = "One or more sub-tasks failed during execution of the planned task. Unable to provide a final synthesized answer.";
+            synthesizedAnswer = "Execution of the planned task failed, so a final answer could not be synthesized.";
+        } else { // overallSuccess is true but executionContext is empty (should not happen if planStages had items)
+            finalMessage = "No sub-tasks were executed from the plan, though the process was marked successful. This might indicate an empty plan.";
+            synthesizedAnswer = "The plan execution completed, but no steps were processed or no information was generated.";
+        }
+
+        // Update Task State
+        const finalStatus = overallSuccess ? TaskStatuses.COMPLETED : TaskStatuses.FAILED_EXECUTION;
+        const taskStateToUpdate = {
+            taskId: taskIdToLoad, // Persist with the original taskId
+            userTaskString: loadedUserTaskString, // From the loaded state
+            status: finalStatus,
+            plan: planStages, // The original plan that was executed
+            executionContext: executionContext, // From this specific execution run
+            finalAnswer: synthesizedAnswer, // From this specific execution run
+            updatedAt: new Date().toISOString(), // Mark when this execution finished
+            // Add errorSummary if failed
+            ...(finalStatus === TaskStatuses.FAILED_EXECUTION && {
+                errorSummary: {
+                    reason: finalMessage, // General reason
+                    // Could add more detail here, e.g., first failed step if desired
+                    failedStepInfo: executionContext.find(step => step.status === TaskStatuses.FAILED)
+                }
+            })
+        };
+
+        // stateFilePath should be the path from which the state was loaded
+        if (stateFilePath) {
+            try {
+                await saveTaskState(taskStateToUpdate, stateFilePath);
+                logger.info(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Successfully updated and saved task state for ${taskIdToLoad} to ${stateFilePath}.`, { taskIdToLoad });
+            } catch (saveError) {
+                logger.error(`OrchestratorAgent (EXECUTE_PLANNED_TASK): Failed to save updated task state for ${taskIdToLoad} to ${stateFilePath}.`, { taskIdToLoad, error: saveError.message, stack: saveError.stack });
+                // The operation itself might have succeeded, but saving state failed.
+                // The message to the user should reflect the execution outcome.
+                finalMessage += " (Warning: Failed to update task state on server).";
+            }
+        } else {
+            // This case should ideally not be reached if loading succeeded.
+            logger.error(`OrchestratorAgent (EXECUTE_PLANNED_TASK): stateFilePath was unexpectedly null when trying to save updated state for ${taskIdToLoad}. This is an anomaly.`, { taskIdToLoad });
+            finalMessage += " (Warning: Critical error occurred, unable to determine save path for task state).";
+        }
+
+        return {
+            success: overallSuccess,
+            message: finalMessage,
+            originalTask: loadedUserTaskString,
+            plan: planStages, // The plan that was intended to be executed
+            executedPlan: executionContext, // The actual outcome of this execution
+            finalAnswer: synthesizedAnswer,
+            taskId: taskIdToLoad // Return the ID of the task that was loaded and executed
+        };
+
     } else if (executionMode === ExecutionModes.PLAN_ONLY || executionMode === ExecutionModes.EXECUTE_FULL_PLAN) {
         if (!userTaskString) {
             logger.warn(`OrchestratorAgent: Task string is required for ${executionMode} mode, but was not provided.`, { executionMode, parentTaskId });
