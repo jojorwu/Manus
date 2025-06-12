@@ -104,19 +104,26 @@ class OrchestratorAgent {
         let stateFilePath = null;
         const savedTasksBaseDir = path.join(__dirname, '..', 'saved_tasks');
 
-        if (fs.existsSync(savedTasksBaseDir)) {
-            const dateDirs = fs.readdirSync(savedTasksBaseDir, { withFileTypes: true })
-                               .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_'))
-                               .map(dirent => dirent.name)
-                               .sort((a, b) => b.localeCompare(a));
+        try {
+            await fs.promises.access(savedTasksBaseDir);
+            const allDirents = await fs.promises.readdir(savedTasksBaseDir, { withFileTypes: true });
+            const dateDirs = allDirents
+                .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_'))
+                .map(dirent => dirent.name)
+                .sort((a, b) => b.localeCompare(a));
 
             for (const dateDir of dateDirs) {
                 const tryPath = path.join(savedTasksBaseDir, dateDir, `task_state_${taskIdToLoad}.json`);
-                if (fs.existsSync(tryPath)) {
+                try {
+                    await fs.promises.access(tryPath);
                     stateFilePath = tryPath;
                     break;
+                } catch (fileAccessError) {
+                    // File not found in this directory or недоступен, продолжаем поиск
                 }
             }
+        } catch (baseDirError) {
+            console.warn(`OrchestratorAgent: Error accessing saved tasks base directory ${savedTasksBaseDir}: ${baseDirError.message}`);
         }
 
         if (!stateFilePath) {
@@ -125,15 +132,13 @@ class OrchestratorAgent {
         }
 
         console.log(`OrchestratorAgent: Attempting to load state from ${stateFilePath} for SYNTHESIZE_ONLY mode.`);
-        const loadResult = loadTaskState(stateFilePath);
+        const loadResult = await loadTaskState(stateFilePath); // Added await
 
         if (!loadResult.success || !loadResult.taskState) {
             return { success: false, message: `Failed to load task state for taskId '${taskIdToLoad}': ${loadResult.message}`, originalTask: null, executedPlan: [], finalAnswer: null };
         }
 
         loadedState = loadResult.taskState;
-
-        // Use originalUserTaskString from loaded state for the synthesis prompt
         const originalUserTaskString = loadedState.userTaskString;
 
         if (!loadedState.executionContext || loadedState.executionContext.length === 0) {
@@ -141,7 +146,6 @@ class OrchestratorAgent {
         }
 
         const executionContextForSynthesis = loadedState.executionContext;
-
         const contextForLLMSynthesis = executionContextForSynthesis.map(entry => ({
             step_narrative: entry.narrative_step,
             tool_used: entry.tool_name,
@@ -186,35 +190,124 @@ Provide only the final answer.`;
             executedPlan: executionContextForSynthesis,
             finalAnswer: finalAnswer
         };
-    }
+    } else if (executionMode === "PLAN_ONLY") {
+        if (!userTaskString) {
+            return { success: false, message: "Task string is required for PLAN_ONLY mode.", originalTask: null, taskId: parentTaskId };
+        }
+        console.log(`OrchestratorAgent (PLAN_ONLY): Generating plan for task: "${userTaskString}"`);
 
-    // --- EXECUTE_FULL_PLAN mode logic starts here ---
-    // (userTaskString is guaranteed to be present by index.js for this mode)
+        let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
+        const knownAgentRoles = [];
+        const knownToolsByRole = {};
+        if (!this.workerAgentCapabilities || this.workerAgentCapabilities.length === 0) {
+            console.error("OrchestratorAgent (PLAN_ONLY): No worker agent capabilities defined. Cannot proceed.");
+            return { success: false, message: "Internal Server Error: No worker agent capabilities configured for PLAN_ONLY mode.", originalTask: userTaskString, taskId: parentTaskId };
+        }
+        this.workerAgentCapabilities.forEach(agent => {
+            knownAgentRoles.push(agent.role);
+            knownToolsByRole[agent.role] = agent.tools.map(t => t.name);
+            formattedAgentCapabilitiesString += "---\n";
+            formattedAgentCapabilitiesString += `Agent Role: ${agent.role}\n`;
+            formattedAgentCapabilitiesString += `Description: ${agent.description}\n`;
+            formattedAgentCapabilitiesString += `Tools:\n`;
+            agent.tools.forEach(tool => {
+                formattedAgentCapabilitiesString += `  - ${tool.name}: ${tool.description}\n`;
+            });
+        });
+        formattedAgentCapabilitiesString += "---\n(End of available agents list)\n";
 
-    let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
-    const knownAgentRoles = [];
-    const knownToolsByRole = {};
+        const planningPrompt = `User task: '${userTaskString}'.
+Available agent capabilities:
+${formattedAgentCapabilitiesString}
+Based on the user task and available agents, create a multi-stage execution plan.
+The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
+Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
+Each sub-task object in an inner array must have the following keys:
+1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}]).
+2. 'tool_name': String (must be a tool available to the assigned agent, as listed in its capabilities).
+3. 'sub_task_input': Object (the input for the specified tool, matching its described input format).
+4. 'narrative_step': String (a short, human-readable description of this step's purpose in the context of the overall user task).
+Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
-    if (!this.workerAgentCapabilities || this.workerAgentCapabilities.length === 0) {
-        console.error("OrchestratorAgent: No worker agent capabilities defined. Cannot proceed with planning.");
-        // This check is also important for EXECUTE_FULL_PLAN mode
-        return { success: false, message: "Internal Server Error: No worker agent capabilities configured.", originalTask: userTaskString, executedPlan: [] };
-    }
+        let planJsonString;
+        try {
+            planJsonString = await this.llmService(planningPrompt);
+        } catch (llmError) {
+            console.error("OrchestratorAgent (PLAN_ONLY): Error from LLM service during planning:", llmError.message);
+            const errorState = { taskId: parentTaskId, userTaskString, status: "FAILED_PLANNING", plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: `LLM service error: ${llmError.message}` }};
+            const nowError = new Date(); const monthError = String(nowError.getMonth() + 1).padStart(2, '0'); const dayError = String(nowError.getDate()).padStart(2, '0'); const yearError = nowError.getFullYear();
+            const dateDirError = `tasks_${monthError}${dayError}${yearError}`;
+            const rootDirError = path.join(__dirname, '..');
+            const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
+            const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
+            await saveTaskState(errorState, taskStateFilePathError); // Added await
+            return { success: false, message: `Failed to generate plan: ${llmError.message}`, taskId: parentTaskId, originalTask: userTaskString };
+        }
 
-    this.workerAgentCapabilities.forEach(agent => {
-      knownAgentRoles.push(agent.role);
-      knownToolsByRole[agent.role] = agent.tools.map(t => t.name);
-      formattedAgentCapabilitiesString += "---\n";
-      formattedAgentCapabilitiesString += `Agent Role: ${agent.role}\n`;
-      formattedAgentCapabilitiesString += `Description: ${agent.description}\n`;
-      formattedAgentCapabilitiesString += `Tools:\n`;
-      agent.tools.forEach(tool => {
-        formattedAgentCapabilitiesString += `  - ${tool.name}: ${tool.description}\n`;
-      });
-    });
-    formattedAgentCapabilitiesString += "---\n(End of available agents list)\n";
+        const parsedPlanResult = await parseSubTaskPlanResponse(planJsonString, knownAgentRoles, knownToolsByRole);
 
-    const planningPrompt = `User task: '${userTaskString}'.
+        if (!parsedPlanResult.success) {
+            console.error("OrchestratorAgent (PLAN_ONLY): Failed to parse LLM plan:", parsedPlanResult.message);
+            const errorState = { taskId: parentTaskId, userTaskString, status: "FAILED_PLANNING", plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: `Failed to parse LLM plan: ${parsedPlanResult.message}` }, rawLLMResponse: parsedPlanResult.rawResponse };
+            const nowError = new Date(); const monthError = String(nowError.getMonth() + 1).padStart(2, '0'); const dayError = String(nowError.getDate()).padStart(2, '0'); const yearError = nowError.getFullYear();
+            const dateDirError = `tasks_${monthError}${dayError}${yearError}`;
+            const rootDirError = path.join(__dirname, '..');
+            const saveDirError = path.join(rootDirError, 'saved_tasks', dateDirError);
+            const taskStateFilePathError = path.join(saveDirError, `task_state_${parentTaskId}.json`);
+            await saveTaskState(errorState, taskStateFilePathError); // Added await
+            return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, taskId: parentTaskId, originalTask: userTaskString, rawResponse: parsedPlanResult.rawResponse };
+        }
+
+        const planStages = parsedPlanResult.stages;
+        const taskStateToSave = {
+            taskId: parentTaskId,
+            userTaskString: userTaskString,
+            status: "PLAN_GENERATED",
+            currentStageIndex: null,
+            plan: planStages,
+            executionContext: [],
+            finalAnswer: null,
+            errorSummary: null
+        };
+        const now = new Date(); const month = String(now.getMonth() + 1).padStart(2, '0'); const day = String(now.getDate()).padStart(2, '0'); const year = now.getFullYear();
+        const dateDir = `tasks_${month}${day}${year}`;
+        const rootDir = path.join(__dirname, '..');
+        const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
+        const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
+        await saveTaskState(taskStateToSave, taskStateFilePath); // Added await
+
+        return {
+            success: true,
+            message: "Plan generated and saved successfully.",
+            taskId: parentTaskId,
+            originalTask: userTaskString,
+            plan: planStages
+        };
+
+    } else if (executionMode === "EXECUTE_FULL_PLAN") {
+        let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
+        const knownAgentRoles = [];
+        const knownToolsByRole = {};
+
+        if (!this.workerAgentCapabilities || this.workerAgentCapabilities.length === 0) {
+            console.error("OrchestratorAgent: No worker agent capabilities defined. Cannot proceed with planning.");
+            return { success: false, message: "Internal Server Error: No worker agent capabilities configured.", originalTask: userTaskString, executedPlan: [] };
+        }
+
+        this.workerAgentCapabilities.forEach(agent => {
+          knownAgentRoles.push(agent.role);
+          knownToolsByRole[agent.role] = agent.tools.map(t => t.name);
+          formattedAgentCapabilitiesString += "---\n";
+          formattedAgentCapabilitiesString += `Agent Role: ${agent.role}\n`;
+          formattedAgentCapabilitiesString += `Description: ${agent.description}\n`;
+          formattedAgentCapabilitiesString += `Tools:\n`;
+          agent.tools.forEach(tool => {
+            formattedAgentCapabilitiesString += `  - ${tool.name}: ${tool.description}\n`;
+          });
+        });
+        formattedAgentCapabilitiesString += "---\n(End of available agents list)\n";
+
+        const planningPrompt = `User task: '${userTaskString}'.
 Available agent capabilities:
 ${formattedAgentCapabilitiesString}
 Based on the user task and available agents, create a multi-stage execution plan.
@@ -238,145 +331,145 @@ Example of a valid two-stage plan:
 ]
 Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
-    console.log("OrchestratorAgent: Planning Prompt being sent to LLM:", planningPrompt);
-    let planJsonString;
-    try {
-      planJsonString = await this.llmService(planningPrompt);
-    } catch (llmError) {
-      console.error("OrchestratorAgent: Error from LLM service during planning:", llmError.message);
-      return { success: false, message: `Failed to generate plan: ${llmError.message}`, originalTask: userTaskString, executedPlan: [] };
-    }
-
-    const parsedPlanResult = await parseSubTaskPlanResponse(planJsonString, knownAgentRoles, knownToolsByRole);
-
-    if (!parsedPlanResult.success) {
-      console.error("OrchestratorAgent: Failed to parse LLM plan:", parsedPlanResult.message, parsedPlanResult.details);
-      return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, details: parsedPlanResult.details, originalTask: userTaskString, executedPlan: [], rawResponse: parsedPlanResult.rawResponse };
-    }
-
-    const planStages = parsedPlanResult.stages;
-    console.log(`OrchestratorAgent: Parsed plan with ${planStages.length} stage(s).`);
-
-    const allExecutedStepsInfo = [];
-    const executionContext = [];
-    let overallSuccess = true;
-
-    for (let i = 0; i < planStages.length; i++) {
-        const currentStageTaskDefinitions = planStages[i];
-        console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
-
-        const stageSubTaskPromises = [];
-
-        for (const subTaskDefinition of currentStageTaskDefinitions) {
-            allExecutedStepsInfo.push({
-                narrative_step: subTaskDefinition.narrative_step,
-                assigned_agent_role: subTaskDefinition.assigned_agent_role,
-                tool_name: subTaskDefinition.tool_name,
-                sub_task_input: subTaskDefinition.sub_task_input
-            });
-
-            const sub_task_id = uuidv4();
-
-            const taskMessage = {
-                sub_task_id: sub_task_id,
-                parent_task_id: parentTaskId,
-                assigned_agent_role: subTaskDefinition.assigned_agent_role,
-                tool_name: subTaskDefinition.tool_name,
-                sub_task_input: subTaskDefinition.sub_task_input,
-                narrative_step: subTaskDefinition.narrative_step,
-            };
-
-            console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
-            this.subTaskQueue.enqueueTask(taskMessage);
-            console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
-
-            const subTaskPromise = new Promise((resolve) => {
-                this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
-                    if (error) {
-                        console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1}):`, error.message);
-                        resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
-                    } else if (resultMsg) {
-                        if (resultMsg.sub_task_id === sub_task_id) {
-                            console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`);
-                            resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
-                        } else {
-                            const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId} (Stage ${i+1}). This indicates an issue with result routing or subscription logic.`;
-                            console.error(errorMessage);
-                            resolve({
-                                sub_task_id: sub_task_id,
-                                narrative_step: taskMessage.narrative_step,
-                                tool_name: taskMessage.tool_name,
-                                assigned_agent_role: taskMessage.assigned_agent_role,
-                                status: "FAILED",
-                                error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
-                            });
-                        }
-                    }
-                }, sub_task_id);
-            });
-            stageSubTaskPromises.push(subTaskPromise);
+        console.log("OrchestratorAgent: Planning Prompt being sent to LLM:", planningPrompt);
+        let planJsonString;
+        try {
+          planJsonString = await this.llmService(planningPrompt);
+        } catch (llmError) {
+          console.error("OrchestratorAgent: Error from LLM service during planning:", llmError.message);
+          return { success: false, message: `Failed to generate plan: ${llmError.message}`, originalTask: userTaskString, executedPlan: [] };
         }
 
-        const stageResults = await Promise.all(stageSubTaskPromises);
+        const parsedPlanResult = await parseSubTaskPlanResponse(planJsonString, knownAgentRoles, knownToolsByRole);
 
-        stageResults.forEach((resultOfSubTask, index) => {
-            const subTaskDefinition = currentStageTaskDefinitions[index];
-            const contextEntry = {
-                narrative_step: subTaskDefinition.narrative_step,
-                assigned_agent_role: subTaskDefinition.assigned_agent_role,
-                tool_name: subTaskDefinition.tool_name,
-                sub_task_input: subTaskDefinition.sub_task_input,
-                status: resultOfSubTask.status,
-                result_data: resultOfSubTask.result_data,
-                error_details: resultOfSubTask.error_details,
-                sub_task_id: resultOfSubTask.sub_task_id
-            };
-            executionContext.push(contextEntry);
-        });
+        if (!parsedPlanResult.success) {
+          console.error("OrchestratorAgent: Failed to parse LLM plan:", parsedPlanResult.message, parsedPlanResult.details);
+          return { success: false, message: `Failed to parse generated plan: ${parsedPlanResult.message}`, details: parsedPlanResult.details, originalTask: userTaskString, executedPlan: [], rawResponse: parsedPlanResult.rawResponse };
+        }
 
-        for (const result of stageResults) {
-            if (result.status === "FAILED") {
-                console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`);
-                overallSuccess = false;
+        const planStages = parsedPlanResult.stages;
+        console.log(`OrchestratorAgent: Parsed plan with ${planStages.length} stage(s).`);
+
+        const allExecutedStepsInfo = [];
+        const executionContext = [];
+        let overallSuccess = true;
+
+        for (let i = 0; i < planStages.length; i++) {
+            const currentStageTaskDefinitions = planStages[i];
+            console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
+
+            const stageSubTaskPromises = [];
+
+            for (const subTaskDefinition of currentStageTaskDefinitions) {
+                allExecutedStepsInfo.push({
+                    narrative_step: subTaskDefinition.narrative_step,
+                    assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                    tool_name: subTaskDefinition.tool_name,
+                    sub_task_input: subTaskDefinition.sub_task_input
+                });
+
+                const sub_task_id = uuidv4();
+
+                const taskMessage = {
+                    sub_task_id: sub_task_id,
+                    parent_task_id: parentTaskId,
+                    assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                    tool_name: subTaskDefinition.tool_name,
+                    sub_task_input: subTaskDefinition.sub_task_input,
+                    narrative_step: subTaskDefinition.narrative_step,
+                };
+
+                console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
+                this.subTaskQueue.enqueueTask(taskMessage);
+                console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
+
+                const subTaskPromise = new Promise((resolve) => {
+                    this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
+                        if (error) {
+                            console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1}):`, error.message);
+                            resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
+                        } else if (resultMsg) {
+                            if (resultMsg.sub_task_id === sub_task_id) {
+                                console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`);
+                                resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
+                            } else {
+                                const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId} (Stage ${i+1}). This indicates an issue with result routing or subscription logic.`;
+                                console.error(errorMessage);
+                                resolve({
+                                    sub_task_id: sub_task_id,
+                                    narrative_step: taskMessage.narrative_step,
+                                    tool_name: taskMessage.tool_name,
+                                    assigned_agent_role: taskMessage.assigned_agent_role,
+                                    status: "FAILED",
+                                    error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
+                                });
+                            }
+                        }
+                    }, sub_task_id);
+                });
+                stageSubTaskPromises.push(subTaskPromise);
+            }
+
+            const stageResults = await Promise.all(stageSubTaskPromises);
+
+            stageResults.forEach((resultOfSubTask, index) => {
+                const subTaskDefinition = currentStageTaskDefinitions[index];
+                const contextEntry = {
+                    narrative_step: subTaskDefinition.narrative_step,
+                    assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                    tool_name: subTaskDefinition.tool_name,
+                    sub_task_input: subTaskDefinition.sub_task_input,
+                    status: resultOfSubTask.status,
+                    result_data: resultOfSubTask.result_data,
+                    error_details: resultOfSubTask.error_details,
+                    sub_task_id: resultOfSubTask.sub_task_id
+                };
+                executionContext.push(contextEntry);
+            });
+
+            for (const result of stageResults) {
+                if (result.status === "FAILED") {
+                    console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`);
+                    overallSuccess = false;
+                    break;
+                }
+            }
+
+            if (!overallSuccess) {
                 break;
             }
+            console.log(`OrchestratorAgent: Stage ${i + 1} completed successfully.`);
         }
 
-        if (!overallSuccess) {
-            break;
-        }
-        console.log(`OrchestratorAgent: Stage ${i + 1} completed successfully.`);
-    }
+        console.log(`OrchestratorAgent: Finished processing all stages for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
 
-    console.log(`OrchestratorAgent: Finished processing all stages for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
+        let finalOrchestratorResponse = {
+          success: overallSuccess,
+          message: "",
+          originalTask: userTaskString,
+          plan: allExecutedStepsInfo,
+          executedPlan: executionContext,
+          finalAnswer: null
+        };
 
-    let finalOrchestratorResponse = {
-      success: overallSuccess,
-      message: "",
-      originalTask: userTaskString, // This should be the actual userTaskString for EXECUTE_FULL_PLAN
-      plan: allExecutedStepsInfo,
-      executedPlan: executionContext,
-      finalAnswer: null
-    };
+        if (overallSuccess && executionContext.length > 0) {
+            const contextForLLMSynthesis = executionContext.map(entry => ({
+                step_narrative: entry.narrative_step,
+                tool_used: entry.tool_name,
+                input_details: entry.sub_task_input,
+                status: entry.status,
+                outcome_data: entry.result_data,
+                error_info: entry.error_details
+            }));
 
-    if (overallSuccess && executionContext.length > 0) {
-        const contextForLLMSynthesis = executionContext.map(entry => ({
-            step_narrative: entry.narrative_step,
-            tool_used: entry.tool_name,
-            input_details: entry.sub_task_input,
-            status: entry.status,
-            outcome_data: entry.result_data,
-            error_info: entry.error_details
-        }));
+            const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
 
-        const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
-
-        if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
-            console.log("OrchestratorAgent: No successful results with actionable data to synthesize. Skipping synthesis.");
-            finalOrchestratorResponse.message = "All sub-tasks were executed, but no specific data was gathered or all steps failed, so a synthesized answer cannot be provided.";
-            finalOrchestratorResponse.finalAnswer = "The process completed, but no specific information was generated to form a final answer, or all steps resulted in errors.";
-        } else {
-            const synthesisPrompt = `The original user task was: "${userTaskString}".
+            if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
+                console.log("OrchestratorAgent: No successful results with actionable data to synthesize. Skipping synthesis.");
+                finalOrchestratorResponse.message = "All sub-tasks were executed, but no specific data was gathered or all steps failed, so a synthesized answer cannot be provided.";
+                finalOrchestratorResponse.finalAnswer = "The process completed, but no specific information was generated to form a final answer, or all steps resulted in errors.";
+            } else {
+                const synthesisPrompt = `The original user task was: "${userTaskString}".
 A plan was executed to address this task. The following is a JSON array detailing each step of the execution. Each object in the array represents a step and includes:
 - 'step_narrative': A human-readable description of the step's purpose.
 - 'tool_used': The name of the tool used for the step.
@@ -393,71 +486,74 @@ If a step failed, acknowledge it briefly if relevant, but focus on the informati
 Integrate the information smoothly. If some steps were just actions and yielded no specific data but completed successfully (i.e., 'outcome_data' is null or undefined), acknowledge them if relevant to the overall narrative of the answer.
 Provide only the final answer to the user. Do not repeat the execution history in your answer.`;
 
-            console.log("OrchestratorAgent: Attempting final synthesis with new structured prompt and context.");
-            // console.log("OrchestratorAgent: Synthesis Prompt:", synthesisPrompt);
+                console.log("OrchestratorAgent: Attempting final synthesis with new structured prompt and context.");
+                // console.log("OrchestratorAgent: Synthesis Prompt:", synthesisPrompt);
 
-            try {
-                const synthesizedAnswer = await this.llmService(synthesisPrompt);
-                finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
-                finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
-                console.log("OrchestratorAgent: Final answer synthesized successfully.");
-            } catch (synthError) {
-                console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
-                finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
-                finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
-            }
-        }
-    } else if (!overallSuccess) {
-      finalOrchestratorResponse.message = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
-    } else {
-      finalOrchestratorResponse.message = "No sub-tasks were executed, though the process was marked successful.";
-    }
-
-    // --- Save Task State Logic (only for EXECUTE_FULL_PLAN mode) ---
-    // The taskStateToSave.userTaskString should be the one used for planning.
-    // For SYNTHESIZE_ONLY, we don't re-save.
-    if (executionMode === "EXECUTE_FULL_PLAN") {
-        const taskStateToSave = {
-            taskId: parentTaskId,
-            userTaskString: userTaskString, // This is the original task string for this execution
-            createdAt: null,
-            updatedAt: null,
-            status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"),
-            currentStageIndex: null, // Placeholder
-            plan: finalOrchestratorResponse.plan,
-            executionContext: finalOrchestratorResponse.executedPlan,
-            finalAnswer: finalOrchestratorResponse.finalAnswer,
-            errorSummary: null
-        };
-
-        if (!finalOrchestratorResponse.success) {
-            taskStateToSave.errorSummary = {
-                failedAtStage: null, // Placeholder
-                reason: finalOrchestratorResponse.message
-            };
-            if (taskStateToSave.status === "FAILED_EXECUTION" && finalOrchestratorResponse.executedPlan && finalOrchestratorResponse.executedPlan.length > 0) {
-                const lastStep = finalOrchestratorResponse.executedPlan[finalOrchestratorResponse.executedPlan.length - 1];
-                if (lastStep && lastStep.error_details) {
-                    taskStateToSave.errorSummary.reason = `Last failed step: ${lastStep.narrative_step}. Error: ${lastStep.error_details.message}`;
+                try {
+                    const synthesizedAnswer = await this.llmService(synthesisPrompt);
+                    finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
+                    finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
+                    console.log("OrchestratorAgent: Final answer synthesized successfully.");
+                } catch (synthError) {
+                    console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
+                    finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
+                    finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
                 }
             }
+        } else if (!overallSuccess) {
+          finalOrchestratorResponse.message = "One or more sub-tasks failed. Unable to provide a final synthesized answer.";
+        } else {
+          finalOrchestratorResponse.message = "No sub-tasks were executed, though the process was marked successful.";
         }
 
-        const now = new Date();
-        const month = String(now.getMonth() + 1).padStart(2, '0');
-        const day = String(now.getDate()).padStart(2, '0');
-        const year = now.getFullYear();
-        const dateDir = `tasks_${month}${day}${year}`;
+        // --- Save Task State Logic (only for EXECUTE_FULL_PLAN mode) ---
+        if (executionMode === "EXECUTE_FULL_PLAN") {
+            const taskStateToSave = {
+                taskId: parentTaskId,
+                userTaskString: userTaskString,
+                createdAt: null,
+                updatedAt: null,
+                status: finalOrchestratorResponse.success ? "COMPLETED" : (finalOrchestratorResponse.message.includes("plan") ? "FAILED_PLANNING" : "FAILED_EXECUTION"),
+                currentStageIndex: null,
+                plan: finalOrchestratorResponse.plan,
+                executionContext: finalOrchestratorResponse.executedPlan,
+                finalAnswer: finalOrchestratorResponse.finalAnswer,
+                errorSummary: null
+            };
 
-        const rootDir = path.join(__dirname, '..');
-        const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
-        const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
+            if (!finalOrchestratorResponse.success) {
+                taskStateToSave.errorSummary = {
+                    failedAtStage: null,
+                    reason: finalOrchestratorResponse.message
+                };
+                if (taskStateToSave.status === "FAILED_EXECUTION" && finalOrchestratorResponse.executedPlan && finalOrchestratorResponse.executedPlan.length > 0) {
+                    const lastStep = finalOrchestratorResponse.executedPlan[finalOrchestratorResponse.executedPlan.length - 1];
+                    if (lastStep && lastStep.error_details) {
+                        taskStateToSave.errorSummary.reason = `Last failed step: ${lastStep.narrative_step}. Error: ${lastStep.error_details.message}`;
+                    }
+                }
+            }
 
-        saveTaskState(taskStateToSave, taskStateFilePath);
+            const now = new Date();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const year = now.getFullYear();
+            const dateDir = `tasks_${month}${day}${year}`;
+
+            const rootDir = path.join(__dirname, '..');
+            const saveDir = path.join(rootDir, 'saved_tasks', dateDir);
+            const taskStateFilePath = path.join(saveDir, `task_state_${parentTaskId}.json`);
+
+            await saveTaskState(taskStateToSave, taskStateFilePath); // Added await
+        }
+        // --- End Save Task State Logic ---
+
+        return finalOrchestratorResponse;
+    } else {
+        // Fallback for unknown mode, though index.js should prevent this.
+        console.error(`OrchestratorAgent: Unknown execution mode '${executionMode}'.`);
+        return { success: false, message: `Internal Server Error: Unknown execution mode '${executionMode}'.`};
     }
-    // --- End Save Task State Logic ---
-
-    return finalOrchestratorResponse;
   }
 }
 

@@ -3,61 +3,60 @@ const fs = require('fs');
 const path = require('path');
 
 /**
- * Saves the task state object to a JSON file.
+ * Saves the task state object to a JSON file asynchronously.
  * Creates the directory if it doesn't exist.
  *
  * @param {object} taskStateObject - The task state object to save.
  * @param {string} filePath - The full path to the file where the state should be saved.
- * @returns {{success: boolean, message: string, error?: any}}
+ * @returns {Promise<{success: boolean, message: string, error?: any}>}
  */
-function saveTaskState(taskStateObject, filePath) {
+async function saveTaskState(taskStateObject, filePath) {
     try {
-        // Ensure the directory exists
         const dirname = path.dirname(filePath);
-        if (!fs.existsSync(dirname)) {
-            fs.mkdirSync(dirname, { recursive: true });
-            console.log(`TaskStateUtil: Created directory ${dirname}`);
-        }
+        await fs.promises.mkdir(dirname, { recursive: true });
 
-        // Add/update timestamps
         const now = new Date().toISOString();
         taskStateObject.updatedAt = now;
         if (!taskStateObject.createdAt) {
             taskStateObject.createdAt = now;
         }
 
-        const jsonData = JSON.stringify(taskStateObject, null, 2); // Pretty print JSON
-        fs.writeFileSync(filePath, jsonData, 'utf8');
+        const jsonData = JSON.stringify(taskStateObject, null, 2);
+        await fs.promises.writeFile(filePath, jsonData, 'utf8');
 
-        console.log(`TaskStateUtil: Task state saved successfully to ${filePath}`);
+        console.log(`TaskStateUtil: Task state saved successfully (async) to ${filePath}`);
         return { success: true, message: `Task state saved to ${filePath}` };
     } catch (error) {
-        console.error(`TaskStateUtil: Error saving task state to ${filePath}. Error: ${error.message}`);
+        console.error(`TaskStateUtil: Error saving task state (async) to ${filePath}. Error: ${error.message}`);
         return { success: false, message: `Failed to save task state to ${filePath}`, error: error };
     }
 }
 
 /**
- * Loads the task state object from a JSON file.
+ * Loads the task state object from a JSON file asynchronously.
  *
  * @param {string} filePath - The full path to the file from where the state should be loaded.
- * @returns {{success: boolean, message: string, taskState?: object, error?: any}}
+ * @returns {Promise<{success: boolean, message: string, taskState?: object, error?: any}>}
  */
-function loadTaskState(filePath) {
+async function loadTaskState(filePath) {
     try {
-        if (!fs.existsSync(filePath)) {
+        // Check file existence asynchronously
+        try {
+            await fs.promises.access(filePath, fs.constants.F_OK); // F_OK checks existence
+        } catch (fileNotFoundError) {
             const message = `TaskStateUtil: File not found at ${filePath}`;
             console.warn(message);
             return { success: false, message: message, error: new Error(message) };
         }
 
-        const jsonData = fs.readFileSync(filePath, 'utf8');
-        const taskState = JSON.parse(jsonData);
+        const jsonData = await fs.promises.readFile(filePath, 'utf8');
+        const taskState = JSON.parse(jsonData); // JSON.parse remains synchronous
 
-        console.log(`TaskStateUtil: Task state loaded successfully from ${filePath}`);
+        console.log(`TaskStateUtil: Task state loaded successfully (async) from ${filePath}`);
         return { success: true, message: `Task state loaded from ${filePath}`, taskState: taskState };
     } catch (error) {
-        console.error(`TaskStateUtil: Error loading task state from ${filePath}. Error: ${error.message}`);
+        // This catch will handle errors from readFile (other than not found if access failed) and JSON.parse
+        console.error(`TaskStateUtil: Error loading task state (async) from ${filePath}. Error: ${error.message}`);
         return { success: false, message: `Failed to load task state from ${filePath}`, error: error };
     }
 }
