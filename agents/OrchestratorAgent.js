@@ -1,8 +1,10 @@
 const { v4: uuidv4 } = require('uuid'); // For generating unique sub_task_ids
+const fs = require('fs');
+const path = require('path');
 
 // Helper function to parse and validate the LLM's staged plan response
 async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, knownToolsByRole) {
-    const MAX_RAW_RESPONSE_LENGTH = 500; // Already defined or define here
+    const MAX_RAW_RESPONSE_LENGTH = 500;
     let cleanedString = jsonStringResponse;
 
     if (typeof jsonStringResponse !== 'string') {
@@ -71,25 +73,23 @@ class OrchestratorAgent {
     this.llmService = llmService;
     this.agentApiKeysConfig = agentApiKeysConfig;
 
-    this.workerAgentCapabilities = [
-      {
-        role: "ResearchAgent",
-        description: "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs.",
-        tools: [
-          { name: "WebSearchTool", description: "Performs a web search for a given query. Input format: { \"query\": \"search terms\" }" },
-          { name: "ReadWebpageTool", description: "Fetches and extracts textual content from a given URL. Input format: { \"url\": \"http://example.com\" }" }
-        ]
-      },
-      {
-        role: "UtilityAgent",
-        description: "Specialized in performing calculations and other specific utility tasks.",
-        tools: [
-          { name: "CalculatorTool", description: "Evaluates mathematical expressions. Input format: { \"expression\": \"2 * (3 + 4)\" }" }
-        ]
-      }
-      // Future: Add more agent role descriptions here
-    ];
-    console.log("OrchestratorAgent initialized with worker capabilities.");
+    const capabilitiesPath = path.join(__dirname, '..', 'config', 'agentCapabilities.json');
+    try {
+        const capabilitiesFileContent = fs.readFileSync(capabilitiesPath, 'utf8');
+        this.workerAgentCapabilities = JSON.parse(capabilitiesFileContent);
+        console.log("OrchestratorAgent: Worker capabilities loaded successfully from config/agentCapabilities.json");
+    } catch (error) {
+        console.error(`OrchestratorAgent: Failed to load worker capabilities from ${capabilitiesPath}. Error: ${error.message}`);
+        console.error("OrchestratorAgent: Falling back to default/empty capabilities. This may impact planning.");
+        this.workerAgentCapabilities = [];
+    }
+    // The console.log below was here, moved it after capabilities are attempted to be loaded.
+    // console.log("OrchestratorAgent initialized with worker capabilities."); // Original position
+    if (this.workerAgentCapabilities.length > 0) {
+        console.log(`OrchestratorAgent initialized with ${this.workerAgentCapabilities.length} worker capabilities loaded.`);
+    } else {
+        console.log("OrchestratorAgent initialized with NO worker capabilities due to loading error or empty config.");
+    }
   }
 
   async handleUserTask(userTaskString, parentTaskId) {
@@ -98,6 +98,11 @@ class OrchestratorAgent {
     let formattedAgentCapabilitiesString = "You have the following specialized agents available:\n";
     const knownAgentRoles = [];
     const knownToolsByRole = {};
+
+    if (!this.workerAgentCapabilities || this.workerAgentCapabilities.length === 0) {
+        console.error("OrchestratorAgent: No worker agent capabilities defined. Cannot proceed with planning.");
+        return { success: false, message: "Internal Server Error: No worker agent capabilities configured.", originalTask: userTaskString, executedPlan: [] };
+    }
 
     this.workerAgentCapabilities.forEach(agent => {
       knownAgentRoles.push(agent.role);

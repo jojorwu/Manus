@@ -196,13 +196,14 @@ This project is set up to be understandable and extensible.
     *   Tool definitions (WebSearchTool, CalculatorTool, etc.): `tools/` directory
     *   LLM service interaction (e.g., `geminiLLMService`): `services/` directory
     *   Task and result queues: `core/` directory
+    *   Agent capabilities configuration: `config/agentCapabilities.json` (defines roles and tools for the OrchestratorAgent)
 *   **Frontend UI:** The React UI is in the `frontend/` directory, primarily within `frontend/src/`. Key components include `App.jsx`, `TaskInputForm.jsx`, and `ResultsDisplay.jsx`.
 *   **Adding New Tools (Backend):**
     1.  Define your new tool class in a new file within the `tools/` directory (e.g., `tools/MyNewTool.js`) with an `async execute(inputObject)` method, and export the class.
     2.  Import your new tool in `index.js` (e.g., `const MyNewTool = require('./tools/MyNewTool');`).
     3.  Instantiate it in `index.js` where other tools are initialized (e.g., `const myNewTool = new MyNewTool();`).
     4.  Pass the new tool instance to the relevant agent(s) via their constructor or a dedicated method, typically by adding it to the `toolsMap` provided to the agent in `index.js`.
-    5.  Update the `workerAgentCapabilities` in `agents/OrchestratorAgent.js` to include the description of the new tool for the appropriate agent role, so the Orchestrator knows it exists and can plan to use it.
+    5.  Update the `config/agentCapabilities.json` file. Add or modify an agent role entry to include the description of the new tool and its association with that role. This configuration is loaded by the OrchestratorAgent to understand available tools and assign them for planning.
     6.  Ensure the agent that will use the tool (e.g., `ResearchAgent.js`, `UtilityAgent.js`, or a new agent) has logic in its `processTaskMessage` method to handle the `tool_name` and call its `execute` method with the correct `sub_task_input`.
 
 ### Contributing (Basic Guidelines)
