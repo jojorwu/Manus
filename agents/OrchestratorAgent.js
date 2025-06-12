@@ -169,44 +169,40 @@ class OrchestratorAgent {
             logger.warn(`OrchestratorAgent: Plan templates directory not found at ${templatesDir}. No templates loaded.`, { templatesDir });
             return;
         }
-        // Assuming templateDefinitions is still how you identify which files to load.
-        // If you want to load all .json files in the directory, this part needs to change.
-        const templateDefinitions = [
-            { name: "weather_query", fileName: "weather_query_template.json", regex: /^(?:what is the )?weather (?:in )?(.+)/i, paramMapping: { CITY_NAME: 1 } },
-            { name: "calculator", fileName: "calculator_template.json", regex: /^(?:calculate|what is) ([\d\s\+\-\*\/\(\)\.^%]+)/i, paramMapping: { EXPRESSION: 1 } }
-        ];
 
-        for (const def of templateDefinitions) {
-            const filePath = path.join(templatesDir, def.fileName);
-            if (fs.existsSync(filePath)) {
+        const templateFiles = fs.readdirSync(templatesDir);
+        for (const fileName of templateFiles) {
+            if (path.extname(fileName) === '.json') {
+                const filePath = path.join(templatesDir, fileName);
                 try {
                     const rawData = fs.readFileSync(filePath, 'utf8');
                     const template = JSON.parse(rawData);
                     const validate = ajv.compile(planTemplateSchema);
+
                     if (!validate(template)) {
-                        logger.warn(`OrchestratorAgent: Plan template from ${def.fileName} failed validation. Skipping this template.`, { templateFile: def.fileName, errors: ajv.errorsText(validate.errors) });
-                        continue; // Skip this template
+                        logger.warn(`OrchestratorAgent: Plan template file ${fileName} failed validation. Skipping.`, { templateFile: fileName, errors: ajv.errorsText(validate.errors) });
+                        continue;
                     }
-                    // The schema now requires 'name', 'description', 'steps'.
-                    // We are using 'def.name' as the key for the map, and the template itself has its own 'name' field.
-                    // Ensure the template's internal name matches def.name or decide which one to use.
-                    // For now, let's assume template.name is the source of truth if validated.
-                    if (template.name) {
-                         this.planTemplates.set(template.name, { regex: def.regex, paramMapping: def.paramMapping, template: template });
-                         logger.info(`OrchestratorAgent: Loaded and validated plan template '${template.name}' from ${def.fileName}`, { templateName: template.name, templateFile: def.fileName });
+
+                    // New contract: template itself contains regex and paramMapping under 'meta'
+                    if (template.name && template.meta && template.meta.regex && template.meta.paramMapping) {
+                        const regex = new RegExp(template.meta.regex, 'i'); // Assuming case-insensitive
+                        this.planTemplates.set(template.name, {
+                            regex: regex,
+                            paramMapping: template.meta.paramMapping,
+                            template: template // Store the full template (which includes name, description, steps)
+                        });
+                        logger.info(`OrchestratorAgent: Loaded and validated plan template '${template.name}' from ${fileName}`, { templateName: template.name, templateFile: fileName });
                     } else {
-                         // This should be caught by schema validation if "name" is required in planTemplateSchema.json
-                         logger.warn(`OrchestratorAgent: Plan template from ${def.fileName} is missing a name after validation. Skipping this template.`, { templateFile: def.fileName });
+                        logger.warn(`OrchestratorAgent: Plan template file ${fileName} is missing required fields (name, meta.regex, or meta.paramMapping) after validation. Skipping.`, { templateFile: fileName });
                     }
                 } catch (error) {
-                    logger.warn(`OrchestratorAgent: Could not load or parse plan template from ${def.fileName}. Skipping this template.`, { templateFile: def.fileName, error: error.message, stack: error.stack });
+                    logger.warn(`OrchestratorAgent: Could not load or parse plan template file ${fileName}. Skipping.`, { templateFile: fileName, error: error.message, stack: error.stack });
                 }
-            } else {
-                logger.warn(`OrchestratorAgent: Plan template file ${def.fileName} not found in ${templatesDir}`, { templateFile: def.fileName, templatesDir });
             }
         }
     } catch (error) {
-        // This catch is for errors like readdirSync failing, not individual file errors
+        // This catch is for errors like readdirSync itself failing
         logger.error(`OrchestratorAgent: Error reading plan templates directory ${templatesDir}.`, { templatesDir, error: error.message, stack: error.stack });
         this.planTemplates.clear(); // Ensure templates are empty on directory error
     }
@@ -240,7 +236,7 @@ class OrchestratorAgent {
                 // We need to return the plan (which is template.steps), not the full template object
                 return populatedPlan.steps;
             } catch (e) {
-                logger.error(`OrchestratorAgent: Error parsing populated template '${templateName}'.`, { templateName, error: e.message, stack: e.stack });
+                logger.error(`OrchestratorAgent: Error parsing populated template '${templateName}'.`, { templateName, error: e.message, populatedStringSample: populatedTemplateString.substring(0, 200), stack: e.stack });
                 return null;
             }
         }
@@ -289,6 +285,36 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
     return dataToSummarize;
   }
+
+  /**
+   * Builds the prompt for LLM-based synthesis of the final answer.
+   * @param {string} originalUserTaskString - The original user task.
+   * @param {string} synthesisContextString - A JSON string representing the execution history and outcomes.
+   * @returns {string} The fully constructed synthesis prompt.
+   * @private
+   */
+  _buildSynthesisPrompt(originalUserTaskString, synthesisContextString) {
+    // Using the more detailed prompt from EXECUTE_FULL_PLAN as the standard.
+    return `The original user task was: "${originalUserTaskString}".
+A plan was executed to address this task. The following is a JSON array detailing each step of the execution. Each object in the array represents a step and includes:
+- 'step_narrative': A human-readable description of the step's purpose.
+- 'tool_used': The name of the tool used for the step.
+- 'input_details': The input provided to the tool for this step.
+- 'status': The execution status of the step ('COMPLETED' or 'FAILED').
+- 'outcome_data': The data returned by the tool if the step completed successfully (can be null).
+- 'error_info': Details of the error if the step failed.
+---
+Execution History (JSON Array):
+${synthesisContextString}
+---
+Based on the original user task and the detailed execution history provided above, synthesize a comprehensive and coherent final answer for the user. If a step failed, acknowledge it briefly if relevant, but focus on the information gathered from successful steps to formulate the answer. Integrate the information smoothly. If some steps were just actions and yielded no specific data but completed successfully (i.e., 'outcome_data' is null or undefined), acknowledge them if relevant to the overall narrative of the answer. Provide only the final answer to the user. Do not repeat the execution history in your answer.`;
+---
+Execution History (JSON Array):
+${synthesisContextString}
+---
+Based on the original user task and the detailed execution history provided above, synthesize a comprehensive and coherent final answer for the user. If a step failed, acknowledge it briefly if relevant, but focus on the information gathered from successful steps to formulate the answer. Integrate the information smoothly. If some steps were just actions and yielded no specific data but completed successfully (i.e., 'outcome_data' is null or undefined), acknowledge them if relevant to the overall narrative of the answer. Provide only the final answer to the user. Do not repeat the execution history in your answer.`;
+  }
+
 
   /**
    * Handles a user task based on the specified execution mode.
@@ -352,13 +378,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             synthesisMessage = "Loaded task state contained no specific data to synthesize from, or all steps had failed.";
             finalAnswer = "No specific information was generated from the previous execution to form a new final answer.";
         } else {
-            const synthesisPrompt = `The original user task was: "${originalUserTaskString}".
-A plan was previously executed for this task. The following is a JSON array detailing each step of that execution:
----
-Execution History (JSON Array):
-${synthesisContextString}
----
-Based on the original user task and the detailed execution history, synthesize a comprehensive and coherent final answer for the user. Provide only the final answer.`;
+            const synthesisPrompt = this._buildSynthesisPrompt(originalUserTaskString, JSON.stringify(contextForLLMSynthesis, null, 2));
             try {
                 finalAnswer = await this.llmService(synthesisPrompt);
                 synthesisMessage = "Synthesized answer from loaded task state.";
@@ -454,8 +474,15 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 
         if (!parsedPlanResult || !parsedPlanResult.success) {
             const TPSR_Error_Message = parsedPlanResult ? parsedPlanResult.message : "Plan generation or template processing failed before parsing.";
-            const TPSR_Raw_Response = parsedPlanResult ? parsedPlanResult.rawResponse : null; // Can be large, log with caution or truncate
+            let TPSR_Raw_Response = parsedPlanResult ? parsedPlanResult.rawResponse : null;
             logger.error(`OrchestratorAgent (${executionMode}): Failed to obtain a valid plan.`, { executionMode, parentTaskId, errorMessage: TPSR_Error_Message, rawResponseSnippet: TPSR_Raw_Response ? TPSR_Raw_Response.substring(0, 200) : null });
+
+            const MAX_RAW_RESPONSE_SAVE_LENGTH = 2000; // Define a limit for saving
+            if (TPSR_Raw_Response && TPSR_Raw_Response.length > MAX_RAW_RESPONSE_SAVE_LENGTH) {
+                logger.warn(`OrchestratorAgent (${executionMode}): Truncating rawLLMResponse for task state saving due to excessive length.`, { parentTaskId, originalLength: TPSR_Raw_Response.length, savedLength: MAX_RAW_RESPONSE_SAVE_LENGTH });
+                TPSR_Raw_Response = TPSR_Raw_Response.substring(0, MAX_RAW_RESPONSE_SAVE_LENGTH) + "... (truncated)";
+            }
+
             const errorStatePlan = { taskId: parentTaskId, userTaskString, status: TaskStatuses.FAILED_PLANNING, plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: TPSR_Error_Message }, rawLLMResponse: TPSR_Raw_Response };
             const planErrorFilePath = getTaskStateFilePath(parentTaskId, path.join(__dirname, '..'));
             await saveTaskState(errorStatePlan, planErrorFilePath);
@@ -560,17 +587,17 @@ A plan was executed to address this task. The following is a JSON array detailin
 - 'error_info': Details of the error if the step failed.
 ---
 Execution History (JSON Array):
-${synthesisContextString}
+${JSON.stringify(contextForLLMSynthesis, null, 2)}
 ---
 Based on the original user task and the detailed execution history provided above, synthesize a comprehensive and coherent final answer for the user. If a step failed, acknowledge it briefly if relevant, but focus on the information gathered from successful steps to formulate the answer. Integrate the information smoothly. If some steps were just actions and yielded no specific data but completed successfully (i.e., 'outcome_data' is null or undefined), acknowledge them if relevant to the overall narrative of the answer. Provide only the final answer to the user. Do not repeat the execution history in your answer.`;
-                console.log("OrchestratorAgent: Attempting final synthesis with new structured prompt and context.");
+                logger.info("OrchestratorAgent: Attempting final synthesis.", { parentTaskId });
                 try {
                     const synthesizedAnswer = await this.llmService(synthesisPrompt);
                     finalOrchestratorResponse.finalAnswer = synthesizedAnswer;
                     finalOrchestratorResponse.message = "Task completed and final answer synthesized.";
-                    console.log("OrchestratorAgent: Final answer synthesized successfully.");
+                    logger.info("OrchestratorAgent: Final answer synthesized successfully.", { parentTaskId });
                 } catch (synthError) {
-                    console.error("OrchestratorAgent: Error during final answer synthesis:", synthError.message);
+                    logger.error("OrchestratorAgent: Error during final answer synthesis.", { parentTaskId, error: synthError.message, stack: synthError.stack });
                     finalOrchestratorResponse.finalAnswer = "Error during final answer synthesis: " + synthError.message;
                     finalOrchestratorResponse.message = "Sub-tasks completed, but final answer synthesis failed.";
                 }

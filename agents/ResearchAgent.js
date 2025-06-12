@@ -44,8 +44,16 @@ class ResearchAgent extends BaseAgent {
         return { isValid: false, error: "Invalid input for WebSearchTool: 'query' (string) is required." };
       }
     } else if (tool_name === 'ReadWebpageTool') {
-      if (!sub_task_input || typeof sub_task_input.url !== 'string' || !sub_task_input.url.startsWith('http')) {
-        return { isValid: false, error: "Invalid input for ReadWebpageTool: 'url' (string, valid HTTP/HTTPS URL) is required." };
+      if (!sub_task_input || typeof sub_task_input.url !== 'string') {
+        return { isValid: false, error: "Invalid input for ReadWebpageTool: 'url' (string) is required." };
+      }
+      try {
+        const url = new URL(sub_task_input.url);
+        if (url.protocol !== "http:" && url.protocol !== "https:") {
+          return { isValid: false, error: "Invalid URL protocol. Only HTTP/HTTPS are allowed." };
+        }
+      } catch (e) {
+        return { isValid: false, error: "Invalid URL format." };
       }
     }
     // Add more validation for other tools as needed

@@ -58,7 +58,7 @@ class BaseAgent {
 
     startListening() {
         logger.info(`${this.agentRole} starting to listen for tasks on role: ${this.agentRole}`, { agentRole: this.agentRole });
-        this.subTaskQueue.subscribeToRole(this.agentRole, this.processTaskMessage.bind(this));
+        this.subTaskQueue.subscribe(this.agentRole, this.processTaskMessage.bind(this));
     }
 
     /**
@@ -109,21 +109,31 @@ class BaseAgent {
 
                 try {
                     const toolResult = await Promise.race([executionPromise, timeoutPromise]);
-                    outcome.result_data = toolResult;
-                    // Ensure toolResult is structured correctly, or adapt here
-                    // For example, if tools return { success: boolean, data: any, error: string }
-                    // outcome.result_data = toolResult.data;
-                    // if (!toolResult.success) outcome.error_details = { message: toolResult.error };
 
-                    // Assuming tools directly return the data or throw an error that's caught below.
-                    // If tools have their own success/error structure in their return, it needs handling here.
-                    // For now, direct assignment:
-                    status = TaskStatuses.COMPLETED;
-                } catch (error) {
+                    if (typeof toolResult === 'object' && toolResult !== null && toolResult.success === false) {
+                        // Tool reported a controlled failure
+                        outcome.error_details = { message: toolResult.error || "Tool reported an error without details." };
+                        // status remains TaskStatuses.FAILED (default)
+                        logger.warn(`${this.agentRole}: Tool '${tool_name}' reported a controlled failure for sub_task_id ${sub_task_id}.`, {
+                            agentRole: this.agentRole,
+                            toolName: tool_name,
+                            subTaskId: sub_task_id,
+                            error: outcome.error_details.message
+                        });
+                    } else {
+                        // Tool execution is considered successful
+                        if (typeof toolResult === 'object' && toolResult !== null && toolResult.hasOwnProperty('data') && toolResult.success === true) {
+                            outcome.result_data = toolResult.data;
+                        } else {
+                            outcome.result_data = toolResult; // Handle direct primitive/object returns
+                        }
+                        status = TaskStatuses.COMPLETED;
+                    }
+                } catch (error) { // Handles exceptions from executeTool or timeout
                     logger.error(`${this.agentRole}: Error executing tool '${tool_name}' for sub_task_id ${sub_task_id}.`, { agentRole: this.agentRole, toolName: tool_name, subTaskId: sub_task_id, error: error.message, stack: error.stack });
                     outcome.error_details = { message: error.message || "Tool execution failed or timed out." };
-                    // If the error object has more details (e.g. error.stack), include them if desired.
-                    if (error.stack) outcome.error_details.stack = error.stack; // Already included by logger.error if error is passed as metadata
+                    // status remains TaskStatuses.FAILED (default)
+                    // if (error.stack) outcome.error_details.stack = error.stack; // Already included by logger.error if error is passed as metadata
                 }
             } else {
                 logger.warn(`${this.agentRole}: Invalid input for tool '${tool_name}' on sub_task_id ${sub_task_id}: ${validation.error}`, { agentRole: this.agentRole, toolName: tool_name, subTaskId: sub_task_id, validationError: validation.error });

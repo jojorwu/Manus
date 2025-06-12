@@ -23,10 +23,19 @@ const mockAgentCapabilitiesSchema = { type: "array", items: {} };
 const mockPlanTemplateSchema = { type: "object", properties: {} };
 const mockOrchestratorConfigSchema = { type: "object", properties: {} }; // If we were to validate it
 
-// Store original console methods
-const originalConsoleLog = console.log;
-const originalConsoleWarn = console.warn;
-const originalConsoleError = console.error;
+// Store original console methods - NO LONGER NEEDED
+// const originalConsoleLog = console.log;
+// const originalConsoleWarn = console.warn;
+// const originalConsoleError = console.error;
+
+// Mock the logger at the top level
+jest.mock('../../core/logger', () => ({
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }));
+const logger = require('../../core/logger'); // Import the mocked logger
 
 
 describe('OrchestratorAgent', () => {
@@ -41,6 +50,10 @@ describe('OrchestratorAgent', () => {
     mockLlmService.mockReset();
     mockSubTaskQueue.enqueueTask.mockReset();
     mockResultsQueue.subscribeOnce.mockReset();
+    logger.info.mockClear();
+    logger.warn.mockClear();
+    logger.error.mockClear();
+    logger.debug.mockClear();
 
     // Setup Ajv mock for each test
     mockValidateFunction = jest.fn();
@@ -50,10 +63,10 @@ describe('OrchestratorAgent', () => {
     };
     Ajv.mockImplementation(() => mockAjvInstance);
 
-    // Suppress console output during tests, can be enabled for debugging
-    console.log = jest.fn();
-    console.warn = jest.fn();
-    console.error = jest.fn();
+    // Suppress console output during tests, can be enabled for debugging - NO LONGER NEEDED
+    // console.log = jest.fn();
+    // console.warn = jest.fn();
+    // console.error = jest.fn();
 
     // Mock that schema files can be required
     jest.mock('../../schemas/agentCapabilitiesSchema.json', () => mockAgentCapabilitiesSchema, { virtual: true });
@@ -61,10 +74,10 @@ describe('OrchestratorAgent', () => {
   });
 
   afterEach(() => {
-    // Restore console output
-    console.log = originalConsoleLog;
-    console.warn = originalConsoleWarn;
-    console.error = originalConsoleError;
+    // Restore console output - NO LONGER NEEDED
+    // console.log = originalConsoleLog;
+    // console.warn = originalConsoleWarn;
+    // console.error = originalConsoleError;
     jest.resetAllMocks(); // Ensure mocks are clean for the next test suite if any
   });
 
@@ -90,7 +103,10 @@ describe('OrchestratorAgent', () => {
 
       const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
       expect(agent.config.maxDataLengthForSummarization).toBe(1000); // Default value
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load orchestratorConfig.json'));
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to load orchestratorConfig.json'),
+        expect.any(Object) // For metadata
+      );
     });
 
     it('should use default orchestrator config for invalid JSON', () => {
@@ -104,7 +120,10 @@ describe('OrchestratorAgent', () => {
 
       const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
       expect(agent.config.maxDataLengthForSummarization).toBe(1000);
-      expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Failed to load orchestratorConfig.json'));
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to load orchestratorConfig.json'),
+        expect.any(Object) // For metadata
+        );
     });
 
     // --- Agent Capabilities Loading ---
@@ -124,7 +143,10 @@ describe('OrchestratorAgent', () => {
       fs.existsSync.mockReturnValue(false); // No capabilities file
       const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
       expect(agent.workerAgentCapabilities).toEqual([]);
-      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to load worker capabilities'));
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to load worker capabilities'),
+        expect.any(Object) // For metadata
+        );
     });
 
     it('loadCapabilities should return empty array for invalid JSON in capabilities file', () => {
@@ -132,7 +154,10 @@ describe('OrchestratorAgent', () => {
       fs.readFileSync.mockReturnValue('{"invalid":json');
       const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
       expect(agent.workerAgentCapabilities).toEqual([]);
-      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Failed to load worker capabilities'));
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to load worker capabilities'),
+        expect.any(Object) // For metadata
+        );
     });
 
     it('loadCapabilities should return empty array if schema validation fails', () => {
@@ -143,7 +168,10 @@ describe('OrchestratorAgent', () => {
 
       const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
       expect(agent.workerAgentCapabilities).toEqual([]);
-      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('Error validating agent capabilities'));
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Error validating agent capabilities'),
+        expect.any(Object) // For metadata
+        );
       expect(mockAjvInstance.errorsText).toHaveBeenCalled();
     });
 
@@ -239,7 +267,10 @@ describe('OrchestratorAgent', () => {
         const agentWithMixedTemplates = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
         expect(agentWithMixedTemplates.planTemplates.has('weather_query')).toBe(true);
         expect(agentWithMixedTemplates.planTemplates.has('calculator')).toBe(false); // Should be skipped
-        expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('failed validation'));
+        expect(logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('failed validation'),
+            expect.any(Object) // For metadata
+            );
         expect(mockAjvInstance.errorsText).toHaveBeenCalled();
     });
 
@@ -258,7 +289,10 @@ describe('OrchestratorAgent', () => {
 
         const agent = new OrchestratorAgent(mockSubTaskQueue, mockResultsQueue, mockLlmService, mockAgentApiKeysConfig);
         expect(agent.planTemplates.size).toBe(0);
-        expect(console.warn).toHaveBeenCalledWith(expect.stringContaining('Plan templates directory not found'));
+        expect(logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('Plan templates directory not found'),
+            expect.any(Object) // For metadata
+            );
     });
 
   });

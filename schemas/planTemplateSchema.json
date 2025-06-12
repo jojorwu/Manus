@@ -3,6 +3,17 @@
   "properties": {
     "name": { "type": "string" },
     "description": { "type": "string" },
+    "meta": {
+      "type": "object",
+      "properties": {
+        "regex": { "type": "string" },
+        "paramMapping": {
+          "type": "object",
+          "additionalProperties": { "type": "integer" }
+        }
+      },
+      "required": ["regex", "paramMapping"]
+    },
     "steps": {
       "type": "array",
       "items": {
@@ -21,5 +32,5 @@
       }
     }
   },
-  "required": ["name", "description", "steps"]
+  "required": ["name", "description", "meta", "steps"]
 }

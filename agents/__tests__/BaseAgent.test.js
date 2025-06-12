@@ -5,14 +5,21 @@ const { TaskStatuses } = require('../../core/constants'); // Adjust path
 
 // Mock dependencies
 jest.mock('fs');
+jest.mock('../../core/logger', () => ({ // Mock the logger
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+}));
 
 // Mock queues (simple mocks for now)
 const mockSubTaskQueue = {
-  subscribeToRole: jest.fn(),
+  subscribe: jest.fn(),
 };
 const mockResultsQueue = {
   enqueueResult: jest.fn(),
 };
+const logger = require('../../core/logger'); // Import the mocked logger
 
 describe('BaseAgent', () => {
   const agentRole = 'TestAgent';
@@ -23,8 +30,12 @@ describe('BaseAgent', () => {
     // Reset mocks before each test
     fs.readFileSync.mockReset();
     fs.existsSync.mockReset();
-    mockSubTaskQueue.subscribeToRole.mockClear();
+    mockSubTaskQueue.subscribe.mockClear();
     mockResultsQueue.enqueueResult.mockClear();
+    logger.info.mockClear(); // Clear logger mocks
+    logger.warn.mockClear();
+    logger.error.mockClear();
+    logger.debug.mockClear();
     toolsMap = new Map(); // Fresh map for each test
   });
 
@@ -56,27 +67,29 @@ describe('BaseAgent', () => {
 
     it('loadWorkerConfig should use default config if file not found', () => {
       fs.existsSync.mockReturnValue(false);
-      const consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {}); // Suppress console.warn
 
       const agent = new BaseAgent(mockSubTaskQueue, mockResultsQueue, toolsMap, agentRole, mockAgentApiKeysConfig);
 
       expect(agent.config.defaultToolTimeoutMs).toBe(30000); // Default value
       expect(agent.config.toolTimeouts).toEqual({});
-      expect(consoleWarnSpy).toHaveBeenCalledWith(expect.stringContaining('workerAgentConfig.json not found'));
-      consoleWarnSpy.mockRestore();
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('workerAgentConfig.json not found'),
+        expect.any(Object) // For metadata object
+      );
     });
 
     it('loadWorkerConfig should use default config for invalid JSON', () => {
       fs.existsSync.mockReturnValue(true);
       fs.readFileSync.mockReturnValue('{"invalidJson":,');
-      const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {}); // Suppress console.error
 
       const agent = new BaseAgent(mockSubTaskQueue, mockResultsQueue, toolsMap, agentRole, mockAgentApiKeysConfig);
 
       expect(agent.config.defaultToolTimeoutMs).toBe(30000);
       expect(agent.config.toolTimeouts).toEqual({});
-      expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Error loading workerAgentConfig.json'));
-      consoleErrorSpy.mockRestore();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('Error loading workerAgentConfig.json'),
+        expect.any(Object) // For metadata object
+      );
     });
 
     it('loadWorkerConfig should use default config if readFileSync throws an error', () => {
@@ -84,14 +97,15 @@ describe('BaseAgent', () => {
         fs.readFileSync.mockImplementation(() => {
           throw new Error('FS Read Error');
         });
-        const consoleErrorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
 
         const agent = new BaseAgent(mockSubTaskQueue, mockResultsQueue, toolsMap, agentRole, mockAgentApiKeysConfig);
 
         expect(agent.config.defaultToolTimeoutMs).toBe(30000);
         expect(agent.config.toolTimeouts).toEqual({});
-        expect(consoleErrorSpy).toHaveBeenCalledWith(expect.stringContaining('Error loading workerAgentConfig.json'));
-        consoleErrorSpy.mockRestore();
+        expect(logger.error).toHaveBeenCalledWith(
+            expect.stringContaining('Error loading workerAgentConfig.json'),
+            expect.any(Object) // For metadata object
+        );
       });
   });
 
@@ -128,6 +142,17 @@ describe('BaseAgent', () => {
   });
 
   // More tests for processTaskMessage will follow here
+
+  describe('startListening', () => {
+    it('should subscribe to the subTaskQueue with the correct role and callback', () => {
+      fs.existsSync.mockReturnValue(false); // No config file, use defaults
+      const agent = new BaseAgent(mockSubTaskQueue, mockResultsQueue, toolsMap, agentRole, mockAgentApiKeysConfig);
+      agent.startListening();
+      expect(mockSubTaskQueue.subscribe).toHaveBeenCalledWith(agentRole, expect.any(Function));
+      // expect.any(Function) because this.processTaskMessage.bind(this) creates a new function reference.
+    });
+  });
+
   describe('processTaskMessage', () => {
     let agent;
     const mockTaskMessage = {
@@ -156,9 +181,10 @@ describe('BaseAgent', () => {
         jest.clearAllMocks(); // Clears mock call counts etc.
     });
 
-    it('should process a valid task successfully', async () => {
+    it('should process a valid task successfully with new contract {success: true, data: ...}', async () => {
       agent.validateToolInput.mockReturnValue({ isValid: true, error: null });
-      const toolResult = { successData: 'tool output' };
+      const toolOutputData = { successData: 'tool output' };
+      const toolResult = { success: true, data: toolOutputData };
       agent.executeTool.mockResolvedValue(toolResult);
 
       await agent.processTaskMessage(mockTaskMessage);
@@ -171,11 +197,67 @@ describe('BaseAgent', () => {
           sub_task_id: mockTaskMessage.sub_task_id,
           worker_role: agentRole,
           status: TaskStatuses.COMPLETED,
-          result_data: toolResult,
+          result_data: toolOutputData, // Should be the nested data
           error_details: null,
         })
       );
     });
+
+    it('should process a valid task successfully with direct object return (legacy contract)', async () => {
+        agent.validateToolInput.mockReturnValue({ isValid: true, error: null });
+        const toolResult = { legacyData: 'direct object output' };
+        agent.executeTool.mockResolvedValue(toolResult);
+
+        await agent.processTaskMessage(mockTaskMessage);
+
+        expect(mockResultsQueue.enqueueResult).toHaveBeenCalledWith(
+          mockTaskMessage.parent_task_id,
+          expect.objectContaining({
+            status: TaskStatuses.COMPLETED,
+            result_data: toolResult,
+          })
+        );
+      });
+
+      it('should process a valid task successfully with direct primitive return (legacy contract)', async () => {
+        agent.validateToolInput.mockReturnValue({ isValid: true, error: null });
+        const toolResult = 'primitive string output';
+        agent.executeTool.mockResolvedValue(toolResult);
+
+        await agent.processTaskMessage(mockTaskMessage);
+
+        expect(mockResultsQueue.enqueueResult).toHaveBeenCalledWith(
+          mockTaskMessage.parent_task_id,
+          expect.objectContaining({
+            status: TaskStatuses.COMPLETED,
+            result_data: toolResult,
+          })
+        );
+      });
+
+    it('should handle tool reporting controlled failure with new contract {success: false, error: ...}', async () => {
+        agent.validateToolInput.mockReturnValue({ isValid: true, error: null });
+        const toolErrorMsg = "Tool-specific controlled error";
+        const toolResult = { success: false, error: toolErrorMsg };
+        agent.executeTool.mockResolvedValue(toolResult); // Tool resolves, but indicates failure
+
+        await agent.processTaskMessage(mockTaskMessage);
+
+        expect(mockResultsQueue.enqueueResult).toHaveBeenCalledWith(
+          mockTaskMessage.parent_task_id,
+          expect.objectContaining({
+            sub_task_id: mockTaskMessage.sub_task_id,
+            status: TaskStatuses.FAILED,
+            result_data: null, // No data on controlled failure
+            error_details: { message: toolErrorMsg },
+          })
+        );
+        expect(logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining("reported a controlled failure"),
+            expect.any(Object)
+        );
+      });
+
 
     it('should handle tool not found', async () => {
       const unknownToolTaskMessage = { ...mockTaskMessage, tool_name: 'UnknownTool' };

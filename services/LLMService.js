@@ -1,17 +1,22 @@
 // services/LLMService.js
 
-// require('dotenv').config(); // Решено, что dotenv конфигурируется в index.js
+// services/LLMService.js
+const logger = require('../core/logger'); // Import the logger
+
+// require('dotenv').config(); // Decided that dotenv is configured in index.js
 
 const geminiLLMService = async (prompt) => {
-    console.log(`LLM Service called with prompt (first 100 chars): "${prompt.substring(0,100)}..."`);
-    // Здесь должна быть реальная интеграция с @google/generative-ai
-    // GEMINI_API_KEY должен быть доступен из process.env
+    logger.info(`LLM Service called.`, { promptSnippet: prompt.substring(0,100)+'...' });
+    logger.debug("Full prompt to LLM Service:", { prompt });
+
+    // Real integration with @google/generative-ai should be here
+    // GEMINI_API_KEY should be available from process.env
     if (!process.env.GEMINI_API_KEY) {
         const errorMsg = "GEMINI_API_KEY is not set in .env file. LLM service cannot operate.";
-        console.error(errorMsg);
+        logger.error(errorMsg);
         throw new Error(errorMsg);
     }
-    // Это очень упрощенная заглушка. Реальный ответ должен быть JSON планом или синтезированным текстом.
+    // This is a very simplified stub. The actual response should be a JSON plan or synthesized text.
     // Для планирования ожидается JSON массив. Для синтеза - строка.
     // Сейчас вернем пустой массив для планирования, чтобы избежать ошибок парсинга JSON.
     // И простую строку для синтеза.
