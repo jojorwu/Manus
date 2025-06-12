@@ -82,6 +82,11 @@ app.post('/api/generate-plan', async (req, res) => {
             return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for PLAN_ONLY mode." });
         }
         // taskIdToLoad не используется в этом режиме
+    } else if (effectiveMode === "EXECUTE_PLANNED_TASK") {
+        if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'taskIdToLoad' must be a non-empty string for EXECUTE_PLANNED_TASK mode." });
+        }
+        // 'task' (userTaskString) не требуется в теле запроса, он будет загружен из состояния.
     } else {
         return res.status(400).json({ success: false, message: `Invalid request: Unknown mode '${effectiveMode}'.` });
     }
@@ -115,5 +120,5 @@ app.listen(PORT, () => {
     console.log("Available agents: Orchestrator, Research, Utility.");
     console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
-    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY.");
+    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
 });
