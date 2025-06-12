@@ -1,97 +1,73 @@
-class ResearchAgent {
-  constructor(subTaskQueue, resultsQueue, toolsMap, agentApiKeysConfig) {
-    this.subTaskQueue = subTaskQueue;
-    this.resultsQueue = resultsQueue;
-    this.toolsMap = toolsMap; // Expected: { "WebSearchTool": webSearchToolInstance, "ReadWebpageTool": readWebpageToolInstance }
-    this.agentApiKeysConfig = agentApiKeysConfig; // For future tools that might need agent-specific keys
-    this.agentRole = "ResearchAgent";
-    console.log("ResearchAgent initialized.");
+const BaseAgent = require('./BaseAgent');
+const WebSearchTool = require('../tools/WebSearchTool'); // Needed for instantiation
+const ReadWebpageTool = require('../tools/ReadWebpageTool'); // Needed for instantiation
+const logger = require('../core/logger');
+
+/**
+ * Agent specialized in research tasks, utilizing tools like web search and webpage reading.
+ * Extends BaseAgent to inherit common task processing and configuration logic.
+ */
+class ResearchAgent extends BaseAgent {
+  /**
+   * Constructs a ResearchAgent.
+   * @param {object} subTaskQueue - The queue for receiving sub-tasks.
+   * @param {object} resultsQueue - The queue for sending results of sub-tasks.
+   * @param {object} agentApiKeysConfig - Configuration object containing API keys (e.g., for SerpAPI).
+   */
+  constructor(subTaskQueue, resultsQueue, agentApiKeysConfig) {
+    // Create a toolsMap specific to ResearchAgent
+    const toolsMap = new Map();
+    toolsMap.set('WebSearchTool', new WebSearchTool(agentApiKeysConfig?.serpapi_api_key));
+    toolsMap.set('ReadWebpageTool', new ReadWebpageTool());
+
+    // Call super with the queues, this agent's toolsMap, its role, and API keys
+    super(subTaskQueue, resultsQueue, toolsMap, 'ResearchAgent', agentApiKeysConfig);
+    logger.info(`${this.agentRole} initialized with tools: ${Array.from(this.toolsMap.keys()).join(', ')}.`, { agentRole: this.agentRole });
+    // Note: BaseAgent's constructor now loads workerAgentConfig.json for timeouts.
   }
 
-  startListening() {
-    console.log(`ResearchAgent (${this.agentRole}) starting to listen for tasks...`);
-    this.subTaskQueue.subscribe(this.agentRole, this.processTaskMessage.bind(this));
-  }
+  // startListening() is inherited from BaseAgent, no need to redefine if behavior is identical.
+  // BaseAgent's startListening uses this.subTaskQueue.subscribeToRole,
+  // if ResearchAgent needs this.subTaskQueue.subscribe, then startListening would need to be overridden.
+  // For now, assuming subscribeToRole is the intended method for BaseAgent.
 
-  async processTaskMessage(taskMessage) {
-    const TOOL_EXECUTION_TIMEOUT_MS = 30000; // 30 секунд
-    console.log(`ResearchAgent (${this.agentRole}): Received task ID ${taskMessage.sub_task_id}, tool: ${taskMessage.tool_name}`);
-    console.log('ResearchAgent: Full taskMessage received:', JSON.stringify(taskMessage, null, 2));
-
-    const { tool_name, sub_task_input, sub_task_id, parent_task_id } = taskMessage;
-    let outcome = { result: null, error: `Unknown tool '${tool_name}' for ResearchAgent or invalid input.` };
-    let status = "FAILED"; // Default status
-
-    const selectedTool = this.toolsMap[tool_name];
-
-    if (selectedTool) {
-      try {
-        let validInput = false;
-        let executionPromise = null;
-
-        if (tool_name === "WebSearchTool") {
-            if (sub_task_input && typeof sub_task_input.query === 'string') {
-                validInput = true;
-                executionPromise = selectedTool.execute(sub_task_input);
-            } else {
-                outcome = { result: null, error: "Invalid input for WebSearchTool: 'query' string is required." };
-            }
-        } else if (tool_name === "ReadWebpageTool") {
-            if (sub_task_input && typeof sub_task_input.url === 'string') {
-                validInput = true;
-                executionPromise = selectedTool.execute(sub_task_input);
-            } else {
-                outcome = { result: null, error: "Invalid input for ReadWebpageTool: 'url' string is required." };
-            }
-        } else {
-            // This case should ideally not be hit if Orchestrator assigns valid tools
-            outcome = { result: null, error: `Tool '${tool_name}' not specifically handled by ResearchAgent logic, though it exists in toolsMap.` };
-        }
-
-        if (validInput && executionPromise) {
-            const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(`Tool '${tool_name}' execution timed out after ${TOOL_EXECUTION_TIMEOUT_MS}ms`)), TOOL_EXECUTION_TIMEOUT_MS)
-            );
-            // Promise.race will either resolve with the tool's outcome or reject with the timeout error
-            outcome = await Promise.race([executionPromise, timeoutPromise]);
-        }
-        // If validInput was false, outcome already contains the validation error.
-        // If executionPromise was null (but validInput true - an unlikely scenario), this block is skipped, outcome might be default error.
-
-        // Determine status based on the outcome
-        if (validInput && executionPromise && outcome && outcome.error === null) {
-            status = "COMPLETED";
-        } else if (validInput && executionPromise && outcome && outcome.error) {
-            // Error came from the tool itself (not a timeout caught in the catch block below)
-            // or from the timeoutPromise if it resolved with an error object (which it doesn't, it rejects)
-            // Status remains "FAILED", outcome already contains the error.
-        } else if (!validInput) {
-            // Input validation failed, status is "FAILED", outcome has the validation error.
-        }
-        // Any other scenario (e.g. executionPromise existed but outcome is somehow undefined) will also default to FAILED status.
-
-      } catch (e) { // This catch block handles rejections from Promise.race (i.e., timeout) or other unexpected errors.
-        console.error(`ResearchAgent: Error executing or timeout for tool ${tool_name} for task ${sub_task_id}:`, e.message);
-        // Ensure outcome reflects the error from the catch block
-        outcome = { result: null, error: e.message || "An unexpected error occurred during tool execution or timeout." };
-        // status remains "FAILED" (as initialized)
+  /**
+   * Validates the input for a given tool specific to the ResearchAgent.
+   * @param {string} tool_name - The name of the tool (e.g., "WebSearchTool", "ReadWebpageTool").
+   * @param {object} sub_task_input - The input object for the tool.
+   * @returns {{isValid: boolean, error: string|null}} Validation result.
+   * @override
+   */
+  validateToolInput(tool_name, sub_task_input) {
+    if (tool_name === 'WebSearchTool') {
+      if (!sub_task_input || typeof sub_task_input.query !== 'string') {
+        return { isValid: false, error: "Invalid input for WebSearchTool: 'query' (string) is required." };
       }
-    } else {
-        console.error(`ResearchAgent: Tool '${tool_name}' not found in toolsMap for task ${sub_task_id}.`);
-        // outcome is already set to "Unknown tool..."
+    } else if (tool_name === 'ReadWebpageTool') {
+      if (!sub_task_input || typeof sub_task_input.url !== 'string' || !sub_task_input.url.startsWith('http')) {
+        return { isValid: false, error: "Invalid input for ReadWebpageTool: 'url' (string, valid HTTP/HTTPS URL) is required." };
+      }
     }
+    // Add more validation for other tools as needed
+    return { isValid: true, error: null };
+  }
 
-    const resultMessage = {
-      sub_task_id: sub_task_id,
-      parent_task_id: parent_task_id,
-      worker_agent_role: this.agentRole,
-      status: status,
-      result_data: outcome.result, // This will be null if there was an error
-      error_details: outcome.error ? { message: outcome.error } : null
-    };
-
-    console.log(`ResearchAgent (${this.agentRole}): Enqueuing result for sub_task_id ${sub_task_id}. Status: ${status}`);
-    this.resultsQueue.enqueueResult(resultMessage);
+  /**
+   * Executes the specified tool with the given input.
+   * This method is called by BaseAgent after input validation and timeout setup.
+   * @param {object} toolInstance - The instance of the tool to execute.
+   * @param {object} sub_task_input - The validated input for the tool.
+   * @param {string} tool_name - The name of the tool being executed (for context).
+   * @param {object} agentApiKeysConfig - API keys configuration (rarely needed here as tools are pre-configured).
+   * @returns {Promise<any>} A promise that resolves with the result of the tool execution.
+   * @async
+   * @override
+   */
+  async executeTool(toolInstance, sub_task_input, tool_name, agentApiKeysConfig) {
+    // The toolInstance is already correctly selected by BaseAgent.
+    // agentApiKeysConfig is available if needed by a specific tool's execute method, though typically
+    // keys are passed during tool instantiation (as done in the constructor for WebSearchTool).
+    return toolInstance.execute(sub_task_input);
   }
 }
 

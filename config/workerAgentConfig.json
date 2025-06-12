@@ -1,0 +1,8 @@
+{
+  "defaultToolTimeoutMs": 30000,
+  "toolTimeouts": {
+    "WebSearchTool": 45000,
+    "ReadWebpageTool": 35000,
+    "CalculatorTool": 10000
+  }
+}

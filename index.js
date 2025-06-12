@@ -1,6 +1,8 @@
 require('dotenv').config();
+require('dotenv').config(); // Ensure this is at the very top
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const logger = require('./core/logger'); // Import the configured logger
 
 // Импорт классов агентов и очередей
 const OrchestratorAgent = require('./agents/OrchestratorAgent');
@@ -89,16 +91,25 @@ app.post('/api/generate-plan', async (req, res) => {
     const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой сессии обработки
 
     try {
-        // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
-        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, generated parentTaskId: ${parentTaskId}`);
+        logger.info(`Received API request for mode: ${effectiveMode}, generated parentTaskId: ${parentTaskId}`, {
+            mode: effectiveMode,
+            taskProvided: !!task,
+            taskSnippet: task ? task.substring(0, 50) + '...' : 'N/A',
+            taskIdToLoad,
+            parentTaskId
+        });
 
         // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
         // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.
         const result = await orchestratorAgent.handleUserTask(task, parentTaskId, taskIdToLoad, effectiveMode);
-        console.log("Orchestrator result:", result); // Consider logging less for very large results
+
+        // Log a summary of the result, not the whole object if it's large
+        logger.info("Orchestrator processing completed.", { parentTaskId, success: result.success, finalAnswerPresent: !!result.finalAnswer });
+        logger.debug("Full orchestrator result:", { parentTaskId, result });
+
         res.json(result);
     } catch (error) {
-        console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error);
+        logger.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}).`, { parentTaskId, error: error.message, stack: error.stack, originalError: error });
         res.status(500).json({ success: false, message: "Internal server error", error: error.message, parentTaskId: parentTaskId });
     }
 });
@@ -110,10 +121,11 @@ app.get('/', (req, res) => {
 
 // Запуск сервера
 app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-    console.log("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID.");
-    console.log("Available agents: Orchestrator, Research, Utility.");
-    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
-    console.log("UtilityAgent tools: CalculatorTool.");
-    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY.");
+    logger.info(`Server is running on http://localhost:${PORT}`);
+    logger.info("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID (if using relevant tools).");
+    logger.info("Available agents: Orchestrator, Research, Utility.");
+    logger.info("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
+    logger.info("UtilityAgent tools: CalculatorTool.");
+    logger.info("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY.");
+    logger.info(`Default log level: ${logger.level}. Set LOG_LEVEL environment variable to change.`);
 });

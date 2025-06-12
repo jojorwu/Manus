@@ -1,6 +1,7 @@
 // utils/taskStateUtil.js
-const fs = require('fs');
+const fs = require('fs').promises; // Using promises API directly
 const path = require('path');
+const logger = require('../core/logger'); // Import the logger
 
 /**
  * Saves the task state object to a JSON file asynchronously.
@@ -22,12 +23,12 @@ async function saveTaskState(taskStateObject, filePath) {
         }
 
         const jsonData = JSON.stringify(taskStateObject, null, 2);
-        await fs.promises.writeFile(filePath, jsonData, 'utf8');
+        await fs.writeFile(filePath, jsonData, 'utf8'); // fs.promises.writeFile
 
-        console.log(`TaskStateUtil: Task state saved successfully (async) to ${filePath}`);
+        logger.info(`TaskStateUtil: Task state saved successfully to ${filePath}`, { filePath });
         return { success: true, message: `Task state saved to ${filePath}` };
     } catch (error) {
-        console.error(`TaskStateUtil: Error saving task state (async) to ${filePath}. Error: ${error.message}`);
+        logger.error(`TaskStateUtil: Error saving task state to ${filePath}.`, { filePath, error: error.message, stack: error.stack });
         return { success: false, message: `Failed to save task state to ${filePath}`, error: error };
     }
 }
@@ -42,21 +43,21 @@ async function loadTaskState(filePath) {
     try {
         // Check file existence asynchronously
         try {
-            await fs.promises.access(filePath, fs.constants.F_OK); // F_OK checks existence
+            await fs.access(filePath, fs.constants.F_OK); // fs.promises.access
         } catch (fileNotFoundError) {
             const message = `TaskStateUtil: File not found at ${filePath}`;
-            console.warn(message);
-            return { success: false, message: message, error: new Error(message) };
+            logger.warn(message, { filePath }); // It's a common case, so warn might be enough
+            return { success: false, message: message, error: new Error(message) }; // Return an error object for consistency
         }
 
-        const jsonData = await fs.promises.readFile(filePath, 'utf8');
-        const taskState = JSON.parse(jsonData); // JSON.parse remains synchronous
+        const jsonData = await fs.readFile(filePath, 'utf8'); // fs.promises.readFile
+        const taskState = JSON.parse(jsonData);
 
-        console.log(`TaskStateUtil: Task state loaded successfully (async) from ${filePath}`);
+        logger.info(`TaskStateUtil: Task state loaded successfully from ${filePath}`, { filePath });
         return { success: true, message: `Task state loaded from ${filePath}`, taskState: taskState };
     } catch (error) {
         // This catch will handle errors from readFile (other than not found if access failed) and JSON.parse
-        console.error(`TaskStateUtil: Error loading task state (async) from ${filePath}. Error: ${error.message}`);
+        logger.error(`TaskStateUtil: Error loading task state from ${filePath}.`, { filePath, error: error.message, stack: error.stack });
         return { success: false, message: `Failed to load task state from ${filePath}`, error: error };
     }
 }

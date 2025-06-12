@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "properties": {
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "action": { "type": "string" },
+          "agent": { "type": "string" },
+          "inputs": { "type": "object" },
+          "depends_on": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["id", "action", "agent", "inputs"]
+      }
+    }
+  },
+  "required": ["name", "description", "steps"]
+}
