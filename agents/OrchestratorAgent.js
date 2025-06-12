@@ -43,13 +43,21 @@ async function parseSubTaskPlanResponse(jsonStringResponse, knownAgentRoles, kno
                 if (typeof subTask !== 'object' || subTask === null) {
                     return { success: false, message: "Invalid sub-task structure: not an object.", rawResponse: cleanedString, stages: [] };
                 }
-                if (!subTask.assigned_agent_role || typeof subTask.assigned_agent_role !== 'string' || !knownAgentRoles.includes(subTask.assigned_agent_role)) {
+
+                // Validate assigned_agent_role and tool_name
+                if (subTask.assigned_agent_role === "Orchestrator") {
+                    if (subTask.tool_name !== "ExploreSearchResults" && subTask.tool_name !== "GeminiStepExecutor") {
+                        return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role. Only 'ExploreSearchResults' or 'GeminiStepExecutor' allowed.`, rawResponse: cleanedString, stages: [] };
+                    }
+                } else if (!knownAgentRoles.includes(subTask.assigned_agent_role)) {
                     return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
+                } else { // This is a regular worker agent
+                    const agentTools = knownToolsByRole[subTask.assigned_agent_role];
+                    if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !agentTools || !agentTools.includes(subTask.tool_name)) {
+                        return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
+                    }
                 }
-                const agentTools = knownToolsByRole[subTask.assigned_agent_role];
-                if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !agentTools || !agentTools.includes(subTask.tool_name)) {
-                    return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
-                }
+
                 if (typeof subTask.sub_task_input !== 'object' || subTask.sub_task_input === null) {
                     return { success: false, message: "Invalid 'sub_task_input': must be an object.", rawResponse: cleanedString, stages: [] };
                 }
@@ -284,15 +292,63 @@ Based on the original user task and the detailed execution history, synthesize a
 
             const planningPrompt = `User task: '${userTaskString}'.
 Available agent capabilities:
+---
 ${formattedAgentCapabilitiesString}
-Based on the user task and available agents, create a multi-stage execution plan.
+---
+Orchestrator Special Actions:
+ - ExploreSearchResults: This is a special action for the Orchestrator. It should be used AFTER a WebSearchTool step to gather more detailed information from the search results.
+   Input ('sub_task_input'):
+     - 'pagesToExplore': (Optional, Integer, Default: 2) Number of top search result links to read using ReadWebpageTool.
+     - 'relevanceCriteria': (Optional, String) Brief guidance on what makes a search result relevant for deeper exploration (e.g., "pages offering detailed explanations", "official documentation"). Orchestrator will primarily use the order of results.
+   Functionality: The Orchestrator will take the results from the most recent WebSearchTool step in a preceding stage. It will select up to 'pagesToExplore' links. For each selected link, it will internally use 'ReadWebpageTool' to fetch its content. The collected content from all explored pages will then be aggregated.
+   Output: An aggregated string containing the content from all explored pages.
+   When to use: Use this if the user's task implies needing more than just search snippets and requires information from the content of the web pages found.
+---
+(End of available agents list and special actions)
+Based on the user task and available capabilities, create a multi-stage execution plan.
 The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
 Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
 Each sub-task object in an inner array must have the following keys:
-1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}]).
-2. 'tool_name': String (must be a tool available to the assigned agent, as listed in its capabilities).
-3. 'sub_task_input': Object (the input for the specified tool, matching its described input format).
-4. 'narrative_step': String (a short, human-readable description of this step's purpose in the context of the overall user task).
+1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}] OR "Orchestrator" for special actions).
+2. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults").
+3. 'sub_task_input': Object (the input for the specified tool or action).
+4. 'narrative_step': String (a short, human-readable description of this step's purpose).
+
+For the 'ExploreSearchResults' action, set 'assigned_agent_role' to "Orchestrator" and 'tool_name' to "ExploreSearchResults". The 'sub_task_input' may include 'pagesToExplore' and 'relevanceCriteria'.
+
+Example of a plan using ExploreSearchResults:
+\`\`\`json
+[
+  [
+    {
+      "assigned_agent_role": "ResearchAgent",
+      "tool_name": "WebSearchTool",
+      "sub_task_input": { "query": "advantages of server-side rendering" },
+      "narrative_step": "Search for advantages of server-side rendering."
+    }
+  ],
+  [
+    {
+      "assigned_agent_role": "Orchestrator",
+      "tool_name": "ExploreSearchResults",
+      "sub_task_input": {
+        "pagesToExplore": 2
+      },
+      "narrative_step": "Explore the top 2 search results about SSR advantages by reading their content."
+    }
+  ],
+  [
+    {
+      "assigned_agent_role": "Orchestrator",
+      "tool_name": "GeminiStepExecutor",
+      "sub_task_input": {
+        "prompt_template": "Based on the gathered information: {{previous_step_output}}, synthesize a comprehensive answer to the user's original query about server-side rendering."
+      },
+      "narrative_step": "Synthesize the final answer about SSR advantages from the explored content."
+    }
+  ]
+]
+\`\`\`
 Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
             let planJsonString;
@@ -353,38 +409,197 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             const currentStageTaskDefinitions = planStages[i];
             console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
             const stageSubTaskPromises = [];
-            for (const subTaskDefinition of currentStageTaskDefinitions) {
+            const currentStageTaskDefinitions = planStages[i];
+            console.log(`OrchestratorAgent: Starting Stage ${i + 1}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
+            const stageSubTaskPromises = [];
+
+            for (const subTaskDefinition of currentStageTaskDefinitions) { // Changed from 'j' to 'subTaskDefinition' for clarity
                 allExecutedStepsInfo.push({ narrative_step: subTaskDefinition.narrative_step, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input });
-                const sub_task_id = uuidv4();
-                const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input, narrative_step: subTaskDefinition.narrative_step };
-                console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2));
-                this.subTaskQueue.enqueueTask(taskMessage);
-                console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
-                const subTaskPromise = new Promise((resolve) => {
-                    this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
-                        if (error) { console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1}):`, error.message); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } }); }
-                        else if (resultMsg) {
-                            if (resultMsg.sub_task_id === sub_task_id) { console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details }); }
-                            else { const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId} (Stage ${i+1}). This indicates an issue with result routing or subscription logic.`; console.error(errorMessage); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage } }); }
+
+                if (subTaskDefinition.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "ExploreSearchResults") {
+                    console.log(`Orchestrator: Handling special step - ExploreSearchResults: "${subTaskDefinition.narrative_step}"`);
+                    const explorePromise = (async () => {
+                        let previousSearchResults = null;
+                        for (let k = executionContext.length - 1; k >= 0; k--) {
+                            // Check processed_result_data first, then raw_result_data
+                            const potentialResults = executionContext[k].processed_result_data || executionContext[k].raw_result_data;
+                            if (executionContext[k].tool_name === "WebSearchTool" && executionContext[k].status === "COMPLETED" && potentialResults) {
+                                if (Array.isArray(potentialResults)) {
+                                    previousSearchResults = potentialResults;
+                                } else if (typeof potentialResults === 'object' && Array.isArray(potentialResults.result)) { // Handle if WebSearchTool raw output was {result: [], error: null}
+                                    previousSearchResults = potentialResults.result;
+                                }
+                                // Add further checks if WebSearchTool might return results in other structures
+                                break;
+                            }
                         }
-                    }, sub_task_id);
-                });
-                stageSubTaskPromises.push(subTaskPromise);
+
+                        if (!previousSearchResults || !Array.isArray(previousSearchResults) || previousSearchResults.length === 0) {
+                            console.warn("ExploreSearchResults: No valid search results found from previous steps or results are not an array.");
+                            return {
+                                sub_task_id: `explore_${uuidv4()}`,
+                                narrative_step: subTaskDefinition.narrative_step,
+                                tool_name: "ExploreSearchResults",
+                                assigned_agent_role: "Orchestrator",
+                                status: "COMPLETED", // Completed, but with a note about no results
+                                result_data: "No search results available to explore or results format was incompatible.",
+                                error_details: null
+                            };
+                        }
+
+                        const pagesToExplore = subTaskDefinition.sub_task_input?.pagesToExplore || 2;
+                        const linksToRead = previousSearchResults.slice(0, pagesToExplore)
+                                              .map(item => item && item.link) // ensure item and item.link exist
+                                              .filter(link => typeof link === 'string' && link.trim() !== '');
+
+
+                        if (linksToRead.length === 0) {
+                            return { sub_task_id: `explore_${uuidv4()}`, narrative_step: subTaskDefinition.narrative_step, tool_name: "ExploreSearchResults", assigned_agent_role: "Orchestrator", status: "COMPLETED", result_data: "No valid links found in search results to explore.", error_details: null };
+                        }
+
+                        let aggregatedContent = "";
+                        const ReadWebpageTool = require('../tools/ReadWebpageTool');
+                        const webpageReader = new ReadWebpageTool();
+
+                        for (const url of linksToRead) {
+                            try {
+                                console.log(`ExploreSearchResults: Reading URL - ${url}`);
+                                const readResult = await webpageReader.execute({ url });
+                                if (readResult.error) {
+                                    aggregatedContent += `Error reading ${url}: ${readResult.error}\n---\n`;
+                                } else if (readResult.result) {
+                                    aggregatedContent += `Content from ${url}:\n${readResult.result}\n---\n`;
+                                }
+                            } catch (e) {
+                                aggregatedContent += `Exception while reading ${url}: ${e.message}\n---\n`;
+                            }
+                        }
+                        return {
+                            sub_task_id: `explore_${uuidv4()}`,
+                            narrative_step: subTaskDefinition.narrative_step,
+                            tool_name: "ExploreSearchResults",
+                            assigned_agent_role: "Orchestrator",
+                            status: "COMPLETED",
+                            result_data: aggregatedContent || "No content could be fetched from the explored pages.",
+                            error_details: null
+                        };
+                    })();
+                    stageSubTaskPromises.push(explorePromise);
+
+                } else if (subTaskDefinition.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "GeminiStepExecutor") {
+                    console.log(`Orchestrator: Handling special step - GeminiStepExecutor: "${subTaskDefinition.narrative_step}"`);
+                    const geminiPromise = (async () => {
+                        let promptInput = subTaskDefinition.sub_task_input?.prompt || "";
+                        const promptTemplate = subTaskDefinition.sub_task_input?.prompt_template;
+                        const promptParams = subTaskDefinition.sub_task_input?.prompt_params || {};
+
+                        if (promptTemplate) {
+                            promptInput = promptTemplate;
+                            // Replace placeholders like {{placeholder}} or {placeholder}
+                            for (const key in promptParams) {
+                                const placeholder = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
+                                let valueToInject = promptParams[key];
+                                if (valueToInject === "{previous_step_output}") {
+                                     if (executionContext.length > 0) {
+                                        const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
+                                        valueToInject = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
+                                    } else {
+                                        valueToInject = "No data from previous steps.";
+                                    }
+                                }
+                                promptInput = promptInput.replace(placeholder, valueToInject);
+                            }
+                             // Fallback for a simple {{previous_step_output}} if not in prompt_params
+                            if (promptInput.includes("{{previous_step_output}}")) {
+                                 if (executionContext.length > 0) {
+                                    const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
+                                    promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput));
+                                } else {
+                                    promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), "No data from previous steps.");
+                                }
+                            }
+
+
+                        } else if (!promptInput && subTaskDefinition.sub_task_input?.data_from_previous_step === true) { // Simple case: use previous step output as prompt
+                             if (executionContext.length > 0) {
+                                const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
+                                promptInput = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
+                            } else {
+                                promptInput = "No data from previous steps to use as prompt.";
+                            }
+                        }
+
+
+                        if (!promptInput) {
+                            return { sub_task_id: `gemini_${uuidv4()}`, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", status: "FAILED", error_details: { message: "Prompt is empty for GeminiStepExecutor." } };
+                        }
+
+                        try {
+                            const resultData = await this.llmService(promptInput);
+                            return { sub_task_id: `gemini_${uuidv4()}`, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", status: "COMPLETED", result_data: resultData, error_details: null };
+                        } catch (e) {
+                            return { sub_task_id: `gemini_${uuidv4()}`, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", status: "FAILED", error_details: { message: e.message } };
+                        }
+                    })();
+                    stageSubTaskPromises.push(geminiPromise);
+
+                } else { // Regular worker agent task
+                    const sub_task_id = uuidv4();
+                    const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input, narrative_step: subTaskDefinition.narrative_step };
+                    // console.log('OrchestratorAgent: Dispatching taskMessage:', JSON.stringify(taskMessage, null, 2)); // Can be verbose
+                    this.subTaskQueue.enqueueTask(taskMessage);
+                    console.log(`Orchestrator: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${taskMessage.narrative_step}" for Stage ${i + 1}`);
+                    const subTaskPromise = new Promise((resolve) => {
+                        this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
+                            if (error) { console.error(`Orchestrator: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${i+1}):`, error.message); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } }); }
+                            else if (resultMsg) {
+                                if (resultMsg.sub_task_id === sub_task_id) { console.log(`Orchestrator: Received result for sub_task_id ${sub_task_id} (Stage ${i+1}). Status: ${resultMsg.status}`); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details }); }
+                                else { const errorMessage = `Orchestrator: Critical - Received mismatched sub_task_id. Expected ${sub_task_id}, but got ${resultMsg.sub_task_id} for parent_task_id ${parentTaskId} (Stage ${i+1}). This indicates an issue with result routing or subscription logic.`; console.error(errorMessage); resolve({ sub_task_id, narrative_step: taskMessage.narrative_step, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage } }); }
+                            }
+                        }, sub_task_id);
+                    });
+                    stageSubTaskPromises.push(subTaskPromise);
+                }
             }
             const stageResults = await Promise.all(stageSubTaskPromises);
             const stageContextEntries = [];
+            // Iterate using index j to align with currentStageTaskDefinitions if needed for original subTaskDefinition
             for (let j = 0; j < stageResults.length; j++) {
                 const resultOfSubTask = stageResults[j];
-                const subTaskDefinition = currentStageTaskDefinitions[j];
+                // For Orchestrator-handled steps, subTaskDefinition might not be directly from currentStageTaskDefinitions[j]
+                // if their promises resolve to a structure that already includes narrative_step etc.
+                // However, the current implementation of explorePromise and geminiPromise returns this info.
+                const originalSubTaskDef = currentStageTaskDefinitions[j]; // Assuming order is maintained.
+
                 let processedData = resultOfSubTask.result_data;
-                if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data) {
-                    processedData = await this.summarizeDataWithLLM(resultOfSubTask.result_data, userTaskString, subTaskDefinition.narrative_step);
+                // Summarization should only apply to actual tool outputs, not Orchestrator's internal steps unless they are verbose
+                if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
+                    resultOfSubTask.assigned_agent_role !== "Orchestrator") { // Don't summarize Orchestrator's own special actions by default
+                    processedData = await this.summarizeDataWithLLM(resultOfSubTask.result_data, userTaskString, resultOfSubTask.narrative_step);
                 }
-                const contextEntry = { narrative_step: subTaskDefinition.narrative_step, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input, status: resultOfSubTask.status, processed_result_data: processedData, raw_result_data: resultOfSubTask.result_data, error_details: resultOfSubTask.error_details, sub_task_id: resultOfSubTask.sub_task_id };
+
+                const contextEntry = {
+                    narrative_step: resultOfSubTask.narrative_step || originalSubTaskDef.narrative_step, // Prefer result's if available
+                    assigned_agent_role: resultOfSubTask.assigned_agent_role || originalSubTaskDef.assigned_agent_role,
+                    tool_name: resultOfSubTask.tool_name || originalSubTaskDef.tool_name,
+                    sub_task_input: resultOfSubTask.sub_task_input || originalSubTaskDef.sub_task_input, // Input from original plan
+                    status: resultOfSubTask.status,
+                    processed_result_data: processedData, // Summarized if applicable
+                    raw_result_data: resultOfSubTask.result_data, // Original result from tool/action
+                    error_details: resultOfSubTask.error_details,
+                    sub_task_id: resultOfSubTask.sub_task_id
+                };
                 stageContextEntries.push(contextEntry);
             }
             executionContext.push(...stageContextEntries);
-            for (const result of stageResults) { if (result.status === "FAILED") { console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`); overallSuccess = false; break; } }
+
+            for (const result of stageContextEntries) { // Check based on processed context entries
+                if (result.status === "FAILED") {
+                    console.error(`Orchestrator: Sub-task ${result.sub_task_id} ("${result.narrative_step}") failed in Stage ${i + 1}. Halting further stages for this parent task.`);
+                    overallSuccess = false;
+                    break;
+                }
+            }
             if (!overallSuccess) break;
             console.log(`OrchestratorAgent: Stage ${i + 1} completed successfully.`);
         }
