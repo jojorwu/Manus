@@ -50,6 +50,7 @@ This project consists of two main components: a Node.js backend that houses the 
 ## Key Features
 
 *   **LLM-Driven Planning:** Uses Google Gemini to dynamically generate multi-step, multi-stage plans based on user tasks.
+*   **Template-Based Planning for Common Tasks**: For predefined common queries (e.g., simple weather requests, calculations), the system can use plan templates stored in `config/plan_templates/`. This bypasses LLM-based plan generation, leading to faster responses, predictable execution, and reduced LLM usage for recognized intents.
 *   **Tool-Aware Execution:** Gemini determines which tool is appropriate for each step in the plan.
 *   **Multi-Tool Architecture:**
     *   **GeminiStepExecutor:** For general reasoning, text generation, summarization, and executing complex instructions.
@@ -245,6 +246,23 @@ This project is set up to be understandable and extensible.
     *   Task and result queues: `core/` directory
     *   Agent capabilities configuration: `config/agentCapabilities.json` (defines roles and tools for the OrchestratorAgent)
 *   **Frontend UI:** The React UI is in the `frontend/` directory, primarily within `frontend/src/`. Key components include `App.jsx`, `TaskInputForm.jsx`, and `ResultsDisplay.jsx`.
+
+### Plan Templates
+
+To accelerate processing for common or simple tasks and to ensure consistent execution paths, the `OrchestratorAgent` can utilize predefined plan templates.
+
+*   **Location**: Templates are stored as JSON files in the `config/plan_templates/` directory.
+*   **Format**: Each template is a JSON file representing a valid multi-stage plan (an array of stages, where each stage is an array of sub-task objects). Templates can use placeholders in the format `{{PLACEHOLDER_NAME}}` within `sub_task_input` fields or `narrative_step` strings.
+    *   Examples: `weather_query_template.json`, `calculator_template.json`.
+*   **Matching Logic**: The `OrchestratorAgent` (in its `loadPlanTemplates` method) maintains a list of `templateDefinitions`. Each definition includes:
+    *   The template's file name.
+    *   A regular expression (`regex`) to match against the user's task string.
+    *   A `paramMapping` object that maps placeholder names (e.g., `CITY_NAME`) to the capture group indices from the regex.
+*   **Workflow**: When a task is received (in `EXECUTE_FULL_PLAN` or `PLAN_ONLY` mode), the `OrchestratorAgent` first attempts to match the user's task string against these predefined templates using `tryGetPlanFromTemplate`. If a match is found, the corresponding template is populated with parameters extracted by the regex, and this plan is used, bypassing LLM-based plan generation. If no template matches, the system falls back to LLM-based planning.
+*   **Adding New Templates**:
+    1.  Create a new JSON file for your plan in `config/plan_templates/`, using placeholders as needed.
+    2.  In `agents/OrchestratorAgent.js`, update the `templateDefinitions` array within the `loadPlanTemplates` method to include metadata for your new template (its name, file name, regex for matching, and `paramMapping`).
+
 *   **Adding New Tools (Backend):**
     1.  Define your new tool class in a new file within the `tools/` directory (e.g., `tools/MyNewTool.js`) with an `async execute(inputObject)` method, and export the class.
     2.  Import your new tool in `index.js` (e.g., `const MyNewTool = require('./tools/MyNewTool');`).
