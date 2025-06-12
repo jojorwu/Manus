@@ -4,7 +4,7 @@
 
 ## Overview
 
-This project is a Node.js-based AI agent that leverages the Google Gemini API to understand tasks, generate multi-step execution plans, and execute those plans using a variety of tools. It currently aims to feature a Gemini execution tool for general reasoning, a Web Search tool, a Calculator tool, and a Webpage Reading tool (note: some tools like WebSearch and ReadWebpage are currently stubs, see "Known Issues / Limitations"). The agent is designed to handle complex tasks by breaking them into stages, with parallel execution of sub-tasks within each stage. It saves task states and supports different operational modes via its API. Interaction with the agent is primarily through a modern React-based web interface.
+This project is a Node.js-based AI agent that leverages the Google Gemini API to understand tasks, generate multi-step execution plans, and execute those plans using a variety of tools. It currently aims to feature a Gemini execution tool for general reasoning, a Web Search tool, a Calculator tool, and a Webpage Reading tool. The agent is designed to handle complex tasks by breaking them into stages, with parallel execution of sub-tasks within each stage. It saves task states and supports different operational modes via its API. Interaction with the agent is primarily through a modern React-based web interface.
 
 ## Project Architecture
 
@@ -57,12 +57,12 @@ This project consists of two main components: a Node.js backend that houses the 
     *   **GeminiStepExecutor:** For general reasoning, text generation, summarization, and executing complex instructions.
     *   **WebSearchTool:** For performing real-time web searches using the Google Custom Search Engine API.
     *   **CalculatorTool:** For evaluating mathematical expressions.
-    *   **ReadWebpageTool:** For fetching and extracting textual content from web URLs.
+    *   **ReadWebpageTool:** For fetching and extracting textual content from web URLs. This tool is now fully implemented.
 *   **Staged and Parallel Execution:** Plans are structured into stages that are executed sequentially. Sub-tasks within the same stage are executed in parallel (using `Promise.all()`), allowing for faster completion of independent tasks within a phase of work. The LLM is responsible for generating plans in this staged format.
 *   **Contextual Memory & Summarization:** Information from completed steps is carried forward. (Note: The "Long contexts are automatically summarized using Gemini to maintain efficiency" part of this point refers to a more general context summarization, not the specific step-result summarization described next).
 *   **Context-Aware Result Summarization**: For tasks generating extensive data from tools, individual step results may be summarized by an LLM before being passed to the final answer synthesis. This helps manage context window limitations and focuses the LLM on the most pertinent information. The full, raw data from each step is still preserved in the saved task state.
 *   **Enhanced Information Retrieval with `ExploreSearchResults`**: The OrchestratorAgent can perform a deeper analysis of web search results. If a plan includes the `ExploreSearchResults` special action after a `WebSearchTool` step, the Orchestrator will read the content of a specified number of top web pages from the search results (using `ReadWebpageTool` internally). This allows the system to gather more comprehensive information than just search snippets, leading to more detailed and well-informed answers.
-    *   *Note:* This feature's effectiveness is currently linked to `ReadWebpageTool`'s capabilities (which primarily returns partial HTML content, not cleaned text) and the potential for large aggregated text volumes that might challenge LLM context windows if many pages are explored.
+    *   *Note:* This feature's effectiveness relies on `ReadWebpageTool`'s capability to extract meaningful textual content from web pages.
 *   **Multi-Stage Replanning:** If a step fails, the agent can attempt a focused "step fix" or a more comprehensive "full replan" using Gemini.
 *   **Modern Web Interface:** A React/Vite/Tailwind/Shadcn/UI frontend for task submission and detailed progress/result viewing, located in the `frontend/` directory.
 
@@ -110,13 +110,12 @@ The API (`/api/generate-plan`) now supports a `"SYNTHESIZE_ONLY"` mode that can 
 This initial beta version has the following known limitations:
 
 *   **Tool Implementations**:
-    *   `ReadWebpageTool` is currently a stub and does not perform real content fetching. It requires full implementation to be useful.
     *   `WebSearchTool` has been implemented to use the Google Custom Search Engine API for web searches.
     *   `CalculatorTool` is functional for basic mathematical expressions.
 *   **Task State Loading**:
     *   The `SYNTHESIZE_ONLY` mode's file search logic for `taskIdToLoad` is basic and may be inefficient if many dated directories exist. A more robust lookup mechanism (e.g., an index or requiring more specific path information) is needed.
 *   **Task Execution Flow**:
-    *   No `EXECUTE_PLANNED_TASK` mode: Currently, there's no dedicated mode to execute a plan that was previously generated by `PLAN_ONLY`. The `EXECUTE_FULL_PLAN` mode always re-plans.
+    *   No `EXECUTE_PLANNED_TASK` mode: Currently, there's no dedicated mode to execute a plan that was previously generated by `PLAN_ONLY`. The `EXECUTE_FULL_PLAN` mode always re-plans. *(Correction: EXECUTE_PLANNED_TASK mode is described as available in the API section, this point might be outdated).*
     *   No task resumption: If a task fails midway during `EXECUTE_FULL_PLAN`, it cannot be resumed from the point of failure.
 *   **User Interface**:
     *   The existing frontend (`frontend/`) is likely designed for the original single-mode operation and does not yet support interacting with the new API modes (`PLAN_ONLY`, `SYNTHESIZE_ONLY`) or visualizing saved task states.
@@ -132,7 +131,7 @@ This initial beta version has the following known limitations:
 *   **Tools & Libraries (Backend):**
     *   Web Search: Google Custom Search Engine (CSE) API (via `axios`)
     *   Calculator: `mathjs`
-    *   Web Page Reading: `axios` (basic text extraction)
+    *   Web Page Reading: `axios`, `cheerio` (for HTML parsing and text extraction)
     *   HTTP Client: `axios`
 *   **Frontend (`frontend/` directory):** React, Vite, Tailwind CSS, Shadcn/UI, `axios`
 
