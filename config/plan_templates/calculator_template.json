@@ -1,0 +1,12 @@
+[
+  [
+    {
+      "assigned_agent_role": "UtilityAgent",
+      "tool_name": "CalculatorTool",
+      "sub_task_input": {
+        "expression": "{{EXPRESSION}}"
+      },
+      "narrative_step": "Calculate the expression: {{EXPRESSION}}."
+    }
+  ]
+]

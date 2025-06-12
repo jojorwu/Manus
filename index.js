@@ -9,71 +9,17 @@ const UtilityAgent = require('./agents/UtilityAgent');
 const SubTaskQueue = require('./core/SubTaskQueue');
 const ResultsQueue = require('./core/ResultsQueue');
 
-// Импорт классов инструментов (предполагаем, что они определены или будут определены в ./tools/)
-// Важно: README упоминает, что инструменты (WebSearchTool, ReadWebpageTool, CalculatorTool)
-// инстанцируются и передаются агентам. В текущей структуре файлов их нет.
-// Пока что создадим заглушки, если они не будут найдены, или предположим,
-// что они будут предоставлены пользователем или в другом шаге.
-// Для простоты, предположим, что инструменты - это классы, которые нужно инстанцировать.
+// Импорт классов инструментов
+const WebSearchTool = require('./tools/WebSearchTool');
+const ReadWebpageTool = require('./tools/ReadWebpageTool');
+const CalculatorTool = require('./tools/CalculatorTool');
 
-// ЗАГЛУШКИ ДЛЯ ИНСТРУМЕНТОВ (если они не существуют, их нужно будет создать)
-// Это временное решение, так как файлы инструментов не были найдены в репозитории.
-// В идеале, эти классы должны быть в директории ./tools/
-
-class WebSearchTool {
-    async execute(input) {
-        console.warn(`WebSearchTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика поиска
-        return { result: `Search results for "${input.query}" (stub)`, error: null };
-    }
-}
-
-class ReadWebpageTool {
-    async execute(input) {
-        console.warn(`ReadWebpageTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика чтения веб-страницы
-        return { result: `Content of ${input.url} (stub)`, error: null };
-    }
-}
-
-class CalculatorTool {
-    async execute(input) {
-        console.warn(`CalculatorTool (stub) called with:`, input);
-        // В реальной реализации здесь будет логика вычислений с использованием mathjs
-        try {
-            const math = require('mathjs');
-            const result = math.evaluate(input.expression);
-            return { result: result, error: null };
-        } catch (e) {
-            return { result: null, error: e.message };
-        }
-    }
-}
-
+// Импорт LLM сервиса
+const geminiLLMService = require('./services/LLMService');
 
 // Инициализация очередей
 const subTaskQueue = new SubTaskQueue();
 const resultsQueue = new ResultsQueue();
-
-// Инициализация LLM сервиса (заглушка)
-// README указывает на использование Gemini API. Реальный вызов будет асинхронным.
-const geminiLLMService = async (prompt) => {
-    console.log(`LLM Service called with prompt (first 100 chars): "${prompt.substring(0,100)}..."`);
-    // Здесь должна быть реальная интеграция с @google/generative-ai
-    // GEMINI_API_KEY должен быть доступен из process.env
-    if (!process.env.GEMINI_API_KEY) {
-        console.error("GEMINI_API_KEY is not set in .env file.");
-        return "Error: GEMINI_API_KEY not configured.";
-    }
-    // Это очень упрощенная заглушка. Реальный ответ должен быть JSON планом или синтезированным текстом.
-    // Для планирования ожидается JSON массив. Для синтеза - строка.
-    // Сейчас вернем пустой массив для планирования, чтобы избежать ошибок парсинга JSON.
-    // И простую строку для синтеза.
-    if (prompt.includes("create a sequential plan")) {
-         return "[]"; // Пустой план, чтобы не было ошибок парсинга
-    }
-    return "LLM synthesized answer (stub).";
-};
 
 // Конфигурация API ключей для агентов (если необходимо для инструментов)
 // README упоминает SEARCH_API_KEY и CSE_ID для WebSearchTool.
@@ -117,22 +63,43 @@ app.use(express.json());
 
 // API эндпоинт для задач
 app.post('/api/generate-plan', async (req, res) => {
-    const { task } = req.body;
-    if (!task || typeof task !== 'string') {
-        return res.status(400).json({ success: false, message: "Invalid task: 'task' must be a non-empty string." });
+    const { task, taskIdToLoad, mode } = req.body;
+
+    // Определяем режим по умолчанию, если не указан
+    const effectiveMode = mode || "EXECUTE_FULL_PLAN";
+
+    if (effectiveMode === "EXECUTE_FULL_PLAN") {
+        if (!task || typeof task !== 'string' || task.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for EXECUTE_FULL_PLAN mode." });
+        }
+    } else if (effectiveMode === "SYNTHESIZE_ONLY") {
+        if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'taskIdToLoad' must be a non-empty string for SYNTHESIZE_ONLY mode." });
+        }
+        // В этом режиме 'task' не обязателен, так как он будет загружен из состояния
+    } else if (effectiveMode === "PLAN_ONLY") {
+        if (!task || typeof task !== 'string' || task.trim() === "") {
+            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for PLAN_ONLY mode." });
+        }
+        // taskIdToLoad не используется в этом режиме
+    } else {
+        return res.status(400).json({ success: false, message: `Invalid request: Unknown mode '${effectiveMode}'.` });
     }
 
-    const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой задачи
+    const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой сессии обработки
 
     try {
-        console.log(`Received task: "${task}", parentTaskId: ${parentTaskId}`);
-        // Передаем задачу Оркестратору
-        const result = await orchestratorAgent.handleUserTask(task, parentTaskId);
-        console.log("Orchestrator result:", result);
+        // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
+        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, generated parentTaskId: ${parentTaskId}`);
+
+        // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
+        // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.
+        const result = await orchestratorAgent.handleUserTask(task, parentTaskId, taskIdToLoad, effectiveMode);
+        console.log("Orchestrator result:", result); // Consider logging less for very large results
         res.json(result);
     } catch (error) {
-        console.error("Error in /api/generate-plan:", error);
-        res.status(500).json({ success: false, message: "Internal server error", error: error.message });
+        console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error);
+        res.status(500).json({ success: false, message: "Internal server error", error: error.message, parentTaskId: parentTaskId });
     }
 });
 
@@ -148,5 +115,5 @@ app.listen(PORT, () => {
     console.log("Available agents: Orchestrator, Research, Utility.");
     console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
-    console.log("API endpoint for tasks: POST /api/generate-plan");
+    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY.");
 });

@@ -1,0 +1,12 @@
+[
+  [
+    {
+      "assigned_agent_role": "ResearchAgent",
+      "tool_name": "WebSearchTool",
+      "sub_task_input": {
+        "query": "weather in {{CITY_NAME}}"
+      },
+      "narrative_step": "Search for weather information in {{CITY_NAME}}."
+    }
+  ]
+]

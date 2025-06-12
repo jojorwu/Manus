@@ -1,14 +1,16 @@
 # Gemini Powered AI Agent
 
+> Current Version: **v0.1.0-beta** — For a detailed list of features and changes, please see the [CHANGELOG.md](./CHANGELOG.md).
+
 ## Overview
 
-This project is a Node.js-based AI agent that leverages the Google Gemini API to understand tasks, generate multi-step execution plans, and execute those plans using a variety of tools. It currently features a Gemini execution tool for general reasoning and text generation, a real Web Search tool (Google Custom Search Engine API), a Calculator tool, and a Webpage Reading tool. The agent is designed to handle complex tasks by breaking them into stages, with the ability to execute steps within each stage in parallel. It maintains contextual memory (with summarization for long histories) and can attempt multi-stage replanning if steps fail. Interaction with the agent is primarily through a modern React-based web interface.
+This project is a Node.js-based AI agent that leverages the Google Gemini API to understand tasks, generate multi-step execution plans, and execute those plans using a variety of tools. It currently aims to feature a Gemini execution tool for general reasoning, a Web Search tool, a Calculator tool, and a Webpage Reading tool (note: some tools like WebSearch and ReadWebpage are currently stubs, see "Known Issues / Limitations"). The agent is designed to handle complex tasks by breaking them into stages, with parallel execution of sub-tasks within each stage. It saves task states and supports different operational modes via its API. Interaction with the agent is primarily through a modern React-based web interface.
 
 ## Project Architecture
 
 This project consists of two main components: a Node.js backend that houses the AI agent logic, and a modern React frontend for user interaction.
 
-*   **Backend (Root Directory - `server.js`):**
+*   **Backend (Root Directory - `index.js`):**
     *   Built with Node.js and Express.js.
     *   Responsible for all core AI agent functionalities:
         *   Receiving user tasks via API endpoints.
@@ -16,6 +18,13 @@ This project consists of two main components: a Node.js backend that houses the 
         *   Managing and dispatching tasks to various tools (e.g., Web Search, Calculator, Webpage Reader, GeminiStepExecutor).
         *   Handling the execution flow, including staged/parallel execution and context management.
     *   Exposes an API (currently `/api/generate-plan`) that the frontend consumes.
+        The `/api/generate-plan` endpoint accepts a POST request with a JSON body.
+        - `task` (string, required for `EXECUTE_FULL_PLAN` and `PLAN_ONLY` modes): The user's task description.
+        - `mode` (string, optional, defaults to "EXECUTE_FULL_PLAN"): Specifies the operational mode.
+            - `"EXECUTE_FULL_PLAN"`: Generates a new plan, executes it, saves the task state, and returns the synthesized answer.
+            - `"SYNTHESIZE_ONLY"`: Loads a previously saved task state using `taskIdToLoad`, re-synthesizes the final answer based on its `executionContext` and `userTaskString`, and returns the result. Does not re-execute or re-save the plan.
+            - `"PLAN_ONLY"`: Receives a user `task`, generates a multi-stage execution plan, saves the task state (including the plan and a status like "PLAN_GENERATED"), and returns the `taskId` and the generated `plan` to the user. Does not execute the plan.
+        - `taskIdToLoad` (string, required for `SYNTHESIZE_ONLY` mode): The ID of a previously saved task state to load. Not used in `PLAN_ONLY` mode.
     *   Its root path (`/`) now returns a simple JSON health/status message, and it serves static assets (which could include a production build of the frontend if placed in the root).
 
 *   **Frontend (`frontend/` Directory):**
@@ -33,7 +42,7 @@ This project consists of two main components: a Node.js backend that houses the 
 2.  The frontend sends this task to the backend's API endpoint (e.g., `/api/generate-plan`).
 3.  The Node.js backend processes the task:
     *   Generates a plan using Gemini.
-    *   Executes the plan step-by-step (potentially in parallel stages), using appropriate tools.
+    *   Executes the plan stage by stage. Sub-tasks within each stage are run in parallel. Execution halts if a stage fails.
     *   Handles context summarization and replanning as needed.
 4.  The backend returns a JSON response to the frontend, containing the original task, the final plan, and a detailed execution log.
 5.  The React frontend then parses this JSON response and renders it in a user-friendly format.
@@ -41,16 +50,76 @@ This project consists of two main components: a Node.js backend that houses the 
 ## Key Features
 
 *   **LLM-Driven Planning:** Uses Google Gemini to dynamically generate multi-step, multi-stage plans based on user tasks.
+*   **Template-Based Planning for Common Tasks**: For predefined common queries (e.g., simple weather requests, calculations), the system can use plan templates stored in `config/plan_templates/`. This bypasses LLM-based plan generation, leading to faster responses, predictable execution, and reduced LLM usage for recognized intents.
 *   **Tool-Aware Execution:** Gemini determines which tool is appropriate for each step in the plan.
 *   **Multi-Tool Architecture:**
     *   **GeminiStepExecutor:** For general reasoning, text generation, summarization, and executing complex instructions.
     *   **WebSearchTool:** For performing real-time web searches using the Google Custom Search Engine API.
     *   **CalculatorTool:** For evaluating mathematical expressions.
     *   **ReadWebpageTool:** For fetching and extracting textual content from web URLs.
-*   **Staged and Parallel Execution:** Plans are structured into stages. Steps within the same stage can be executed in parallel.
-*   **Contextual Memory & Summarization:** Information from completed steps is carried forward. Long contexts are automatically summarized using Gemini to maintain efficiency.
+*   **Staged and Parallel Execution:** Plans are structured into stages that are executed sequentially. Sub-tasks within the same stage are executed in parallel (using `Promise.all()`), allowing for faster completion of independent tasks within a phase of work. The LLM is responsible for generating plans in this staged format.
+*   **Contextual Memory & Summarization:** Information from completed steps is carried forward. (Note: The "Long contexts are automatically summarized using Gemini to maintain efficiency" part of this point refers to a more general context summarization, not the specific step-result summarization described next).
+*   **Context-Aware Result Summarization**: For tasks generating extensive data from tools, individual step results may be summarized by an LLM before being passed to the final answer synthesis. This helps manage context window limitations and focuses the LLM on the most pertinent information. The full, raw data from each step is still preserved in the saved task state.
 *   **Multi-Stage Replanning:** If a step fails, the agent can attempt a focused "step fix" or a more comprehensive "full replan" using Gemini.
 *   **Modern Web Interface:** A React/Vite/Tailwind/Shadcn/UI frontend for task submission and detailed progress/result viewing, located in the `frontend/` directory.
+
+## Plan Structure
+
+The AI agent now expects and processes plans that are structured into stages to enable parallel execution. The plan generated by the LLM and processed by the OrchestratorAgent must be a JSON array of stages. Each stage is, in turn, a JSON array of sub-task objects.
+
+*   **Stages**: The outer array represents sequential stages. These are executed one after another.
+*   **Sub-tasks**: The inner arrays represent sub-tasks within a specific stage. These sub-tasks are executed in parallel. All sub-tasks in a stage must complete (or at least those not failing, depending on error handling) before the next stage begins.
+
+Example of a two-stage plan:
+```json
+[
+  [
+    { "assigned_agent_role": "ResearchAgent", "tool_name": "WebSearchTool", "sub_task_input": { "query": "weather in Paris" }, "narrative_step": "Search for weather in Paris." },
+    { "assigned_agent_role": "ResearchAgent", "tool_name": "WebSearchTool", "sub_task_input": { "query": "currency exchange rate USD to EUR" }, "narrative_step": "Search for USD to EUR exchange rate." }
+  ],
+  [
+    { "assigned_agent_role": "UtilityAgent", "tool_name": "CalculatorTool", "sub_task_input": { "expression": "100 * 1.1" }, "narrative_step": "Calculate something based on previous results." }
+  ]
+]
+```
+This structure is defined in the planning prompt sent to the LLM.
+
+## Task State Persistence
+
+To facilitate debugging, analysis, and to lay the groundwork for future features like task resumption, the system now persists the state of each processed task.
+
+*   **Storage Location**: Task state files are saved in the `saved_tasks/` directory at the project root. Within `saved_tasks/`, subdirectories are created for each day in the format `tasks_MMDDYYYY` (e.g., `tasks_07042024`).
+*   **File Naming**: Each task state is saved in a JSON file named `task_state_{taskId}.json`, where `{taskId}` is the unique parent task ID generated for the user's request.
+*   **File Content**: The JSON file contains a comprehensive snapshot of the task, including:
+    *   `taskId`: The unique ID of the task.
+    *   `userTaskString`: The original user request.
+    *   `createdAt`, `updatedAt`: Timestamps for task creation and last update.
+    *   `status`: The final status of the task (e.g., "COMPLETED", "FAILED_PLANNING", "FAILED_EXECUTION").
+    *   `plan`: The multi-stage plan generated by the LLM.
+    *   `executionContext`: A detailed array of objects (`ContextEntry`), where each object represents an executed step, its inputs, status, and results or errors.
+    *   `finalAnswer`: The final synthesized answer provided to the user (if any).
+    *   `errorSummary`: A summary of the error if the task failed.
+
+The API (`/api/generate-plan`) now supports a `"SYNTHESIZE_ONLY"` mode that can load these saved task states to re-synthesize answers or analyze previous executions. Full task resumption is a potential future enhancement.
+
+## Known Issues / Limitations (v0.1.0-beta)
+
+This initial beta version has the following known limitations:
+
+*   **Tool Implementations**:
+    *   `WebSearchTool` and `ReadWebpageTool` are currently stubs and do not perform real web searches or content fetching. They require full implementation to be useful.
+    *   `CalculatorTool` is functional for basic mathematical expressions.
+*   **Task State Loading**:
+    *   The `SYNTHESIZE_ONLY` mode's file search logic for `taskIdToLoad` is basic and may be inefficient if many dated directories exist. A more robust lookup mechanism (e.g., an index or requiring more specific path information) is needed.
+*   **Task Execution Flow**:
+    *   No `EXECUTE_PLANNED_TASK` mode: Currently, there's no dedicated mode to execute a plan that was previously generated by `PLAN_ONLY`. The `EXECUTE_FULL_PLAN` mode always re-plans.
+    *   No task resumption: If a task fails midway during `EXECUTE_FULL_PLAN`, it cannot be resumed from the point of failure.
+*   **User Interface**:
+    *   The existing frontend (`frontend/`) is likely designed for the original single-mode operation and does not yet support interacting with the new API modes (`PLAN_ONLY`, `SYNTHESIZE_ONLY`) or visualizing saved task states.
+*   **Error Handling & Retries**:
+    *   Advanced error handling, such as configurable retries for failed sub-tasks or LLM calls, is not yet implemented.
+*   **Context Management**:
+    *   While `ContextEntry` provides structured step-by-step context, very long execution histories might still lead to large contexts for the final synthesis LLM call. Automatic summarization of intermediate `ContextEntry.result_data` is not yet implemented.
 
 ## Technology Stack
 
@@ -109,7 +178,7 @@ GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"
 SEARCH_API_KEY="YOUR_GOOGLE_SEARCH_API_KEY_HERE"
 CSE_ID="YOUR_CSE_ID_HERE"
 ```
-*(Note: The `server.js` is configured to use the `dotenv` package to load these variables. Please ensure `dotenv` is listed in your root `package.json` and installed (`npm install dotenv` in the root directory) for this to work seamlessly. If `dotenv` failed to install via subtasks, you may need to install it manually or set these environment variables directly in your shell.)*
+*(Note: The `index.js` is configured to use the `dotenv` package (which is included in `package.json`) to load these variables. Ensure dependencies are installed via `npm install`.)*
 
 ## Development Workflow: Running the Application
 
@@ -122,12 +191,12 @@ This project has two main parts that need to be run simultaneously for developme
     *   Open your terminal in the **project root directory**.
     *   Start the server:
         ```bash
-        node server.js
+        node index.js
         ```
     *   The backend server will typically start on `http://localhost:3000`.
     *   API endpoints (like `/api/generate-plan`) will be available at this address.
     *   Its root path (`/`) provides a JSON status message. Static assets are also served from the root (which could include a production build of the frontend if placed there).
-    *   Changes to `server.js` require a manual restart unless using a tool like `nodemon`.
+    *   Changes to `index.js` require a manual restart unless using a tool like `nodemon`.
 
 **2. Frontend Development Server (New React UI):**
 
@@ -169,13 +238,38 @@ This project is set up to be understandable and extensible.
 
 ### Making Modifications
 
-*   **Backend Logic:** Core AI agent logic is in `server.js`. Tool definitions are also in this file.
+*   **Backend Logic:**
+    *   Main application setup and orchestration: `index.js`
+    *   Core agent definitions (Orchestrator, Research, Utility): `agents/` directory
+    *   Tool definitions (WebSearchTool, CalculatorTool, etc.): `tools/` directory
+    *   LLM service interaction (e.g., `geminiLLMService`): `services/` directory
+    *   Task and result queues: `core/` directory
+    *   Agent capabilities configuration: `config/agentCapabilities.json` (defines roles and tools for the OrchestratorAgent)
 *   **Frontend UI:** The React UI is in the `frontend/` directory, primarily within `frontend/src/`. Key components include `App.jsx`, `TaskInputForm.jsx`, and `ResultsDisplay.jsx`.
+
+### Plan Templates
+
+To accelerate processing for common or simple tasks and to ensure consistent execution paths, the `OrchestratorAgent` can utilize predefined plan templates.
+
+*   **Location**: Templates are stored as JSON files in the `config/plan_templates/` directory.
+*   **Format**: Each template is a JSON file representing a valid multi-stage plan (an array of stages, where each stage is an array of sub-task objects). Templates can use placeholders in the format `{{PLACEHOLDER_NAME}}` within `sub_task_input` fields or `narrative_step` strings.
+    *   Examples: `weather_query_template.json`, `calculator_template.json`.
+*   **Matching Logic**: The `OrchestratorAgent` (in its `loadPlanTemplates` method) maintains a list of `templateDefinitions`. Each definition includes:
+    *   The template's file name.
+    *   A regular expression (`regex`) to match against the user's task string.
+    *   A `paramMapping` object that maps placeholder names (e.g., `CITY_NAME`) to the capture group indices from the regex.
+*   **Workflow**: When a task is received (in `EXECUTE_FULL_PLAN` or `PLAN_ONLY` mode), the `OrchestratorAgent` first attempts to match the user's task string against these predefined templates using `tryGetPlanFromTemplate`. If a match is found, the corresponding template is populated with parameters extracted by the regex, and this plan is used, bypassing LLM-based plan generation. If no template matches, the system falls back to LLM-based planning.
+*   **Adding New Templates**:
+    1.  Create a new JSON file for your plan in `config/plan_templates/`, using placeholders as needed.
+    2.  In `agents/OrchestratorAgent.js`, update the `templateDefinitions` array within the `loadPlanTemplates` method to include metadata for your new template (its name, file name, regex for matching, and `paramMapping`).
+
 *   **Adding New Tools (Backend):**
-    1.  Define your new tool class in `server.js` with an `async execute(inputObject)` method.
-    2.  Instantiate it in `executePlanLoop`'s `availableTools` map.
-    3.  Add its description to the `tools` array in `generatePlanWithGemini`.
-    4.  Update the tool dispatch logic in `executePlanLoop` for the new tool.
+    1.  Define your new tool class in a new file within the `tools/` directory (e.g., `tools/MyNewTool.js`) with an `async execute(inputObject)` method, and export the class.
+    2.  Import your new tool in `index.js` (e.g., `const MyNewTool = require('./tools/MyNewTool');`).
+    3.  Instantiate it in `index.js` where other tools are initialized (e.g., `const myNewTool = new MyNewTool();`).
+    4.  Pass the new tool instance to the relevant agent(s) via their constructor or a dedicated method, typically by adding it to the `toolsMap` provided to the agent in `index.js`.
+    5.  Update the `config/agentCapabilities.json` file. Add or modify an agent role entry to include the description of the new tool and its association with that role. This configuration is loaded by the OrchestratorAgent to understand available tools and assign them for planning.
+    6.  Ensure the agent that will use the tool (e.g., `ResearchAgent.js`, `UtilityAgent.js`, or a new agent) has logic in its `processTaskMessage` method to handle the `tool_name` and call its `execute` method with the correct `sub_task_input`.
 
 ### Contributing (Basic Guidelines)
 

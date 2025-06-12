@@ -1,0 +1,17 @@
+[
+  {
+    "role": "ResearchAgent",
+    "description": "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs.",
+    "tools": [
+      { "name": "WebSearchTool", "description": "Performs a web search for a given query. Input format: { "query": "search terms" }" },
+      { "name": "ReadWebpageTool", "description": "Fetches and extracts textual content from a given URL. Input format: { "url": "http://example.com" }" }
+    ]
+  },
+  {
+    "role": "UtilityAgent",
+    "description": "Specialized in performing calculations and other specific utility tasks.",
+    "tools": [
+      { "name": "CalculatorTool", "description": "Evaluates mathematical expressions. Input format: { "expression": "2 * (3 + 4)" }" }
+    ]
+  }
+]
