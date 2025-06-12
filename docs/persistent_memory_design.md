@@ -22,7 +22,7 @@ The following key pieces of information should be persisted for each task:
 *   **`executionContext`**: An array detailing each executed step, its inputs, status, and results (both raw and processed/summarized). This is a primary output from `PlanExecutor`.
 *   **`currentWorkingContext`**: A JSON object stored within the main task state file (e.g., `task_state_{taskId}.json`). This object is dynamically updated throughout the task lifecycle and provides a live summary and evolving understanding of the task. Its fields include:
     *   `lastUpdatedAt` (string, ISO8601): Timestamp of the last CWC update.
-    *   `summaryOfProgress` (string): A human-readable summary of the current task progress and agent's understanding. (Initially simple, potentially LLM-updated later).
+    *   `summaryOfProgress` (string): A human-readable summary of the current task progress and agent's understanding. This field is initially set programmatically and can then be refined by an LLM call within `OrchestratorAgent` based on recent findings and errors.
     *   `keyFindings` (array of objects): Important pieces of information extracted from successful tool executions. Each object might contain:
         *   `findingId` (string, UUID): Unique ID for the finding.
         *   `sourceStepNarrative` (string): Narrative of the step that produced the finding.
@@ -31,7 +31,7 @@ The following key pieces of information should be persisted for each task:
         *   `timestamp` (string, ISO8601): When the finding was recorded.
     *   `identifiedEntities` (object): Key-value pairs of entities identified during the task (e.g., names, locations, concepts). (Future use, populated by NLP tools or LLM analysis).
     *   `pendingQuestions` (array of strings): Questions the agent has identified that need answering to fulfill the user's request. (Future use, for more complex reasoning or interactive tasks).
-    *   `nextObjective` (string): The agent's understanding of what it should do next. (Initially simple, potentially LLM-updated later).
+    *   `nextObjective` (string): The agent's understanding of what it should do next. This field is initially set programmatically and can then be refined by an LLM call within `OrchestratorAgent` to suggest a more contextually relevant next step.
     *   `confidenceScore` (number, 0.0-1.0): The agent's current confidence in its ability to meet the user's goal. (Future use).
     *   `errorsEncountered` (array of objects): A list of errors encountered during execution. Each object might contain:
         *   `errorId` (string, UUID): Unique ID for the error instance.
@@ -93,7 +93,7 @@ saved_tasks/
       },
       "currentWorkingContext": {
         "lastUpdatedAt": "ISO8601_datetime_string",
-        "summaryOfProgress": "string",
+        "summaryOfProgress": "string", // Can be updated by LLM
         "keyFindings": [
           {
             "findingId": "string_uuid",
@@ -105,7 +105,7 @@ saved_tasks/
         ],
         "identifiedEntities": {},
         "pendingQuestions": [],
-        "nextObjective": "string",
+        "nextObjective": "string", // Can be updated by LLM
         "confidenceScore": 0.0,
         "errorsEncountered": [
           {
@@ -152,7 +152,8 @@ The `OrchestratorAgent` is primarily responsible for managing the lifecycle of t
     *   `OrchestratorAgent` receives `success`, `executionContext`, `journalEntries` (from executor), and `updatesForWorkingContext` from `PlanExecutor`.
     *   Merge executor's journal entries into `finalJournalEntries`.
     *   Log `EXECUTION_COMPLETED` or `EXECUTION_FAILED` to `finalJournalEntries`.
-    *   Update local `currentWorkingContext` with `keyFindings` and `errorsEncountered` from `updatesForWorkingContext`. Update CWC's `summaryOfProgress`, `nextObjective`, `lastUpdatedAt`. Log CWC update to journal.
+    *   Update local `currentWorkingContext` with `keyFindings` and `errorsEncountered` from `updatesForWorkingContext`. Programmatically set a basic `summaryOfProgress` and `nextObjective`.
+    *   **CWC Refinement by LLM:** `OrchestratorAgent` then makes an LLM call with the current CWC data (recent findings, errors, previous summary/objective) to generate more insightful `summaryOfProgress` and `nextObjective`. The CWC is updated with these LLM-generated values. This is logged in the journal (`CWC_UPDATE_LLM_START`, `CWC_UPDATED_BY_LLM` or `CWC_UPDATE_LLM_ERROR`).
 *   **Final Synthesis Phase:**
     *   Log `FINAL_SYNTHESIS_START` to journal.
     *   Construct synthesis prompt including stringified CWC.
