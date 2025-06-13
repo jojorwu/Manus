@@ -11,33 +11,34 @@ We will define the following initial agent roles:
 *   **`OrchestratorAgent`**
     *   **Primary Functions:**
         *   Acts as the high-level coordinator for user tasks. Receives tasks via the API.
-        *   **Planning Delegation:** Utilizes the `PlanManager` component to generate or retrieve execution plans. `PlanManager` is responsible for:
-            *   Checking for matching pre-defined plan templates.
-            *   If no template matches, constructing a detailed prompt for an LLM (Gemini) based on agent capabilities and the user task (including descriptions of Orchestrator-level tools like `ExploreSearchResults`, `GeminiStepExecutor`, `FileSystemTool` with its operations including `create_pdf_from_text`, and `FileDownloaderTool`).
-            *   Calling the LLM service to generate a multi-stage plan.
-            *   Validating the structure and content of the plan returned by the LLM.
-        *   **Execution Delegation:** Utilizes the `PlanExecutor` component to carry out the steps defined in the generated plan. `PlanExecutor` is responsible for:
+        *   **Planning and Replanning Management:**
+            *   Utilizes the `PlanManager` component to generate initial execution plans and, if necessary, to revise plans after execution failures.
+            *   For initial planning, `PlanManager` is invoked to create a plan based on templates or LLM generation.
+            *   If a plan execution attempt fails, `OrchestratorAgent` initiates a replanning cycle (up to `MAX_REVISIONS` attempts). It calls `PlanManager.getPlan` with `isRevision: true`, providing rich context: the original task, current working context (CWC), the execution context of the failed attempt, details of the failed step (`failedStepDetails` from `PlanExecutor`), and the plan that failed.
+        *   **Execution Cycle Management:**
+            *   Manages an iterative execution loop. For each attempt (initial or revised plan):
+                *   It calls `PlanExecutor.executePlan` with the current plan to be attempted.
+                *   If execution is successful, the loop terminates.
+                *   If execution fails:
+                    *   It retrieves `failedStepDetails` from `PlanExecutor`'s result.
+                    *   If `MAX_REVISIONS` is not reached, it triggers the replanning process described above.
+                    *   If `MAX_REVISIONS` is reached, or if replanning itself fails to produce a new valid plan, the task is marked as definitively failed.
+        *   **Delegation to `PlanExecutor`:** `PlanExecutor` is responsible for the actual step-by-step execution of a given plan, including:
             *   Iterating through plan stages and steps.
-            *   Dispatching tasks intended for worker agents (like `ResearchAgent`, `UtilityAgent`) to the `SubTaskQueue`.
-            *   Awaiting results from worker agents via the `ResultsQueue`.
-            *   Directly handling special Orchestrator-level actions defined in the plan. This includes:
-                *   `ExploreSearchResults`: Using `ReadWebpageTool` internally.
-                *   `GeminiStepExecutor`: For direct LLM calls by the Orchestrator.
-                *   `FileSystemTool`: Instantiating `FileSystemTool` with a task-specific, sandboxed workspace path to perform operations like creating, reading, listing files, and creating PDF documents from text (including support for custom TTF/OTF fonts via the `customFontFileName` parameter, with fallback to default fonts).
-                *   `FileDownloaderTool`: Instantiating `FileDownloaderTool` with a task-specific, sandboxed workspace path to download files from URLs.
-            *   Summarizing data from completed steps (where appropriate) using an LLM.
-            *   Aggregating all execution results into a comprehensive `executionContext`.
-            *   Collecting `keyFindings` and `errorsEncountered` to update a `CurrentWorkingContext`.
-            *   Identifying if a plan step (e.g., a `GeminiStepExecutor` action handled by `PlanExecutor`) was designated to produce the final answer (via an `isFinalAnswer` flag in the step's input) and returning this answer and a flag (`finalAnswerSynthesized`) to the Orchestrator.
-        *   **Final Response Synthesis:** After `PlanExecutor` completes, `OrchestratorAgent` first checks if `PlanExecutor` has already provided a synthesized final answer.
-            *   If `finalAnswerSynthesized` is true, `OrchestratorAgent` uses this answer directly.
-            *   Otherwise, it uses the `executionContext` and the `CurrentWorkingContext` to synthesize a user-facing response, typically using an LLM. This avoids redundant synthesis.
+            *   Dispatching tasks to worker agents or handling Orchestrator-level special actions (`ExploreSearchResults`, `GeminiStepExecutor`, `FileSystemTool`, `FileDownloaderTool`).
+            *   Summarizing step data and collecting `keyFindings` and `errorsEncountered` for the CWC.
+            *   Returning `failedStepDetails` if a step causes the plan execution to fail.
+            *   Potentially returning a pre-synthesized `finalAnswer`.
+        *   **Final Response Synthesis:** After the execution/replanning cycle concludes:
+            *   If a `finalAnswer` was pre-synthesized by `PlanExecutor` during the last successful attempt, `OrchestratorAgent` uses it.
+            *   Otherwise, if the overall task was successful, it synthesizes a final response using the `executionContext` (from the last successful attempt) and the final `CurrentWorkingContext`.
+            *   If the overall task failed, the synthesis process explains the failure.
         *   **State Management & Journaling:**
-            *   Manages the overall task state, including loading and saving task progress, results, and the `CurrentWorkingContext` object (e.g., using `loadTaskState`, `saveTaskState`).
-            *   Orchestrates the collection of a detailed `TaskJournal` by accumulating its own lifecycle events with those generated by `PlanExecutor`. Ensures the complete journal is saved.
-        *   Handles overall error management based on outcomes from `PlanManager` and `PlanExecutor`, updating the `CurrentWorkingContext` and `TaskJournal` accordingly.
-    *   **Tools It Might Use Directly:** LLM (Gemini) for final response synthesis. (Note: Planning and specific step executions involving LLM calls are now delegated to `PlanManager` and `PlanExecutor`).
-    *   **API Key Management:** Configured with its own primary Gemini API key, which is then passed to and utilized by `PlanManager` and `PlanExecutor` for their LLM interactions.
+            *   Manages the overall task state, `CurrentWorkingContext` (updated across all attempts), and the `TaskJournal`.
+            *   The `TaskJournal` now includes entries related to execution attempts, replanning starts/successes/failures, and max revision limits being reached.
+        *   Handles overall error management, reflecting the outcome of the entire execution/replanning cycle.
+    *   **Tools It Might Use Directly:** LLM (Gemini) for final response synthesis and for LLM-based CWC updates.
+    *   **API Key Management:** Configured with its own primary Gemini API key, which is then passed to `PlanManager` and `PlanExecutor`.
 
 *   **`ResearchAgent`**
     *   **Primary Functions:** Specialized in information gathering. Picks up research-related tasks from the `SubTaskQueue`. Executes tasks using its tools and posts results to the `ResultsQueue`.
@@ -83,21 +84,31 @@ A task queue-based system will manage communication and task distribution.
 3.  `OrchestratorAgent` invokes `PlanManager` to obtain an execution plan.
     *   `PlanManager` attempts to use a template or generates a new plan using an LLM (prompt includes FileSystemTool with its operations like `create_pdf_from_text`, & FileDownloaderTool for Orchestrator).
     *   `PlanManager` validates the plan and returns it to `OrchestratorAgent`.
-4.  If a valid plan is obtained, `OrchestratorAgent` invokes `PlanExecutor` with the plan and `savedTasksBaseDir`.
-    *   `PlanExecutor` iterates through stages and steps:
-        *   For tasks assigned to worker agents, `PlanExecutor` enqueues them onto `SubTaskQueue` and awaits results via `ResultsQueue`.
-        *   For special Orchestrator actions (e.g., `ExploreSearchResults`, `FileSystemTool` including `create_pdf_from_text`, `FileDownloaderTool`), `PlanExecutor` handles them directly. For file tools, it constructs a `taskWorkspaceDir` using `savedTasksBaseDir` and `parentTaskId`, then instantiates and uses the tool.
-    *   `PlanExecutor` collects all results, summarizations, `keyFindings`, `errorsEncountered`, detailed journal entries, and potentially a pre-synthesized `finalAnswer` (if a step was marked with `isFinalAnswer: true`) into its return object.
-5.  Worker agents (`ResearchAgent`, `UtilityAgent`) monitor `SubTaskQueue`, dequeue messages matching their role.
-6.  Worker agent executes the sub-task using specified tool and input.
-7.  Worker agent constructs a result message and enqueues it onto `ResultsQueue`.
-8.  `PlanExecutor` receives results from `ResultsQueue` (for worker agent tasks) and combines them with results from directly handled Orchestrator actions. If a sub-task FAILED, `PlanExecutor` may halt execution of subsequent stages and report failure. This is all logged in its portion of the `TaskJournal`.
-9.  Once `PlanExecutor` completes, `OrchestratorAgent` receives the final `executionContext`, `journalEntries` from the executor, `updatesForWorkingContext`, and potentially `finalAnswer` with `finalAnswerSynthesized: true`.
-10. `OrchestratorAgent` updates its own `CurrentWorkingContext` with the information from `updatesForWorkingContext`.
-11. `OrchestratorAgent` checks if `finalAnswerSynthesized` is true.
-    *   If true, it uses the `finalAnswer` received from `PlanExecutor`.
-    *   If false, it uses its LLM to synthesize a final response based on the `executionContext` and the updated `CurrentWorkingContext`.
-12. `OrchestratorAgent` saves the final task state (including `CurrentWorkingContext`) and the complete `TaskJournal` (merged entries from itself and `PlanExecutor`), then returns the response to the API endpoint, then to the user.
+4.  **Execution Cycle Begins:** `OrchestratorAgent` initiates the execution/replanning loop.
+    *   **Attempt Execution:** `OrchestratorAgent` calls `PlanExecutor.executePlan` with the current plan (initially, the one from `PlanManager`).
+        *   `PlanExecutor` iterates through stages/steps:
+            *   Worker agent tasks are dispatched via `SubTaskQueue`.
+            *   Orchestrator-level actions (e.g., `ExploreSearchResults`, `FileSystemTool`, `FileDownloaderTool`) are handled directly by `PlanExecutor`.
+            *   `PlanExecutor` awaits results from worker agents (via `ResultsQueue`) or from its direct actions.
+        *   `PlanExecutor` returns its outcome: `success` (boolean), `executionContext`, `journalEntries`, `updatesForWorkingContext`, `failedStepDetails` (if failed), and potentially `finalAnswer` (if pre-synthesized).
+    *   Worker agents (`ResearchAgent`, `UtilityAgent`) process tasks from `SubTaskQueue` and send results to `ResultsQueue` as before.
+    *   **Outcome Processing by OrchestratorAgent:**
+        *   `OrchestratorAgent` merges `PlanExecutor`'s journal entries and updates its `CurrentWorkingContext` with `keyFindings` and `errorsEncountered`.
+        *   **If execution was successful:** The loop terminates. `OrchestratorAgent` proceeds to final response synthesis.
+        *   **If execution failed:**
+            *   `OrchestratorAgent` checks if `MAX_REVISIONS` has been reached.
+            *   If not, it calls `PlanManager.getPlan` again, this time with `isRevision: true`, providing the CWC, the `executionContext` of the failed attempt, `failedStepDetails`, and the plan that failed.
+                *   If `PlanManager` returns a new valid plan, this new plan becomes the input for the next iteration of the execution loop.
+                *   If `PlanManager` fails to return a new plan, the loop terminates, and the task is marked as failed.
+            *   If `MAX_REVISIONS` was reached, the loop terminates, and the task is marked as failed.
+5.  **Final Response Synthesis (Post-Loop):**
+    *   If the overall execution cycle (including any successful replans) was successful:
+        *   `OrchestratorAgent` checks if `PlanExecutor` returned a pre-synthesized `finalAnswer` from the last successful attempt. If so, it's used.
+        *   Otherwise, `OrchestratorAgent` uses its LLM to synthesize a final response based on the `executionContext` (from the last successful attempt) and the final `CurrentWorkingContext`.
+    *   If the overall execution cycle failed, the synthesis step will typically explain the failure based on the CWC.
+6.  **State Saving:** `OrchestratorAgent` saves the final task state (including the final CWC, the plan that was last attempted, execution context, and overall status) and the complete `TaskJournal` (which now includes entries from all execution and replanning attempts).
+7.  The response is returned to the API endpoint and then to the user.
+
 
 ## 5. Managing Multiple API Keys
 (Content remains the same)
@@ -112,8 +123,8 @@ A task queue-based system will manage communication and task distribution.
     ├── UtilityAgent.js
     └── BaseAgent.js      # (Optional)
     core/
-    ├── PlanManager.js    # Handles plan generation (prompting LLM, template usage) and validation. Instructs LLM on use of 'isFinalAnswer' flag and Orchestrator tools (including FileSystemTool operations like create_pdf_from_text).
-    ├── PlanExecutor.js   # Handles execution of planned steps, including special Orchestrator actions (ExploreSearchResults, GeminiStepExecutor, FileSystemTool, FileDownloaderTool), queue interactions, data summarization, CWC data collection, and identifying pre-synthesized final answers.
+    ├── PlanManager.js    # Handles initial plan generation and plan revision (replanning). Accepts `isRevision` flag and context for revisions. Instructs LLM on 'isFinalAnswer' and Orchestrator tools.
+    ├── PlanExecutor.js   # Handles execution of a given plan. Returns `failedStepDetails` on failure. Collects CWC data, identifies pre-synthesized answers.
     ├── SubTaskQueue.js   # (In-memory initially) for dispatching tasks to worker agents.
     └── ResultsQueue.js # (In-memory initially) for receiving results from worker agents.
     tools/

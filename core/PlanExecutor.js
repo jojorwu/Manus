@@ -197,6 +197,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         let overallSuccess = true;
         let finalAnswerOutput = null;
         let finalAnswerWasSynthesized = false;
+        let failedStepDetails = null; // Initialize failedStepDetails
 
         journalEntries.push(this._createJournalEntry(
             "PLAN_EXECUTION_START",
@@ -404,9 +405,21 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
                 } else if (contextEntry.status === "FAILED") {
                     journalEntries.push(this._createJournalEntry("EXECUTION_STEP_FAILED", `Step failed: ${contextEntry.narrative_step}`, { ...logDetails, errorDetails: contextEntry.error_details }));
-                    if (!firstFailedStepErrorDetails) {
+                    if (!firstFailedStepErrorDetails) { // This is the first failure in the stage that we're processing
                         firstFailedStepErrorDetails = contextEntry.error_details || { message: "Unknown error in failed step." };
-                        if (!firstFailedStepErrorDetails.sub_task_id && contextEntry.sub_task_id) firstFailedStepErrorDetails.sub_task_id = contextEntry.sub_task_id;
+                        // Populate failedStepDetails with comprehensive information
+                        failedStepDetails = {
+                            sub_task_id: contextEntry.sub_task_id,
+                            narrative_step: contextEntry.narrative_step,
+                            tool_name: contextEntry.tool_name,
+                            assigned_agent_role: contextEntry.assigned_agent_role,
+                            sub_task_input: contextEntry.sub_task_input, // Ensure this is a deep copy if sub_task_input can be mutated
+                            error_details: contextEntry.error_details
+                        };
+                        // Ensure sub_task_id is part of firstFailedStepErrorDetails if it was missing before, for compatibility with existing logging
+                        if (!firstFailedStepErrorDetails.sub_task_id && contextEntry.sub_task_id) {
+                            firstFailedStepErrorDetails.sub_task_id = contextEntry.sub_task_id;
+                        }
                     }
                     // Collect Error for CurrentWorkingContext
                     if (contextEntry.error_details) {
@@ -486,7 +499,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 errorsEncountered: collectedErrors
             },
             finalAnswer: finalAnswerOutput,
-            finalAnswerSynthesized: finalAnswerWasSynthesized
+            finalAnswerSynthesized: finalAnswerWasSynthesized,
+            failedStepDetails: failedStepDetails // Add the new field here
         };
     }
 }

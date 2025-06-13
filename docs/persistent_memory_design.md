@@ -41,7 +41,7 @@ The following key pieces of information should be persisted for each task:
         *   `timestamp` (string, ISO8601): When the error was recorded.
 *   **`TaskJournal`**: A detailed, append-only log of all significant events and state changes during the task lifecycle, stored in a separate `task_journal_{parentTaskId}.jsonl` file. Each line is a JSON object representing a journal entry. Entries include:
     *   `timestamp` (string, ISO8601): Time of the event.
-    *   `type` (string): Type of the event (e.g., "TASK_RECEIVED", "PLANNING_STARTED", "EXECUTION_STEP_DISPATCHED", "CWC_UPDATED", "FINAL_SYNTHESIS_FAILED").
+    *   `type` (string): Type of the event (e.g., "TASK_RECEIVED", "PLANNING_STARTED", "EXECUTION_STEP_DISPATCHED", "CWC_UPDATED", "FINAL_SYNTHESIS_FAILED", "EXECUTION_ATTEMPT_START", "EXECUTION_ATTEMPT_SUCCESS", "EXECUTION_ATTEMPT_FAILED", "REPLANNING_STARTED", "REPLANNING_SUCCESS", "REPLANNING_FAILED", "MAX_REVISIONS_REACHED").
     *   `source` (string): Originator of the event (e.g., "OrchestratorAgent", "PlanManager", "PlanExecutor").
     *   `message` (string): Human-readable description of the event.
     *   `details` (object): Any relevant data associated with the event (e.g., step details, error messages, CWC summary).
@@ -146,17 +146,28 @@ The `OrchestratorAgent` is primarily responsible for managing the lifecycle of t
     *   Log `PLANNING_COMPLETED` or `PLANNING_FAILED` to journal.
     *   If planning fails: update CWC with error, save `task_state_{...}.json` (including CWC, status "FAILED_PLANNING"), save `task_journal_{...}.jsonl`, and return.
     *   If `PLAN_ONLY` mode: update CWC, save `task_state_{...}.json` (including CWC, plan, status "PLAN_GENERATED"), log final status to journal, save `task_journal_{...}.jsonl`, and return.
-*   **Execution Phase (interaction with `PlanExecutor`):**
-    *   Log `EXECUTION_STARTED` to journal. Update CWC.
-    *   `PlanExecutor.executePlan()` is called. This method internally generates many journal entries related to stage/step start, dispatch, results, completion, failure, and data summarization. It also collects `keyFindings` and `errorsEncountered`.
-    *   `OrchestratorAgent` receives `success`, `executionContext`, `journalEntries` (from executor), and `updatesForWorkingContext` from `PlanExecutor`.
-    *   Merge executor's journal entries into `finalJournalEntries`.
-    *   Log `EXECUTION_COMPLETED` or `EXECUTION_FAILED` to `finalJournalEntries`.
-    *   Update local `currentWorkingContext` with `keyFindings` and `errorsEncountered` from `updatesForWorkingContext`. Programmatically set a basic `summaryOfProgress` and `nextObjective`.
-    *   **CWC Refinement by LLM:** `OrchestratorAgent` then makes an LLM call with the current CWC data (recent findings, errors, previous summary/objective) to generate more insightful `summaryOfProgress` and `nextObjective`. The CWC is updated with these LLM-generated values. This is logged in the journal (`CWC_UPDATE_LLM_START`, `CWC_UPDATED_BY_LLM` or `CWC_UPDATE_LLM_ERROR`).
+*   **Execution & Replanning Cycle (interaction with `PlanExecutor` and `PlanManager`):**
+    *   Log `EXECUTION_CYCLE_STARTED` to journal.
+    *   A loop begins for execution attempts (up to `MAX_REVISIONS` + 1 total attempts).
+        *   Log `EXECUTION_ATTEMPT_START` or `REPLANNING_EXECUTION_ATTEMPT_START`. Update CWC.
+        *   `PlanExecutor.executePlan()` is called. It internally generates journal entries for its operations and collects `keyFindings` and `errorsEncountered`.
+        *   `OrchestratorAgent` merges executor's journal entries. It updates its main CWC with `keyFindings` and `errorsEncountered` from this attempt.
+        *   **If execution is successful:**
+            *   Log `EXECUTION_ATTEMPT_SUCCESS`. Update CWC. The loop breaks.
+        *   **If execution fails:**
+            *   Log `EXECUTION_ATTEMPT_FAILED` (with `failedStepDetails`). Update CWC.
+            *   If `MAX_REVISIONS` reached: Log `MAX_REVISIONS_REACHED`. Loop breaks. Task fails.
+            *   Else (attempt replanning):
+                *   Log `REPLANNING_STARTED`. Update CWC.
+                *   `PlanManager.getPlan()` is called with `isRevision: true` and full context (CWC, failed execution context, failed step details, old plan).
+                *   If replanning successful: Log `REPLANNING_SUCCESS`. Update CWC. New plan is used for the next iteration.
+                *   If replanning fails: Log `REPLANNING_FAILED`. Update CWC. Loop breaks. Task fails.
+    *   After the loop, log overall cycle outcome (`EXECUTION_CYCLE_COMPLETED_SUCCESS` or `_FAILURE`).
+    *   The CWC (now containing accumulated findings/errors from all attempts and reflecting the final attempt's outcome) is then potentially refined by an LLM call as before (`CWC_UPDATE_LLM_START`, etc.).
 *   **Final Synthesis Phase:**
+    *   This phase uses the `overallSuccess` status from the execution/replanning cycle and the `lastExecutionContext` / `lastExecutionResult`.
     *   Log `FINAL_SYNTHESIS_START` to journal.
-    *   Construct synthesis prompt including stringified CWC.
+    *   Construct synthesis prompt including the final stringified CWC (which reflects the iterative process).
     *   Call LLM service.
     *   Log `FINAL_SYNTHESIS_SUCCESS`, `_FAILED`, or `_SKIPPED` to journal. Update CWC.
 *   **Final Save (end of `handleUserTask` or in `catch` block):**

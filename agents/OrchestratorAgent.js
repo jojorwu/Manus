@@ -154,34 +154,137 @@ class OrchestratorAgent {
             return { success: true, message: "Plan generated and saved.", taskId: parentTaskId, originalTask: currentOriginalTask, plan: planStages, currentWorkingContext };
         }
 
-        let overallSuccess = false; // Initialize overallSuccess for execution modes
-        let executionContext = [];  // Initialize executionContext for execution modes
+        let overallSuccess = false;
+        let executionContext = [];
+        // executionResult is already initialized earlier
 
         if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") {
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("EXECUTION_STARTED", "Starting plan execution.", { parentTaskId }));
-            currentWorkingContext.summaryOfProgress = "Plan execution started.";
-            currentWorkingContext.nextObjective = "Monitor execution and then synthesize answer.";
-            currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED", "CWC updated before execution.", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("EXECUTION_CYCLE_STARTED", "Starting plan execution/replanning cycle.", { parentTaskId }));
 
-            executionResult = await this.planExecutor.executePlan(planStages, parentTaskId, currentOriginalTask);
-            finalJournalEntries = finalJournalEntries.concat(executionResult.journalEntries || []);
-            overallSuccess = executionResult.success;
-            executionContext = executionResult.executionContext;
+            let revisionAttempts = 0;
+            const MAX_REVISIONS = 2; // Max 2 replanning attempts (total 3 execution attempts)
+            let planForNextAttempt = planStages;
+            let overallTaskSuccessFlag = false;
+            let lastExecutionContext = [];
+            let lastExecutionResult = executionResult; // Use the initially defined executionResult
 
-            finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "EXECUTION_COMPLETED" : "EXECUTION_FAILED", `Plan execution finished. Success: ${overallSuccess}`, { parentTaskId, overallSuccess }));
+            const knownAgentRoles = (this.workerAgentCapabilities || []).map(agent => agent.role);
+            const knownToolsByRole = {};
+            (this.workerAgentCapabilities || []).forEach(agent => { knownToolsByRole[agent.role] = agent.tools.map(t => t.name); });
 
-            currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-            if (executionResult.updatesForWorkingContext) {
-                currentWorkingContext.keyFindings.push(...(executionResult.updatesForWorkingContext.keyFindings || []));
-                currentWorkingContext.errorsEncountered.push(...(executionResult.updatesForWorkingContext.errorsEncountered || []));
+            for (let currentAttempt = 0; currentAttempt <= MAX_REVISIONS; currentAttempt++) {
+                const attemptType = currentAttempt === 0 ? "EXECUTION_ATTEMPT_START" : "REPLANNING_EXECUTION_ATTEMPT_START";
+                const attemptMessage = currentAttempt === 0 ?
+                    `Starting initial execution attempt for plan. Attempt ${currentAttempt + 1}/${MAX_REVISIONS + 1}` :
+                    `Starting replanned execution attempt. Attempt ${currentAttempt + 1}/${MAX_REVISIONS + 1}`;
+
+                finalJournalEntries.push(this._createOrchestratorJournalEntry(attemptType, attemptMessage, { parentTaskId, attemptNumber: currentAttempt + 1, totalAttemptsAllowed: MAX_REVISIONS + 1 }));
+
+                currentWorkingContext.summaryOfProgress = `${attemptMessage}. Current objective: ${currentWorkingContext.nextObjective || 'Execute plan and achieve task.'}`;
+                currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_PRE_ATTEMPT", currentWorkingContext.summaryOfProgress, { parentTaskId }));
+
+                let currentExecutionResult = await this.planExecutor.executePlan(planForNextAttempt, parentTaskId, currentOriginalTask);
+
+                if (currentExecutionResult.journalEntries && currentExecutionResult.journalEntries.length > 0) {
+                    finalJournalEntries = finalJournalEntries.concat(currentExecutionResult.journalEntries);
+                }
+
+                // Update CWC with findings and errors from this attempt
+                currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+                if (currentExecutionResult.updatesForWorkingContext) {
+                    currentWorkingContext.keyFindings.push(...(currentExecutionResult.updatesForWorkingContext.keyFindings || []));
+                    currentWorkingContext.errorsEncountered.push(...(currentExecutionResult.updatesForWorkingContext.errorsEncountered || []));
+                }
+                // Always store the latest execution context and result
+                lastExecutionContext = currentExecutionResult.executionContext || [];
+                lastExecutionResult = currentExecutionResult;
+
+                if (currentExecutionResult.success) {
+                    overallTaskSuccessFlag = true;
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("EXECUTION_ATTEMPT_SUCCESS", `Execution attempt ${currentAttempt + 1} succeeded.`, { parentTaskId, attemptNumber: currentAttempt + 1 }));
+                    currentWorkingContext.summaryOfProgress = `Execution attempt ${currentAttempt + 1} succeeded. ${currentWorkingContext.keyFindings.length} findings, ${currentWorkingContext.errorsEncountered.length} errors (from all attempts).`;
+                    currentWorkingContext.nextObjective = "Proceed to final answer synthesis or task completion.";
+                    break; // Exit replanning loop
+                } else {
+                    // Execution attempt failed
+                    const failureDetails = currentExecutionResult.failedStepDetails ?
+                        { narrative: currentExecutionResult.failedStepDetails.narrative_step, tool: currentExecutionResult.failedStepDetails.tool_name, error: currentExecutionResult.failedStepDetails.error_details } :
+                        { error: "Unknown failure details" };
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("EXECUTION_ATTEMPT_FAILED", `Execution attempt ${currentAttempt + 1} failed.`, { parentTaskId, attemptNumber: currentAttempt + 1, failureDetails }));
+                    currentWorkingContext.summaryOfProgress = `Execution attempt ${currentAttempt + 1} failed. Error during step: '${failureDetails.narrative || 'unknown step'}'. Details: ${JSON.stringify(failureDetails.error).substring(0,100)}...`;
+
+                    if (currentAttempt >= MAX_REVISIONS) {
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("MAX_REVISIONS_REACHED", "Maximum replanning attempts reached. Task failed.", { parentTaskId }));
+                        overallTaskSuccessFlag = false;
+                        break; // Exit loop, task has definitively failed
+                    } else {
+                        // Try to replan
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_STARTED", `Attempting replanning. Revision ${currentAttempt + 1}.`, { parentTaskId, revisionAttempt: currentAttempt + 1 }));
+                        currentWorkingContext.nextObjective = `Replanning attempt ${currentAttempt + 1} due to execution failure.`;
+                        currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+
+                        // Ensure failedStepDetails is structured as PlanManager expects
+                        const structuredFailedStepInfo = currentExecutionResult.failedStepDetails ? {
+                            narrative_step: currentExecutionResult.failedStepDetails.narrative_step,
+                            assigned_agent_role: currentExecutionResult.failedStepDetails.assigned_agent_role,
+                            tool_name: currentExecutionResult.failedStepDetails.tool_name,
+                            sub_task_input: currentExecutionResult.failedStepDetails.sub_task_input,
+                            errorMessage: currentExecutionResult.failedStepDetails.error_details ? (currentExecutionResult.failedStepDetails.error_details.message || JSON.stringify(currentExecutionResult.failedStepDetails.error_details)) : "No error details provided"
+                        } : null;
+
+                        const newPlanResult = await this.planManager.getPlan(
+                            currentOriginalTask,
+                            knownAgentRoles,
+                            knownToolsByRole,
+                            currentWorkingContext,
+                            lastExecutionContext, // context from the failed attempt
+                            structuredFailedStepInfo, // details of the failed step
+                            planForNextAttempt, // the plan that just failed (useful for LLM to see what it tried)
+                            true, // isRevision
+                            currentAttempt + 1 // revisionAttemptNumber
+                        );
+
+                        if (newPlanResult.success && newPlanResult.plan && newPlanResult.plan.length > 0) {
+                            planForNextAttempt = newPlanResult.plan;
+                            planStages = newPlanResult.plan; // Update planStages for saving state later
+                            finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_SUCCESS", `Replanning successful. New plan generated by ${newPlanResult.source}.`, { parentTaskId, source: newPlanResult.source, newPlanStageCount: planForNextAttempt.length }));
+                            currentWorkingContext.summaryOfProgress = `Replanning attempt ${currentAttempt + 1} successful. New plan generated. Previous errors: ${currentWorkingContext.errorsEncountered.length}.`;
+                            currentWorkingContext.nextObjective = "Execute the revised plan.";
+                            // Loop continues to next attempt with the new plan
+                        } else {
+                            finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_FAILED", `Replanning failed: ${newPlanResult.message || 'No new plan could be generated.'}`, { parentTaskId, reason: newPlanResult.message, rawResponse: newPlanResult.rawResponse }));
+                            currentWorkingContext.summaryOfProgress = `Replanning attempt ${currentAttempt + 1} failed. ${newPlanResult.message || 'No new plan could be generated.'}`;
+                            overallTaskSuccessFlag = false;
+                            break; // Exit loop, task has definitively failed as replanning also failed
+                        }
+                    }
+                }
             }
-            currentWorkingContext.summaryOfProgress = `Execution completed. Success: ${overallSuccess}. ${currentWorkingContext.keyFindings.length} findings, ${currentWorkingContext.errorsEncountered.length} errors.`;
-            currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Review errors and potentially replan.";
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_AFTER_EXECUTION", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
+            // After the loop, set overallSuccess and executionContext based on the loop's outcome
+            overallSuccess = overallTaskSuccessFlag;
+            executionContext = lastExecutionContext;
+            executionResult = lastExecutionResult; // executionResult now holds the outcome of the last attempt
+
+            finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "EXECUTION_CYCLE_COMPLETED_SUCCESS" : "EXECUTION_CYCLE_COMPLETED_FAILURE", `Execution/replanning cycle finished. Overall Success: ${overallSuccess}`, { parentTaskId, overallSuccess }));
+
+            // CWC summary has been updated within the loop.
+            // The next CWC update (LLM-based) will use the latest state of currentWorkingContext.
+            // Errors and findings have also been accumulated in currentWorkingContext.
+            currentWorkingContext.lastUpdatedAt = new Date().toISOString();
+            if (lastExecutionResult.updatesForWorkingContext) {
+                // This check is mostly redundant as CWC is updated within the loop directly
+                // but ensures no data loss if lastExecutionResult had some pending updates not caught by direct CWC mutation.
+                // However, the primary CWC update mechanism is now within the loop.
+                // Key findings and errors are already part of currentWorkingContext.
+            }
+            // Final CWC summary reflects the outcome of the execution cycle.
+            currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Task failed after execution/replanning attempts.";
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_POST_EXECUTION_CYCLE", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
 
             // --- LLM-based CWC Update ---
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective.", { parentTaskId }));
+            // This section will now use the CWC that has been updated throughout the execution/replanning loop.
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective post-execution cycle.", { parentTaskId }));
             const MAX_FINDINGS_FOR_CWC_PROMPT = 5;
             const MAX_ERRORS_FOR_CWC_PROMPT = 3;
 
@@ -224,13 +327,13 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
         let finalAnswer = null;
         let responseMessage = "";
 
-        // Retrieve pre-synthesized answer if available
-        const preSynthesizedFinalAnswer = executionResult.finalAnswer;
-        const wasFinalAnswerPreSynthesized = executionResult.finalAnswerSynthesized;
+        // Retrieve pre-synthesized answer if available using lastExecutionResult
+        const preSynthesizedFinalAnswer = lastExecutionResult.finalAnswer;
+        const wasFinalAnswerPreSynthesized = lastExecutionResult.finalAnswerSynthesized;
 
         if (wasFinalAnswerPreSynthesized) {
             finalAnswer = preSynthesizedFinalAnswer;
-            responseMessage = "Task completed. Final answer was generated during plan execution.";
+            responseMessage = "Task completed. Final answer was generated during plan execution (possibly in the last successful attempt).";
             finalJournalEntries.push(this._createOrchestratorJournalEntry(
                 "FINAL_SYNTHESIS_SKIPPED",
                 "Final answer was pre-synthesized by PlanExecutor.",
@@ -242,14 +345,14 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
                currentWorkingContext.nextObjective = "Task finished.";
                currentWorkingContext.lastUpdatedAt = new Date().toISOString();
             }
-        } else if (overallSuccess && executionContext && executionContext.length > 0) {
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_START", "Starting final synthesis of answer.", { parentTaskId }));
-            const contextForLLMSynthesis = executionContext.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.processed_result_data, error_info: entry.error_details }));
+        } else if (overallSuccess && lastExecutionContext && lastExecutionContext.length > 0) { // Use lastExecutionContext
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_START", "Starting final synthesis of answer using results from the last successful execution attempt.", { parentTaskId }));
+            const contextForLLMSynthesis = lastExecutionContext.map(entry => ({ step_narrative: entry.narrative_step, tool_used: entry.tool_name, input_details: entry.sub_task_input, status: entry.status, outcome_data: entry.processed_result_data, error_info: entry.error_details }));
             const synthesisContextString = JSON.stringify(contextForLLMSynthesis, null, 2);
 
             if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && (e.outcome_data === null || e.outcome_data === undefined)))) {
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED", "Skipping final synthesis, no actionable data.", { parentTaskId }));
-                responseMessage = "Execution completed, but no specific data was gathered to form a final answer.";
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED", "Skipping final synthesis, no actionable data from the successful execution.", { parentTaskId }));
+                responseMessage = "Execution completed, but no specific data was gathered from the final successful attempt to form an answer.";
                 finalAnswer = "No specific information was generated from the execution to form a final answer.";
             } else {
                 const synthesisPrompt = `The original user task was: "${currentOriginalTask}".
@@ -307,14 +410,33 @@ Based on the original user task, execution history, and current working context,
             plan: planStages,
             executionContext: executionContext,
             finalAnswer: finalAnswer,
-            errorSummary: overallSuccess ? null : { reason: responseMessage, ...(executionResult && executionResult.updatesForWorkingContext && executionResult.updatesForWorkingContext.errorsEncountered && executionResult.updatesForWorkingContext.errorsEncountered.length > 0 ? { lastKnownError: executionResult.updatesForWorkingContext.errorsEncountered[executionResult.updatesForWorkingContext.errorsEncountered.length -1] } : {} ) },
+            errorSummary: overallSuccess ? null : {
+                reason: responseMessage,
+                ...(lastExecutionResult && lastExecutionResult.failedStepDetails ? {
+                    failedStep: {
+                        narrative: lastExecutionResult.failedStepDetails.narrative_step,
+                        tool: lastExecutionResult.failedStepDetails.tool_name,
+                        error: lastExecutionResult.failedStepDetails.error_details
+                    }
+                } : (lastExecutionResult && lastExecutionResult.updatesForWorkingContext && lastExecutionResult.updatesForWorkingContext.errorsEncountered && lastExecutionResult.updatesForWorkingContext.errorsEncountered.length > 0 ? { lastKnownError: lastExecutionResult.updatesForWorkingContext.errorsEncountered[lastExecutionResult.updatesForWorkingContext.errorsEncountered.length -1] } : { detail: "No specific error details captured in final result." }) )
+            },
             currentWorkingContext
         };
-        if (planResult && planResult.source === 'template') {
-            taskStateToSave.plan_source = 'template';
-        } else if (planResult) {
-            taskStateToSave.plan_source = 'LLM';
-            taskStateToSave.raw_llm_response = planResult.rawResponse;
+        // planResult might be from the initial planning, or from the last successful replan.
+        // For simplicity, we'll save the plan that was last attempted or successfully executed.
+        // If replanning occurred, planStages would have been updated.
+        if (planResult && planResult.source) { // planResult is from initial planning
+             if (planStages === planResult.plan) { // Check if initial plan was used
+                taskStateToSave.plan_source = planResult.source;
+                if (planResult.source !== 'template') {
+                    taskStateToSave.raw_llm_response_initial_plan = planResult.rawResponse;
+                }
+            } else { // A different plan (likely revised) was used
+                 taskStateToSave.plan_source = 'llm_revised'; // Or track more specifically if newPlanResult is stored
+            }
+        } else if (executionMode === "EXECUTE_PLANNED_TASK" && loadedState) {
+            taskStateToSave.plan_source = loadedState.plan_source || "loaded_from_previous_task";
+            if (loadedState.raw_llm_response) taskStateToSave.raw_llm_response_initial_plan = loadedState.raw_llm_response;
         }
 
         // Ensure final CWC update before saving state

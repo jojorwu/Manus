@@ -201,17 +201,30 @@ class PlanManager {
         }
     }
 
-    async getPlan(userTaskString, knownAgentRoles, knownToolsByRole) {
-        const templatePlan = await this.tryGetPlanFromTemplate(userTaskString);
-        if (templatePlan) {
-            if (Array.isArray(templatePlan) && templatePlan.every(stage => Array.isArray(stage))) {
-                return { success: true, plan: templatePlan, source: "template", rawResponse: null };
-            } else {
-                console.error("PlanManager: Template plan is not in the expected format (array of stages). Falling back to LLM.");
+    async getPlan(
+        userTaskString,
+        knownAgentRoles,
+        knownToolsByRole,
+        currentCWC = null,
+        executionContextSoFar = null,
+        failedStepInfo = null,
+        remainingPlanStages = null,
+        isRevision = false,
+        revisionAttemptNumber = 0
+    ) {
+        if (!isRevision) {
+            const templatePlan = await this.tryGetPlanFromTemplate(userTaskString);
+            if (templatePlan) {
+                if (Array.isArray(templatePlan) && templatePlan.every(stage => Array.isArray(stage))) {
+                    return { success: true, plan: templatePlan, source: "template", rawResponse: null };
+                } else {
+                    console.error("PlanManager: Template plan is not in the expected format (array of stages). Falling back to LLM.");
+                }
             }
+            console.log("PlanManager: No valid matching template found or template was invalid, proceeding with LLM-based planning for initial plan.");
+        } else {
+            console.log(`PlanManager: Proceeding with LLM-based replanning. Attempt: ${revisionAttemptNumber}`);
         }
-
-        console.log("PlanManager: No valid matching template found or template was invalid, proceeding with LLM-based planning.");
 
         let formattedAgentCapabilitiesString = "";
         if (!this.agentCapabilities || this.agentCapabilities.length === 0) {
@@ -228,11 +241,7 @@ class PlanManager {
             formattedAgentCapabilitiesString += "---\n";
         });
 
-        const planningPrompt = `User task: '${userTaskString}'.
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
+        const orchestratorSpecialActionsDescription = `
 Orchestrator Special Actions:
  - ExploreSearchResults: This is a special action for the Orchestrator. It should be used AFTER a WebSearchTool step to gather more detailed information from the search results.
    Input ('sub_task_input'):
@@ -268,7 +277,9 @@ Orchestrator Special Actions:
    Output: Success message with path to downloaded file or error.
    When to use: When a task requires fetching a file from an external URL for later processing or reference. Downloads are subject to size limits.
 ---
-(End of available agents list and special actions)
+(End of available agents list and special actions)`;
+
+        const planFormatInstructions = `
 Based on the user task and available capabilities, create a multi-stage execution plan.
 The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
 Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
@@ -318,20 +329,80 @@ Example of a plan using FileSystemTool (including create_pdf_from_text):
 \`\`\`
 Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
+        let planningPrompt;
+        let sourcePrefix = isRevision ? "llm_revision" : "llm";
+
+        if (isRevision) {
+            let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`;
+            revisionContext += `Original User Task: '${userTaskString}'\n\n`;
+
+            if (currentCWC) {
+                revisionContext += "Current Working Context (CWC) Summary:\n";
+                revisionContext += `Overall Progress: ${currentCWC.summaryOfProgress || 'Not available.'}\n`;
+                if (currentCWC.keyFindings && currentCWC.keyFindings.length > 0) {
+                    revisionContext += `Recent Key Findings (last 3-5):\n${JSON.stringify(currentCWC.keyFindings.slice(-5), null, 2)}\n`;
+                }
+                if (currentCWC.errorsEncountered && currentCWC.errorsEncountered.length > 0) {
+                    revisionContext += `Recent Errors Encountered (last 3):\n${JSON.stringify(currentCWC.errorsEncountered.slice(-3), null, 2)}\n`;
+                }
+                revisionContext += "---\n";
+            }
+
+            if (failedStepInfo) {
+                revisionContext += "Information about the failed step:\n";
+                revisionContext += `Narrative: ${failedStepInfo.narrative_step || 'N/A'}\n`;
+                revisionContext += `Agent Role: ${failedStepInfo.assigned_agent_role || 'N/A'}\n`;
+                revisionContext += `Tool: ${failedStepInfo.tool_name || 'N/A'}\n`;
+                revisionContext += `Input: ${JSON.stringify(failedStepInfo.sub_task_input, null, 2)}\n`;
+                revisionContext += `Error Message: ${failedStepInfo.errorMessage || 'N/A'}\n`;
+                revisionContext += "---\n";
+            }
+
+            if (remainingPlanStages && remainingPlanStages.length > 0) {
+                try {
+                    const remainingPlanString = JSON.stringify(remainingPlanStages, null, 2);
+                    if (remainingPlanString.length < 2000) { // Avoid overly long prompts
+                        revisionContext += `Remaining plan stages from previous attempt:\n${remainingPlanString}\n---\n`;
+                    }
+                } catch (e) { console.warn("PlanManager: Could not stringify remainingPlanStages for revision prompt."); }
+            }
+
+            if (executionContextSoFar && executionContextSoFar.length > 0) {
+                try {
+                    const recentContextString = JSON.stringify(executionContextSoFar.slice(-3), null, 2); // Last 3-5 entries
+                    revisionContext += `Recent execution context (last 3-5 steps/results):\n${recentContextString}\n---\n`;
+                } catch (e) { console.warn("PlanManager: Could not stringify executionContextSoFar for revision prompt."); }
+            }
+
+            revisionContext += "Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using GeminiStepExecutor with isFinalAnswer: true.";
+
+            planningPrompt = `${revisionContext}\n\nAvailable agent capabilities:\n---\n${formattedAgentCapabilitiesString}\n---\n${orchestratorSpecialActionsDescription}\n---\n${planFormatInstructions}`;
+
+        } else {
+            planningPrompt = `User task: '${userTaskString}'.
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}`;
+        }
+
         let planJsonString;
         try {
             planJsonString = await this.llmService(planningPrompt);
         } catch (llmError) {
-            console.error("PlanManager: Error from LLM service during planning:", llmError.message);
-            return { success: false, message: `Failed to generate plan due to LLM service error: ${llmError.message}`, source: "llm_service_error", rawResponse: null };
+            console.error(`PlanManager: Error from LLM service during ${sourcePrefix} planning:`, llmError.message);
+            return { success: false, message: `Failed to generate plan due to LLM service error: ${llmError.message}`, source: `${sourcePrefix}_service_error`, rawResponse: null };
         }
 
         const validationResult = await this.parseAndValidatePlan(planJsonString, knownAgentRoles, knownToolsByRole);
         if (!validationResult.success) {
-            return { success: false, message: validationResult.message, source: "llm_validation_error", rawResponse: validationResult.rawResponse };
+            return { success: false, message: validationResult.message, source: `${sourcePrefix}_validation_error`, rawResponse: validationResult.rawResponse };
         }
 
-        return { success: true, plan: validationResult.stages, source: "llm", rawResponse: validationResult.rawResponse };
+        return { success: true, plan: validationResult.stages, source: sourcePrefix, rawResponse: validationResult.rawResponse };
     }
 }
 
