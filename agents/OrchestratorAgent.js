@@ -32,7 +32,8 @@ class OrchestratorAgent {
         this.subTaskQueue,
         this.resultsQueue,
         this.llmService,
-        { /* Tools can be passed here if PlanExecutor needs them directly */ }
+            { /* Tools can be passed here if PlanExecutor needs them directly */ },
+            path.join(__dirname, '..', 'saved_tasks') // Pass baseSavedTasksPath
     );
   }
 

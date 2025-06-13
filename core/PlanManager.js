@@ -110,25 +110,51 @@ class PlanManager {
                         if (!allowedOrchestratorTools.includes(subTask.tool_name)) {
                             return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role. Allowed tools are: ${allowedOrchestratorTools.join(", ")}.`, rawResponse: cleanedString, stages: [] };
                         }
-                        // Basic validation for operation and params
-                        if (!subTask.sub_task_input || typeof subTask.sub_task_input.operation !== 'string') {
-                            if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") { // ExploreSearchResults and GeminiStepExecutor might not always have 'operation'
+
+                        if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
+                            if (!subTask.sub_task_input || typeof subTask.sub_task_input.operation !== 'string') {
                                 return { success: false, message: `'operation' is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
                             }
-                        }
-                        if (!subTask.sub_task_input || typeof subTask.sub_task_input.params !== 'object') {
-                             if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
+                            if (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params !== 'object') {
                                 return { success: false, message: `'params' object is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
                             }
                         }
-                        // Further specific param validation can be added here if needed
+
                         if (subTask.tool_name === "FileSystemTool") {
-                            const fsOps = ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file"];
+                            const fsOps = ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file", "create_pdf_from_text"];
                             if (!fsOps.includes(subTask.sub_task_input.operation)) {
-                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileSystemTool.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileSystemTool. Allowed: ${fsOps.join(", ")}`, rawResponse: cleanedString, stages: [] };
                             }
-                            if ((subTask.sub_task_input.operation === "create_file" || subTask.sub_task_input.operation === "read_file" || subTask.sub_task_input.operation === "append_to_file" || subTask.sub_task_input.operation === "overwrite_file") && (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.filename !== 'string')) {
-                                return { success: false, message: `'params.filename' is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                            if ((subTask.sub_task_input.operation === "create_file" ||
+                                 subTask.sub_task_input.operation === "read_file" ||
+                                 subTask.sub_task_input.operation === "append_to_file" ||
+                                 subTask.sub_task_input.operation === "overwrite_file" ||
+                                 subTask.sub_task_input.operation === "create_pdf_from_text") &&
+                                (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.filename !== 'string')) {
+                                return { success: false, message: `'params.filename' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                            }
+                            if (subTask.sub_task_input.operation === "create_pdf_from_text") {
+                                if (!subTask.sub_task_input.params.filename.toLowerCase().endsWith('.pdf')) {
+                                    return { success: false, message: `'params.filename' for 'create_pdf_from_text' must end with '.pdf'.`, rawResponse: cleanedString, stages: [] };
+                                }
+                                if (typeof subTask.sub_task_input.params.text_content !== 'string') {
+                                    return { success: false, message: `'params.text_content' (string) is required for 'create_pdf_from_text'.`, rawResponse: cleanedString, stages: [] };
+                                }
+                                if (subTask.sub_task_input.params.fontSize !== undefined && typeof subTask.sub_task_input.params.fontSize !== 'number') {
+                                    return { success: false, message: `'params.fontSize' for 'create_pdf_from_text' must be a number if provided.`, rawResponse: cleanedString, stages: [] };
+                                }
+                                if (subTask.sub_task_input.params.fontName !== undefined && typeof subTask.sub_task_input.params.fontName !== 'string') {
+                                    return { success: false, message: `'params.fontName' for 'create_pdf_from_text' must be a string if provided.`, rawResponse: cleanedString, stages: [] };
+                                }
+                            }
+                            if ((subTask.sub_task_input.operation === "create_file" ||
+                                 subTask.sub_task_input.operation === "append_to_file" ||
+                                 subTask.sub_task_input.operation === "overwrite_file") &&
+                                (typeof subTask.sub_task_input.params.content !== 'string')
+                               ) {
+                                 if (subTask.sub_task_input.operation !== "append_to_file" || subTask.sub_task_input.params.content === undefined) { // append allows empty content in tool, but create/overwrite need it
+                                     return { success: false, message: `'params.content' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                                 }
                             }
                         }
                         if (subTask.tool_name === "FileDownloaderTool") {
@@ -168,15 +194,10 @@ class PlanManager {
     async getPlan(userTaskString, knownAgentRoles, knownToolsByRole) {
         const templatePlan = await this.tryGetPlanFromTemplate(userTaskString);
         if (templatePlan) {
-            // Basic validation for template plan structure
             if (Array.isArray(templatePlan) && templatePlan.every(stage => Array.isArray(stage))) {
-                // Further validation could be done here using parseAndValidatePlan if necessary,
-                // but templates are assumed to be pre-validated to some extent.
-                // For now, we'll assume valid structure if it's an array of arrays.
                 return { success: true, plan: templatePlan, source: "template", rawResponse: null };
             } else {
                 console.error("PlanManager: Template plan is not in the expected format (array of stages). Falling back to LLM.");
-                // Fall through to LLM planning
             }
         }
 
@@ -197,7 +218,6 @@ class PlanManager {
             formattedAgentCapabilitiesString += "---\n";
         });
 
-        // The planningPrompt from OrchestratorAgent, now within PlanManager
         const planningPrompt = `User task: '${userTaskString}'.
 Available agent capabilities:
 ---
@@ -221,13 +241,14 @@ Orchestrator Special Actions:
    When to use: For general LLM-based tasks, summarizations, or when a step requires complex text generation based on context or previous step outputs, especially if it's meant to be the final user-facing response.
  - FileSystemTool: Allows Orchestrator to perform file system operations within a sandboxed task-specific workspace.
    Input ('sub_task_input'):
-     - 'operation': (String) One of ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file"].
+     - 'operation': (String) One of ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file", "create_pdf_from_text"].
      - 'params': (Object) Parameters for the operation:
        - create_file: { "filename": "string", "content": "string", "directory"?: "string" (optional subdirectory) }
        - read_file: { "filename": "string", "directory"?: "string" }
        - append_to_file: { "filename": "string", "content": "string", "directory"?: "string" } (content must be non-empty)
        - list_files: { "directory"?: "string" } (lists contents of this subdirectory within the workspace, or root if empty)
        - overwrite_file: (alias for create_file) { "filename": "string", "content": "string", "directory"?: "string" }
+       - create_pdf_from_text: { "filename": "string_ending_with.pdf", "text_content": "string", "directory"?: "string", "fontSize"?: number, "fontName"?: "string" }
    Output: Varies by operation (e.g., success message, file content, list of files/dirs).
    When to use: For tasks requiring intermediate data storage, reading specific files, or organizing outputs within a dedicated workspace for the current task. All paths are relative to the task's workspace root.
  - FileDownloaderTool: Allows Orchestrator to download files from a URL into the task-specific workspace.
@@ -251,29 +272,23 @@ For the 'ExploreSearchResults' action, set 'assigned_agent_role' to "Orchestrato
 For the 'GeminiStepExecutor' action by 'Orchestrator', if it's producing the final user answer, include 'isFinalAnswer: true' in 'sub_task_input'.
 For 'FileSystemTool' and 'FileDownloaderTool' actions by 'Orchestrator', ensure 'sub_task_input' contains 'operation' and the correct 'params' for that operation.
 
-Example of a plan using FileSystemTool and FileDownloaderTool:
+Example of a plan using FileSystemTool (including create_pdf_from_text):
 \`\`\`json
 [
   [
     {
       "assigned_agent_role": "Orchestrator",
-      "tool_name": "FileDownloaderTool",
-      "sub_task_input": {
-        "operation": "download_file",
-        "params": { "url": "https://example.com/data.csv", "directory": "downloads", "filename": "external_data.csv" }
-      },
-      "narrative_step": "Download external data CSV for analysis."
-    }
-  ],
-  [
-    {
-      "assigned_agent_role": "Orchestrator",
       "tool_name": "FileSystemTool",
       "sub_task_input": {
-        "operation": "read_file",
-        "params": { "filename": "external_data.csv", "directory": "downloads" }
+        "operation": "create_pdf_from_text",
+        "params": {
+          "filename": "report.pdf",
+          "text_content": "This is the content of the PDF report.",
+          "directory": "reports",
+          "fontSize": 10
+        }
       },
-      "narrative_step": "Read the downloaded CSV data."
+      "narrative_step": "Create a PDF report with specified content."
     }
   ],
   [
@@ -281,10 +296,10 @@ Example of a plan using FileSystemTool and FileDownloaderTool:
       "assigned_agent_role": "Orchestrator",
       "tool_name": "GeminiStepExecutor",
       "sub_task_input": {
-        "prompt_template": "Based on the CSV data: {{previous_step_output}}, provide a summary. This is the final answer.",
+        "prompt": "The PDF report 'reports/report.pdf' has been created. This is the final confirmation.",
         "isFinalAnswer": true
       },
-      "narrative_step": "Summarize the data from the CSV and provide it as the final answer."
+      "narrative_step": "Confirm PDF creation and provide final status."
     }
   ]
 ]
@@ -309,3 +324,5 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 }
 
 module.exports = PlanManager;
+
+[end of core/PlanManager.js]
