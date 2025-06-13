@@ -12,6 +12,7 @@ const ResultsQueue = require('./core/ResultsQueue');
 // Импорт классов инструментов
 const WebSearchTool = require('./tools/WebSearchTool');
 const ReadWebpageTool = require('./tools/ReadWebpageTool');
+const AdvancedWebpageReaderTool = require('./tools/AdvancedWebpageReaderTool'); // New Tool
 const CalculatorTool = require('./tools/CalculatorTool');
 
 // Импорт LLM сервиса
@@ -33,16 +34,27 @@ const agentApiKeysConfig = {
 };
 
 // Инициализация инструментов
-const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // Предполагаем, что конструктор принимает конфиг
+const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch);
 const readWebpageTool = new ReadWebpageTool();
+// Instantiate AdvancedWebpageReaderTool. This tool maintains its own Playwright browser instance.
+// The browser is initialized asynchronously within the tool's constructor.
+const advancedWebpageReaderTool = new AdvancedWebpageReaderTool();
 const calculatorTool = new CalculatorTool();
 
 // Инициализация агентов
-const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig);
+// Tools specifically required by PlanExecutor for its direct operations (e.g., _handleExploreSearchResults).
+// OrchestratorAgent receives these tools and passes them to PlanExecutor.
+const planExecutorTools = {
+    ReadWebpageTool: readWebpageTool, // Standard webpage reader
+    AdvancedWebpageReaderTool: advancedWebpageReaderTool // Advanced reader with persistent browser
+    // Other tools that PlanExecutor might use directly can be added here.
+};
+const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig, planExecutorTools);
 
 const researchAgentTools = {
     "WebSearchTool": webSearchTool,
-    "ReadWebpageTool": readWebpageTool
+    "ReadWebpageTool": readWebpageTool,
+    "AdvancedWebpageReaderTool": advancedWebpageReaderTool // Added to ResearchAgent
 };
 const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, researchAgentTools, agentApiKeysConfig);
 
@@ -51,9 +63,20 @@ const utilityAgentTools = {
 };
 const utilityAgent = new UtilityAgent(subTaskQueue, resultsQueue, utilityAgentTools, agentApiKeysConfig);
 
+// Store worker agents in an array for easier management during shutdown
+const workerAgents = [researchAgent, utilityAgent];
+
 // Запуск прослушивания для рабочих агентов
-researchAgent.startListening();
-utilityAgent.startListening();
+// researchAgent.startListening(); // startListening is now called on each agent in the loop below
+// utilityAgent.startListening(); // for consistency, or if more agents are added.
+
+workerAgents.forEach(agent => {
+    if (agent && typeof agent.startListening === 'function') {
+        agent.startListening();
+    } else {
+        console.warn(`WARN: Agent ${agent ? agent.constructor.name : 'undefined agent'} does not have a startListening method.`);
+    }
+});
 
 // Настройка Express приложения
 const app = express();
@@ -118,7 +141,49 @@ app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
     console.log("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID.");
     console.log("Available agents: Orchestrator, Research, Utility.");
-    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
+    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool, AdvancedWebpageReaderTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
     console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
 });
+
+// Graceful shutdown logic to clean up resources, especially the browser used by AdvancedWebpageReaderTool.
+async function gracefulShutdown(signal) {
+    console.log(`\nINFO: Received ${signal}. Shutting down application...`);
+
+    // Shut down worker agents first
+    console.log('INFO: Attempting to shut down worker agents...');
+    for (const agent of workerAgents) {
+        if (agent && typeof agent.shutdown === 'function') {
+            try {
+                console.log(`INFO: Shutting down agent ${agent.constructor.name} (Role: ${agent.agentRole})...`);
+                agent.shutdown(); // This is synchronous for now as per agent implementation
+            } catch (err) {
+                console.error(`ERROR: Error during shutdown for ${agent.constructor.name} (Role: ${agent.agentRole}): ${err.message}`);
+            }
+        } else {
+            console.warn(`WARN: Agent ${agent ? agent.constructor.name : 'undefined agent'} does not have a shutdown method or is not a valid agent.`);
+        }
+    }
+    console.log('INFO: Finished attempting to shut down worker agents.');
+
+    // Close the browser instance managed by AdvancedWebpageReaderTool.
+    if (advancedWebpageReaderTool) {
+        try {
+            console.log("INFO: Closing AdvancedWebpageReaderTool browser...");
+            await advancedWebpageReaderTool.closeBrowser(); // Ensure this method is awaited.
+            console.log("INFO: AdvancedWebpageReaderTool browser closed successfully.");
+        } catch (error) {
+            console.error("ERROR: Error closing AdvancedWebpageReaderTool browser during shutdown:", error);
+        }
+    }
+
+    // Placeholder for any other cleanup tasks (e.g., closing database connections, saving state).
+    // await otherResource.close();
+
+    console.log("INFO: Application shutdown complete.");
+    process.exit(0); // Exit the process cleanly.
+}
+
+// Listen for common termination signals to trigger graceful shutdown.
+process.on('SIGINT', () => gracefulShutdown('SIGINT')); // Handles Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Handles `kill` commands

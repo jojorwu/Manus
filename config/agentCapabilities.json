@@ -1,17 +1,30 @@
 [
   {
     "role": "ResearchAgent",
-    "description": "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs.",
+    "description": "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs, including dynamic JavaScript-heavy pages.",
     "tools": [
-      { "name": "WebSearchTool", "description": "Performs a web search for a given query. Input format: { "query": "search terms" }" },
-      { "name": "ReadWebpageTool", "description": "Fetches and extracts textual content from a given URL. Input format: { "url": "http://example.com" }" }
+      {
+        "name": "WebSearchTool",
+        "description": "Performs a web search for a given query. Input format: { \"query\": \"search terms\" }"
+      },
+      {
+        "name": "ReadWebpageTool",
+        "description": "Fetches and extracts textual content from a given URL using a simple fetch mechanism. Best for static pages or direct text/JSON URLs. Input format: { \"url\": \"http://example.com\" }"
+      },
+      {
+        "name": "AdvancedWebpageReaderTool",
+        "description": "Fetches and extracts content from a given URL using a full browser (Playwright) to handle dynamic JavaScript-heavy pages. Returns main text content and list of images (src, alt). Use for complex pages or when dynamic content is expected. Input format: { \"url\": \"http://example.com\" }"
+      }
     ]
   },
   {
     "role": "UtilityAgent",
     "description": "Specialized in performing calculations and other specific utility tasks.",
     "tools": [
-      { "name": "CalculatorTool", "description": "Evaluates mathematical expressions. Input format: { "expression": "2 * (3 + 4)" }" }
+      {
+        "name": "CalculatorTool",
+        "description": "Evaluates mathematical expressions. Input format: { \"expression\": \"2 * (3 + 4)\" }"
+      }
     ]
   }
 ]
