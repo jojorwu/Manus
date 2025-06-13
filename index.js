@@ -36,14 +36,18 @@ const agentApiKeysConfig = {
 // Инициализация инструментов
 const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch);
 const readWebpageTool = new ReadWebpageTool();
-const advancedWebpageReaderTool = new AdvancedWebpageReaderTool(); // New Tool Instance
+// Instantiate AdvancedWebpageReaderTool. This tool maintains its own Playwright browser instance.
+// The browser is initialized asynchronously within the tool's constructor.
+const advancedWebpageReaderTool = new AdvancedWebpageReaderTool();
 const calculatorTool = new CalculatorTool();
 
 // Инициализация агентов
+// Tools specifically required by PlanExecutor for its direct operations (e.g., _handleExploreSearchResults).
+// OrchestratorAgent receives these tools and passes them to PlanExecutor.
 const planExecutorTools = {
-    readWebpageTool: readWebpageTool,
-    advancedWebpageReaderTool: advancedWebpageReaderTool
-    // Add other tools PlanExecutor might directly use for orchestrator-level actions if any
+    ReadWebpageTool: readWebpageTool, // Standard webpage reader
+    AdvancedWebpageReaderTool: advancedWebpageReaderTool // Advanced reader with persistent browser
+    // Other tools that PlanExecutor might use directly can be added here.
 };
 const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig, planExecutorTools);
 
@@ -130,3 +134,29 @@ app.listen(PORT, () => {
     console.log("UtilityAgent tools: CalculatorTool.");
     console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
 });
+
+// Graceful shutdown logic to clean up resources, especially the browser used by AdvancedWebpageReaderTool.
+async function gracefulShutdown(signal) {
+    console.log(`\nINFO: Received ${signal}. Shutting down application...`);
+
+    // Close the browser instance managed by AdvancedWebpageReaderTool.
+    if (advancedWebpageReaderTool) {
+        try {
+            console.log("INFO: Closing AdvancedWebpageReaderTool browser...");
+            await advancedWebpageReaderTool.closeBrowser(); // Ensure this method is awaited.
+            console.log("INFO: AdvancedWebpageReaderTool browser closed successfully.");
+        } catch (error) {
+            console.error("ERROR: Error closing AdvancedWebpageReaderTool browser during shutdown:", error);
+        }
+    }
+
+    // Placeholder for any other cleanup tasks (e.g., closing database connections, saving state).
+    // await otherResource.close();
+
+    console.log("INFO: Application shutdown complete.");
+    process.exit(0); // Exit the process cleanly.
+}
+
+// Listen for common termination signals to trigger graceful shutdown.
+process.on('SIGINT', () => gracefulShutdown('SIGINT')); // Handles Ctrl+C
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM')); // Handles `kill` commands

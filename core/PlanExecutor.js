@@ -3,6 +3,10 @@ const { v4: uuidv4 } = require('uuid');
 const ReadWebpageTool = require('../tools/ReadWebpageTool'); // Fallback if not in tools
 const AdvancedWebpageReaderTool = require('../tools/AdvancedWebpageReaderTool'); // Fallback if not in tools
 
+// Defines the maximum length for raw string data to be stored directly in the executionContext.
+// Data exceeding this length will be replaced by a marker object to conserve memory.
+const MAX_RAW_DATA_IN_MEMORY_LENGTH = 10000;
+
 class PlanExecutor {
     constructor(subTaskQueue, resultsQueue, llmService, tools = {}) {
         this.subTaskQueue = subTaskQueue;
@@ -253,37 +257,68 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 } else {
                     const sub_task_id = uuidv4();
                     const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: subTaskDefinition.sub_task_input, narrative_step: stepNarrative };
+                    let subTaskPromise;
 
-                    journalEntries.push(this._createJournalEntry(
-                        "EXECUTION_STEP_DISPATCHED",
-                        `Dispatching step: ${stepNarrative} (SubTaskID: ${sub_task_id}) to agent ${taskMessage.assigned_agent_role}`,
-                        { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative, toolName: taskMessage.tool_name, agentRole: taskMessage.assigned_agent_role, subTaskInput: subTaskInputForLog }
-                    ));
-                    this.subTaskQueue.enqueueTask(taskMessage);
-                    console.log(`PlanExecutor: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${stepNarrative}" for Stage ${stageIndex}`);
-
-                    const subTaskPromise = new Promise((resolve) => {
-                        this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
-                            const resultDetails = { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative };
-                            if (error) {
-                                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", `Error or timeout for SubTaskID: ${sub_task_id}`, { ...resultDetails, error: error.message }));
-                                console.error(`PlanExecutor: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${stageIndex}):`, error.message);
-                                resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
-                            } else if (resultMsg) {
-                                const resultDataPreview = typeof resultMsg.result_data === 'string' ? resultMsg.result_data.substring(0,100) + '...' : String(resultMsg.result_data);
-                                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_RECEIVED", `Result received for SubTaskID: ${sub_task_id}, Status: ${resultMsg.status}`, { ...resultDetails, status: resultMsg.status, agentRole: resultMsg.worker_agent_role, resultDataPreview, errorDetails: resultMsg.error_details }));
-                                if (resultMsg.sub_task_id === sub_task_id) {
-                                    console.log(`PlanExecutor: Received result for sub_task_id ${sub_task_id} (Stage ${stageIndex}). Status: ${resultMsg.status}`);
-                                    resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
-                                } else {
-                                    const errorMessage = `Critical - Mismatched sub_task_id. Expected ${sub_task_id}, got ${resultMsg.sub_task_id}`;
-                                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", errorMessage, { ...resultDetails, expectedSubTaskId: sub_task_id, receivedSubTaskId: resultMsg.sub_task_id }));
-                                    console.error(`PlanExecutor: ${errorMessage} for parent_task_id ${parentTaskId} (Stage ${stageIndex}).`);
-                                    resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage } });
-                                }
+                    // Check if there are any active subscribers (agents) for the assigned role.
+                    // This prevents tasks from being enqueued indefinitely if no agent is available.
+                    if (!this.subTaskQueue.hasSubscribers(taskMessage.assigned_agent_role)) {
+                        const errorMsg = `No active subscribers for assigned agent role: ${taskMessage.assigned_agent_role}`;
+                        // Log the error with a clear prefix and context.
+                        console.error(`ERROR: PlanExecutor: ${errorMsg} for sub-task ${sub_task_id} ("${stepNarrative}"). Marking step as FAILED.`);
+                        // Create a journal entry to record this failure. This is important for traceability.
+                        journalEntries.push(this._createJournalEntry(
+                            "EXECUTION_STEP_FAILED", // Consistent failure type
+                            `Step failed: ${stepNarrative} (SubTaskID: ${sub_task_id}) - ${errorMsg}`, // Clear message
+                            // Detailed context for the journal entry
+                            { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative, toolName: taskMessage.tool_name, agentRole: taskMessage.assigned_agent_role, subTaskInput: subTaskInputForLog, errorDetails: { message: errorMsg, details: "Task was not enqueued because no agent was subscribed for this role." } }
+                        ));
+                        // Immediately resolve the promise with a FAILED status.
+                        // This ensures the plan execution can correctly process this step as a failure without waiting for a timeout.
+                        subTaskPromise = Promise.resolve({
+                            sub_task_id, // Ensure sub_task_id is included for tracking
+                            narrative_step: stepNarrative,
+                            tool_name: taskMessage.tool_name,
+                            sub_task_input: taskMessage.sub_task_input,
+                            assigned_agent_role: taskMessage.assigned_agent_role,
+                            status: "FAILED",
+                            error_details: { // Provide clear error details in the result object
+                                message: errorMsg,
+                                details: "Task was not enqueued as no agent was subscribed to this role."
                             }
-                        }, sub_task_id);
-                    });
+                        });
+                    } else {
+                        // If subscribers exist, proceed with normal task dispatch.
+                        journalEntries.push(this._createJournalEntry(
+                            "EXECUTION_STEP_DISPATCHED", // Clear event type for dispatch
+                            `Dispatching step: ${stepNarrative} (SubTaskID: ${sub_task_id}) to agent ${taskMessage.assigned_agent_role}`, // Descriptive message
+                            { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative, toolName: taskMessage.tool_name, agentRole: taskMessage.assigned_agent_role, subTaskInput: subTaskInputForLog }
+                        ));
+                        this.subTaskQueue.enqueueTask(taskMessage);
+                        console.log(`INFO: PlanExecutor: Dispatched sub-task ${sub_task_id} for role ${taskMessage.assigned_agent_role} - Step: "${stepNarrative}" for Stage ${stageIndex}`);
+
+                        subTaskPromise = new Promise((resolve) => {
+                            this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
+                                const resultDetails = { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative };
+                                if (error) {
+                                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", `Error or timeout for SubTaskID: ${sub_task_id}`, { ...resultDetails, error: error.message }));
+                                    console.error(`ERROR: PlanExecutor: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${stageIndex}):`, error.message);
+                                    resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
+                                } else if (resultMsg) {
+                                    const resultDataPreview = typeof resultMsg.result_data === 'string' ? resultMsg.result_data.substring(0,100) + '...' : String(resultMsg.result_data);
+                                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_RECEIVED", `Result received for SubTaskID: ${sub_task_id}, Status: ${resultMsg.status}`, { ...resultDetails, status: resultMsg.status, agentRole: resultMsg.worker_agent_role, resultDataPreview, errorDetails: resultMsg.error_details }));
+                                    if (resultMsg.sub_task_id === sub_task_id) {
+                                        console.log(`INFO: PlanExecutor: Received result for sub_task_id ${sub_task_id} (Stage ${stageIndex}). Status: ${resultMsg.status}`);
+                                        resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: resultMsg.status, result_data: resultMsg.result_data, error_details: resultMsg.error_details });
+                                    } else {
+                                        const errorMessage = `Critical - Mismatched sub_task_id. Expected ${sub_task_id}, got ${resultMsg.sub_task_id}`;
+                                        journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", errorMessage, { ...resultDetails, expectedSubTaskId: sub_task_id, receivedSubTaskId: resultMsg.sub_task_id }));
+                                        console.error(`ERROR: PlanExecutor: ${errorMessage} for parent_task_id ${parentTaskId} (Stage ${stageIndex}).`);
+                                        resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage } });
+                                    }
+                                }
+                            }, sub_task_id);
+                        });
+                    }
                     stageSubTaskPromises.push(subTaskPromise);
                 }
             }
@@ -297,46 +332,75 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 const originalSubTaskDef = currentStageTaskDefinitions[j];
                 const subTaskIdForResult = resultOfSubTask.sub_task_id;
 
-                let processedData = resultOfSubTask.result_data;
+                let processedData = resultOfSubTask.result_data; // This will be used for summarization if applicable
+                let rawDataForContext = resultOfSubTask.result_data; // This will be stored in contextEntry.raw_result_data
+
                 const summarizationLogDetails = { parentTaskId, stageIndex, subTaskId: subTaskIdForResult, narrativeStep: resultOfSubTask.narrative_step };
 
                 if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
-                    resultOfSubTask.assigned_agent_role !== "Orchestrator") {
+                    resultOfSubTask.assigned_agent_role !== "Orchestrator") { // Orchestrator steps often have structured data not meant for summarization here
                     journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step}`, summarizationLogDetails));
-                    const originalDataForPreview = resultOfSubTask.result_data;
+                    // _summarizeStepData receives the original, full resultOfSubTask.result_data
                     try {
                         const summary = await this._summarizeStepData(resultOfSubTask.result_data, userTaskString, resultOfSubTask.narrative_step, subTaskIdForResult, parentTaskId);
-                        if (summary !== resultOfSubTask.result_data) {
+                        if (summary !== resultOfSubTask.result_data) { // Check if summarization actually changed the data
                              journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_SUCCESS", `Successfully summarized data for step: ${resultOfSubTask.narrative_step}`, { ...summarizationLogDetails, summarizedDataPreview: String(summary).substring(0,100) + "..."}));
                         }
-                        processedData = summary;
+                        processedData = summary; // processedData will hold the summary or original if not summarized
                     } catch (summarizationError) {
                         journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_FAILED", `Summarization failed for step: ${resultOfSubTask.narrative_step}`, { ...summarizationLogDetails, errorMessage: summarizationError.message }));
                          console.error(`PlanExecutor: Error during _summarizeStepData call for SubTaskID ${subTaskIdForResult}: ${summarizationError.message}`);
-                        processedData = originalDataForPreview;
+                        // In case of summarization error, processedData retains its initial value (original resultOfSubTask.result_data)
                     }
                 }
+                // If it was an Orchestrator step, processedData is still the original resultOfSubTask.result_data as summarization is skipped.
+
+                // Memory optimization: Check if the raw_result_data (which is the original, full data from the sub-task)
+                // is a large string. If so, replace it with a marker object in the executionContext to save memory.
+                // The `processed_result_data` (which might be a summary or the same original data if not summarized)
+                // is stored separately and is not affected by this specific raw_data truncation.
+                if (typeof resultOfSubTask.result_data === 'string' && resultOfSubTask.result_data.length > MAX_RAW_DATA_IN_MEMORY_LENGTH) {
+                    // Log a warning when this replacement happens, including context like step and data size.
+                    console.warn(`WARN: PlanExecutor: raw_result_data for step "${resultOfSubTask.narrative_step}" (SubTaskID: ${subTaskIdForResult}) is too large (${resultOfSubTask.result_data.length} chars). Storing preview and marker instead in executionContext.raw_result_data.`);
+                    rawDataForContext = { // This marker is stored in contextEntry.raw_result_data
+                        _isLargeDataMarker: true, // A distinct property to identify this as a marker
+                        originalLength: resultOfSubTask.result_data.length,
+                        preview: resultOfSubTask.result_data.substring(0, 250) + "..." // Store a small preview
+                    };
+                    // Add a journal entry for this event, useful for debugging and monitoring.
+                    journalEntries.push(this._createJournalEntry(
+                        "INFO", // Informational event
+                        `Large raw_result_data for step "${resultOfSubTask.narrative_step}" (SubTaskID: ${subTaskIdForResult}) replaced with a marker in executionContext.`,
+                        { subTaskId: subTaskIdForResult, originalLength: resultOfSubTask.result_data.length, previewLength: 250 }
+                    ));
+                }
+                // If data is not a large string, rawDataForContext remains as the original resultOfSubTask.result_data.
 
                 const contextEntry = {
-                    narrative_step: resultOfSubTask.narrative_step || originalSubTaskDef.narrative_step,
+                    narrative_step: resultOfSubTask.narrative_step || originalSubTaskDef.narrative_step, // Ensure narrative step is present
                     assigned_agent_role: resultOfSubTask.assigned_agent_role || originalSubTaskDef.assigned_agent_role,
                     tool_name: resultOfSubTask.tool_name || originalSubTaskDef.tool_name,
                     sub_task_input: resultOfSubTask.sub_task_input || originalSubTaskDef.sub_task_input,
-                    status: resultOfSubTask.status,
-                    processed_result_data: processedData,
-                    raw_result_data: resultOfSubTask.result_data,
-                    error_details: resultOfSubTask.error_details,
-                    sub_task_id: subTaskIdForResult
+                    status: resultOfSubTask.status, // Crucial for determining success/failure
+                    processed_result_data: processedData, // This is the (potentially summarized) data, or original if not summarized
+                    raw_result_data: rawDataForContext,   // This is the original data or the marker object if data was too large
+                    error_details: resultOfSubTask.error_details, // Store any error details from the sub-task execution
+                    sub_task_id: subTaskIdForResult // Ensure sub_task_id is part of the context for traceability
                 };
                 stageContextEntries.push(contextEntry);
 
+                // Logging the outcome of the step processing.
                 const logDetails = { parentTaskId, stageIndex, subTaskId: contextEntry.sub_task_id, narrativeStep: contextEntry.narrative_step, toolName: contextEntry.tool_name, agentRole: contextEntry.assigned_agent_role };
-                const dataPreviewForLog = contextEntry.processed_result_data !== undefined ? contextEntry.processed_result_data : contextEntry.raw_result_data;
+                // For logging preview, prefer processed_result_data (summary or smaller data), fallback to raw_result_data (which might be a marker)
+                const dataPreviewForLog = contextEntry.processed_result_data !== undefined ?
+                                          (typeof contextEntry.processed_result_data === 'string' ? contextEntry.processed_result_data : JSON.stringify(contextEntry.processed_result_data)) :
+                                          (typeof contextEntry.raw_result_data === 'string' ? contextEntry.raw_result_data : (contextEntry.raw_result_data._isLargeDataMarker ? contextEntry.raw_result_data.preview : JSON.stringify(contextEntry.raw_result_data)));
+
 
                 if (contextEntry.status === "COMPLETED") {
                     journalEntries.push(this._createJournalEntry("EXECUTION_STEP_COMPLETED", `Step completed: ${contextEntry.narrative_step}`, { ...logDetails, processedResultDataPreview: String(dataPreviewForLog).substring(0, 100) + "..." }));
-
-                    const findingData = contextEntry.processed_result_data || contextEntry.raw_result_data;
+                    // Key findings are collected from processed_result_data or raw_result_data (if marker, its preview is used).
+                    const findingData = contextEntry.processed_result_data !== undefined ? contextEntry.processed_result_data : contextEntry.raw_result_data;
                     if (findingData || (typeof findingData === 'boolean' || typeof findingData === 'number')) {
                         let dataToStore = findingData;
                         const MAX_FINDING_DATA_LENGTH = 500;
