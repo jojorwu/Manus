@@ -4,7 +4,7 @@
     "description": "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs.",
     "tools": [
       { "name": "WebSearchTool", "description": "Performs a web search for a given query. Input format: { "query": "search terms" }" },
-      { "name": "ReadWebpageTool", "description": "Fetches and extracts textual content from a given URL. Input format: { "url": "http://example.com" }" }
+      { "name": "ReadWebpageTool", "description": "Fetches fully rendered HTML from a given URL using Playwright. It then attempts to extract the main article content using Mozilla Readability (with JSDOM). If Readability fails, it falls back to Cheerio for general text extraction. Input format: { "url": "http://example.com" }" }
     ]
   },
   {

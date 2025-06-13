@@ -39,7 +39,7 @@ This project consists of two main components: a Node.js backend that houses the 
     *   **GeminiStepExecutor:** For general reasoning, text generation, summarization. Can be marked to produce the final answer.
     *   **WebSearchTool:** For real-time web searches.
     *   **CalculatorTool:** For mathematical expressions.
-    *   **ReadWebpageTool:** Uses Playwright and `cheerio` to fetch and extract cleaned text from web pages, including SPAs.
+    *   **ReadWebpageTool:** Fetches fully rendered HTML using Playwright. Then, it prioritizes extracting the main article content using Mozilla's Readability library (with JSDOM). If Readability fails or doesn't find substantial content, it falls back to using Cheerio for a more general text extraction from the page body. Effective for articles and SPAs.
     *   **ExploreSearchResults (Orchestrator Action):** Reads content from multiple search results using `ReadWebpageTool`.
     *   **FileSystemTool (Orchestrator Action):**
         *   Performs operations like creating, reading, appending to, and listing text files within a sandboxed, task-specific workspace.
@@ -62,7 +62,7 @@ This project consists of two main components: a Node.js backend that houses the 
 ## Known Issues / Limitations (v0.1.0-beta)
 
 *   **Tool Implementations**:
-    *   `ReadWebpageTool` (Playwright-based): Slower than simple HTTP requests; batch processing needs optimization.
+    *   `ReadWebpageTool`: Now uses Playwright -> Readability/JSDOM -> Cheerio. This improves main content extraction from articles but may increase processing time. Effectiveness on non-article pages depends on the heuristics of Readability and Cheerio.
     *   `FileSystemTool`: PDF creation (`create_pdf_from_text`) supports basic text and custom TTF/OTF fonts; complex PDF styling or embedding is not supported. Other file operations are primarily for text.
     *   `FileDownloaderTool`: Basic download functionality; no advanced streaming optimizations for very large files.
 *   **Task State Loading & Execution:** `SYNTHESIZE_ONLY` file search is basic; `EXECUTE_PLANNED_TASK` might re-plan.
@@ -77,7 +77,7 @@ This project consists of two main components: a Node.js backend that houses the 
 *   **Tools & Libraries (Backend):**
     *   Web Search: `axios` (for Google CSE API)
     *   Calculator: `mathjs`
-    *   Web Page Reading: Playwright, Cheerio
+    *   Web Page Reading: Playwright, @mozilla/readability, JSDOM, Cheerio
     *   File System Operations: Node.js `fs` module (via `FileSystemTool`), `pdfkit` (for PDF generation)
     *   File Downloading: `axios` (via `FileDownloaderTool`)
 *   **Frontend (`frontend/` directory):** React, Vite, Tailwind CSS, Shadcn/UI, `axios`
