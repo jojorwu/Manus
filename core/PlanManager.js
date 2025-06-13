@@ -106,9 +106,40 @@ class PlanManager {
                     }
 
                     if (subTask.assigned_agent_role === "Orchestrator") {
-                        if (subTask.tool_name !== "ExploreSearchResults" && subTask.tool_name !== "GeminiStepExecutor") {
-                            return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role. Only 'ExploreSearchResults' or 'GeminiStepExecutor' allowed.`, rawResponse: cleanedString, stages: [] };
+                        const allowedOrchestratorTools = ["ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool"];
+                        if (!allowedOrchestratorTools.includes(subTask.tool_name)) {
+                            return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role. Allowed tools are: ${allowedOrchestratorTools.join(", ")}.`, rawResponse: cleanedString, stages: [] };
                         }
+                        // Basic validation for operation and params
+                        if (!subTask.sub_task_input || typeof subTask.sub_task_input.operation !== 'string') {
+                            if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") { // ExploreSearchResults and GeminiStepExecutor might not always have 'operation'
+                                return { success: false, message: `'operation' is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
+                            }
+                        }
+                        if (!subTask.sub_task_input || typeof subTask.sub_task_input.params !== 'object') {
+                             if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
+                                return { success: false, message: `'params' object is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
+                            }
+                        }
+                        // Further specific param validation can be added here if needed
+                        if (subTask.tool_name === "FileSystemTool") {
+                            const fsOps = ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file"];
+                            if (!fsOps.includes(subTask.sub_task_input.operation)) {
+                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileSystemTool.`, rawResponse: cleanedString, stages: [] };
+                            }
+                            if ((subTask.sub_task_input.operation === "create_file" || subTask.sub_task_input.operation === "read_file" || subTask.sub_task_input.operation === "append_to_file" || subTask.sub_task_input.operation === "overwrite_file") && (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.filename !== 'string')) {
+                                return { success: false, message: `'params.filename' is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                            }
+                        }
+                        if (subTask.tool_name === "FileDownloaderTool") {
+                            if (subTask.sub_task_input.operation !== "download_file") {
+                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileDownloaderTool. Must be 'download_file'.`, rawResponse: cleanedString, stages: [] };
+                            }
+                            if (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.url !== 'string') {
+                                return { success: false, message: `'params.url' is required for FileDownloaderTool.`, rawResponse: cleanedString, stages: [] };
+                            }
+                        }
+
                     } else if (!knownAgentRoles.includes(subTask.assigned_agent_role)) {
                         return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
                     } else {
@@ -180,38 +211,69 @@ Orchestrator Special Actions:
    Functionality: The Orchestrator will take the results from the most recent WebSearchTool step in a preceding stage. It will select up to 'pagesToExplore' links. For each selected link, it will internally use 'ReadWebpageTool' to fetch its content. The collected content from all explored pages will then be aggregated.
    Output: An aggregated string containing the content from all explored pages.
    When to use: Use this if the user's task implies needing more than just search snippets and requires information from the content of the web pages found.
+ - GeminiStepExecutor: This is a special action for the Orchestrator to directly use an LLM for a specific step that doesn't fit other tools, like complex reasoning, summarization of diverse inputs, or reformatting text.
+   Input ('sub_task_input'):
+     - 'prompt_template': (String) A template for the prompt. Use {{placeholder_name}} for dynamic values. Special param '{previous_step_output}' will be replaced by the output of the immediately preceding step if available.
+     - 'prompt_params': (Optional, Object) Key-value pairs to fill in the prompt_template.
+     - 'prompt': (String, Alternative to template/params) A direct prompt string if no templating is needed.
+     - 'isFinalAnswer': (Optional, Boolean, Default: false) If this step, when assigned to "Orchestrator", is intended to produce the final answer to the user's query, set this to true. Example: { "prompt": "Final summary of findings.", "isFinalAnswer": true }.
+   Output: The text generated by the LLM.
+   When to use: For general LLM-based tasks, summarizations, or when a step requires complex text generation based on context or previous step outputs, especially if it's meant to be the final user-facing response.
+ - FileSystemTool: Allows Orchestrator to perform file system operations within a sandboxed task-specific workspace.
+   Input ('sub_task_input'):
+     - 'operation': (String) One of ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file"].
+     - 'params': (Object) Parameters for the operation:
+       - create_file: { "filename": "string", "content": "string", "directory"?: "string" (optional subdirectory) }
+       - read_file: { "filename": "string", "directory"?: "string" }
+       - append_to_file: { "filename": "string", "content": "string", "directory"?: "string" } (content must be non-empty)
+       - list_files: { "directory"?: "string" } (lists contents of this subdirectory within the workspace, or root if empty)
+       - overwrite_file: (alias for create_file) { "filename": "string", "content": "string", "directory"?: "string" }
+   Output: Varies by operation (e.g., success message, file content, list of files/dirs).
+   When to use: For tasks requiring intermediate data storage, reading specific files, or organizing outputs within a dedicated workspace for the current task. All paths are relative to the task's workspace root.
+ - FileDownloaderTool: Allows Orchestrator to download files from a URL into the task-specific workspace.
+   Input ('sub_task_input'):
+     - 'operation': (String) Must be "download_file".
+     - 'params': (Object) { "url": "string_url_to_download", "directory"?: "string" (optional subdirectory), "filename"?: "string" (optional, will try to infer if not provided) }.
+   Output: Success message with path to downloaded file or error.
+   When to use: When a task requires fetching a file from an external URL for later processing or reference. Downloads are subject to size limits.
 ---
 (End of available agents list and special actions)
 Based on the user task and available capabilities, create a multi-stage execution plan.
 The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
 Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
-Each sub-task object in an inner array must have the following keys:
+Each sub_task object in an inner array must have the following keys:
 1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}] OR "Orchestrator" for special actions).
-2. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults" or "GeminiStepExecutor").
-3. 'sub_task_input': Object (the input for the specified tool or action).
+2. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool").
+3. 'sub_task_input': Object (the input for the specified tool or action). For "GeminiStepExecutor" by "Orchestrator", if it's the final answer, include 'isFinalAnswer: true'. For "FileSystemTool" or "FileDownloaderTool", this must include 'operation' and 'params'.
 4. 'narrative_step': String (a short, human-readable description of this step's purpose).
 
 For the 'ExploreSearchResults' action, set 'assigned_agent_role' to "Orchestrator" and 'tool_name' to "ExploreSearchResults". The 'sub_task_input' may include 'pagesToExplore' and 'relevanceCriteria'.
+For the 'GeminiStepExecutor' action by 'Orchestrator', if it's producing the final user answer, include 'isFinalAnswer: true' in 'sub_task_input'.
+For 'FileSystemTool' and 'FileDownloaderTool' actions by 'Orchestrator', ensure 'sub_task_input' contains 'operation' and the correct 'params' for that operation.
 
-Example of a plan using ExploreSearchResults:
+Example of a plan using FileSystemTool and FileDownloaderTool:
 \`\`\`json
 [
   [
     {
-      "assigned_agent_role": "ResearchAgent",
-      "tool_name": "WebSearchTool",
-      "sub_task_input": { "query": "advantages of server-side rendering" },
-      "narrative_step": "Search for advantages of server-side rendering."
+      "assigned_agent_role": "Orchestrator",
+      "tool_name": "FileDownloaderTool",
+      "sub_task_input": {
+        "operation": "download_file",
+        "params": { "url": "https://example.com/data.csv", "directory": "downloads", "filename": "external_data.csv" }
+      },
+      "narrative_step": "Download external data CSV for analysis."
     }
   ],
   [
     {
       "assigned_agent_role": "Orchestrator",
-      "tool_name": "ExploreSearchResults",
+      "tool_name": "FileSystemTool",
       "sub_task_input": {
-        "pagesToExplore": 2
+        "operation": "read_file",
+        "params": { "filename": "external_data.csv", "directory": "downloads" }
       },
-      "narrative_step": "Explore the top 2 search results about SSR advantages by reading their content."
+      "narrative_step": "Read the downloaded CSV data."
     }
   ],
   [
@@ -219,9 +281,10 @@ Example of a plan using ExploreSearchResults:
       "assigned_agent_role": "Orchestrator",
       "tool_name": "GeminiStepExecutor",
       "sub_task_input": {
-        "prompt_template": "Based on the gathered information: {{previous_step_output}}, synthesize a comprehensive answer to the user's original query about server-side rendering."
+        "prompt_template": "Based on the CSV data: {{previous_step_output}}, provide a summary. This is the final answer.",
+        "isFinalAnswer": true
       },
-      "narrative_step": "Synthesize the final answer about SSR advantages from the explored content."
+      "narrative_step": "Summarize the data from the CSV and provide it as the final answer."
     }
   ]
 ]
