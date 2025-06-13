@@ -191,33 +191,71 @@ class FileSystemTool {
         if (!params.filename.toLowerCase().endsWith('.pdf')) {
             return { result: null, error: "Invalid input: 'filename' must end with '.pdf'." };
         }
-        if (typeof params.text_content !== 'string') { // Allow empty string for text_content
+        if (typeof params.text_content !== 'string') {
             return { result: null, error: "Invalid input: 'text_content' is required and must be a string." };
         }
         const directory = params.directory || '';
         const fontSize = params.fontSize || 12;
-        const fontName = params.fontName || 'Helvetica'; // Default PDF font
+        const fontName = params.fontName || 'Helvetica';
+        const customFontFileName = params.customFontFileName || null; // New parameter
         const relativeFilePath = path.join(directory, params.filename);
         let safeFilePath;
 
         try {
             safeFilePath = await this._getSafePath(relativeFilePath);
-            if (safeFilePath.endsWith(path.sep) || (await fsp.stat(safeFilePath).catch(() => null))?.isDirectory()) {
-                 return { result: null, error: `Cannot create PDF, path '${relativeFilePath}' refers to a directory or would overwrite one.`};
+
+            // Check if safeFilePath points to an existing directory before creating write stream
+            try {
+                const stats = await fsp.stat(safeFilePath);
+                if (stats.isDirectory()) {
+                    return { result: null, error: `Cannot create PDF, path '${relativeFilePath}' points to an existing directory.` };
+                }
+            } catch (statError) {
+                if (statError.code !== 'ENOENT') { throw statError; } // Re-throw unexpected errors
+                // ENOENT is fine, means file doesn't exist, which is expected for creation.
             }
 
-            return new Promise((resolve, reject) => {
+            return new Promise(async (resolve, reject) => { // Made promise callback async for await fsp.access
                 const doc = new PDFDocument({
                     size: 'A4',
                     margins: { top: 50, bottom: 50, left: 72, right: 72 },
-                    autoFirstPage: false // Add page manually to ensure margins apply to first page too
+                    autoFirstPage: false
                 });
 
                 const stream = fs.createWriteStream(safeFilePath);
                 doc.pipe(stream);
-
                 doc.addPage();
-                doc.font(fontName).fontSize(fontSize).text(params.text_content, {
+
+                let effectiveFont = fontName;
+                let customFontApplied = false;
+                let fontWarning = null;
+
+                if (customFontFileName) {
+                    if (typeof customFontFileName !== 'string' || (!customFontFileName.toLowerCase().endsWith('.ttf') && !customFontFileName.toLowerCase().endsWith('.otf'))) {
+                        fontWarning = `Invalid 'customFontFileName': Must be a string ending with .ttf or .otf. Falling back to '${fontName}'.`;
+                        console.warn(`FileSystemTool: ${fontWarning}`);
+                        doc.font(fontName);
+                    } else {
+                        // Assuming assets/fonts/ is at the root of the project, relative to where the process is run.
+                        // __dirname for FileSystemTool.js is tools/
+                        const fontPath = path.join(__dirname, '..', 'assets', 'fonts', customFontFileName);
+                        try {
+                            await fsp.access(fontPath, fs.constants.R_OK);
+                            doc.font(fontPath);
+                            effectiveFont = customFontFileName;
+                            customFontApplied = true;
+                            console.log(`FileSystemTool: Using custom font: ${fontPath}`);
+                        } catch (fontError) {
+                            console.warn(`FileSystemTool: Custom font '${customFontFileName}' not found/readable at '${fontPath}'. Falling back to '${fontName}'. Error: ${fontError.message}`);
+                            fontWarning = `Custom font '${customFontFileName}' not found or not readable. Used default font '${fontName}'.`;
+                            doc.font(fontName); // Fallback
+                        }
+                    }
+                } else {
+                    doc.font(fontName);
+                }
+
+                doc.fontSize(fontSize).text(params.text_content, {
                     align: 'left',
                     lineBreak: true
                 });
@@ -225,7 +263,11 @@ class FileSystemTool {
 
                 stream.on('finish', () => {
                     const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-                    resolve({ result: `PDF file '${displayPath}' created successfully.`, error: null });
+                    let successMessage = `PDF file '${displayPath}' created successfully. Font used: ${customFontApplied ? effectiveFont : fontName}.`;
+                    if (fontWarning) {
+                        successMessage += ` Warning: ${fontWarning}`;
+                    }
+                    resolve({ result: successMessage, error: null });
                 });
                 stream.on('error', (err) => {
                     console.error(`FileSystemTool.create_pdf_from_text: Error writing PDF stream for '${relativeFilePath}':`, err.message);

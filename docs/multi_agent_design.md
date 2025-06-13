@@ -13,7 +13,7 @@ We will define the following initial agent roles:
         *   Acts as the high-level coordinator for user tasks. Receives tasks via the API.
         *   **Planning Delegation:** Utilizes the `PlanManager` component to generate or retrieve execution plans. `PlanManager` is responsible for:
             *   Checking for matching pre-defined plan templates.
-            *   If no template matches, constructing a detailed prompt for an LLM (Gemini) based on agent capabilities and the user task (including descriptions of Orchestrator-level tools like `ExploreSearchResults`, `GeminiStepExecutor`, `FileSystemTool`, `FileDownloaderTool`).
+            *   If no template matches, constructing a detailed prompt for an LLM (Gemini) based on agent capabilities and the user task (including descriptions of Orchestrator-level tools like `ExploreSearchResults`, `GeminiStepExecutor`, `FileSystemTool` with its operations including `create_pdf_from_text`, and `FileDownloaderTool`).
             *   Calling the LLM service to generate a multi-stage plan.
             *   Validating the structure and content of the plan returned by the LLM.
         *   **Execution Delegation:** Utilizes the `PlanExecutor` component to carry out the steps defined in the generated plan. `PlanExecutor` is responsible for:
@@ -23,7 +23,7 @@ We will define the following initial agent roles:
             *   Directly handling special Orchestrator-level actions defined in the plan. This includes:
                 *   `ExploreSearchResults`: Using `ReadWebpageTool` internally.
                 *   `GeminiStepExecutor`: For direct LLM calls by the Orchestrator.
-                *   `FileSystemTool`: Instantiating `FileSystemTool` with a task-specific, sandboxed workspace path to perform operations like creating, reading, or listing files.
+                *   `FileSystemTool`: Instantiating `FileSystemTool` with a task-specific, sandboxed workspace path to perform operations like creating, reading, listing files, and creating PDF documents from text (including support for custom TTF/OTF fonts via the `customFontFileName` parameter, with fallback to default fonts).
                 *   `FileDownloaderTool`: Instantiating `FileDownloaderTool` with a task-specific, sandboxed workspace path to download files from URLs.
             *   Summarizing data from completed steps (where appropriate) using an LLM.
             *   Aggregating all execution results into a comprehensive `executionContext`.
@@ -60,7 +60,7 @@ A task queue-based system will manage communication and task distribution.
         *   `parent_task_id`: ID of the original user task.
         *   `assigned_agent_role`: Target worker role (e.g., "ResearchAgent", or "Orchestrator" for special actions).
         *   `tool_name`: Specific tool to use (e.g., "WebSearchTool", "FileSystemTool").
-        *   `sub_task_input`: Object with input for the sub-task/tool (e.g., `{ "query": "..." }` for search, or `{ "operation": "create_file", "params": { ... } }` for FileSystemTool).
+        *   `sub_task_input`: Object with input for the sub-task/tool (e.g., `{ "query": "..." }` for search, or `{ "operation": "create_pdf_from_text", "params": { ... } }` for FileSystemTool).
         *   `context_summary`: (Optional) Relevant context from the Orchestrator.
         *   `api_keys_config_ref`: (Optional, Advanced) Reference to a specific API key profile if a worker supports multiple.
 
@@ -81,12 +81,12 @@ A task queue-based system will manage communication and task distribution.
 1.  User submits task via frontend to a backend API endpoint (e.g., `/api/generate-plan`).
 2.  API routes task to `OrchestratorAgent`; `parent_task_id` generated.
 3.  `OrchestratorAgent` invokes `PlanManager` to obtain an execution plan.
-    *   `PlanManager` attempts to use a template or generates a new plan using an LLM (prompt includes FileSystemTool & FileDownloaderTool for Orchestrator).
+    *   `PlanManager` attempts to use a template or generates a new plan using an LLM (prompt includes FileSystemTool with its operations like `create_pdf_from_text`, & FileDownloaderTool for Orchestrator).
     *   `PlanManager` validates the plan and returns it to `OrchestratorAgent`.
 4.  If a valid plan is obtained, `OrchestratorAgent` invokes `PlanExecutor` with the plan and `savedTasksBaseDir`.
     *   `PlanExecutor` iterates through stages and steps:
         *   For tasks assigned to worker agents, `PlanExecutor` enqueues them onto `SubTaskQueue` and awaits results via `ResultsQueue`.
-        *   For special Orchestrator actions (e.g., `ExploreSearchResults`, `FileSystemTool`, `FileDownloaderTool`), `PlanExecutor` handles them directly. For file tools, it constructs a `taskWorkspaceDir` using `savedTasksBaseDir` and `parentTaskId`, then instantiates and uses the tool.
+        *   For special Orchestrator actions (e.g., `ExploreSearchResults`, `FileSystemTool` including `create_pdf_from_text`, `FileDownloaderTool`), `PlanExecutor` handles them directly. For file tools, it constructs a `taskWorkspaceDir` using `savedTasksBaseDir` and `parentTaskId`, then instantiates and uses the tool.
     *   `PlanExecutor` collects all results, summarizations, `keyFindings`, `errorsEncountered`, detailed journal entries, and potentially a pre-synthesized `finalAnswer` (if a step was marked with `isFinalAnswer: true`) into its return object.
 5.  Worker agents (`ResearchAgent`, `UtilityAgent`) monitor `SubTaskQueue`, dequeue messages matching their role.
 6.  Worker agent executes the sub-task using specified tool and input.
@@ -100,12 +100,7 @@ A task queue-based system will manage communication and task distribution.
 12. `OrchestratorAgent` saves the final task state (including `CurrentWorkingContext`) and the complete `TaskJournal` (merged entries from itself and `PlanExecutor`), then returns the response to the API endpoint, then to the user.
 
 ## 5. Managing Multiple API Keys
-
-*   **Approach:** All unique API keys stored in the root `.env` file, loaded by `server.js` using `dotenv`.
-*   **Naming Convention:** Environment variables named clearly (e.g., `ORCHESTRATOR_GEMINI_API_KEY`, `RESEARCH_AGENT_SEARCH_API_KEY`).
-*   **Configuration:** In `server.js`, API keys are read from `process.env` and passed to the constructors of respective agent or tool classes when they are instantiated.
-*   **Security:** Raw API keys are not passed in task queue messages. Agents use the keys they were configured with at startup.
-*   **Initial Focus:** Each agent type configured with one primary set of necessary keys.
+(Content remains the same)
 
 ## 6. High-Level Backend Structure
 
@@ -117,7 +112,7 @@ A task queue-based system will manage communication and task distribution.
     ├── UtilityAgent.js
     └── BaseAgent.js      # (Optional)
     core/
-    ├── PlanManager.js    # Handles plan generation (prompting LLM, template usage) and validation. Instructs LLM on use of 'isFinalAnswer' flag and Orchestrator tools.
+    ├── PlanManager.js    # Handles plan generation (prompting LLM, template usage) and validation. Instructs LLM on use of 'isFinalAnswer' flag and Orchestrator tools (including FileSystemTool operations like create_pdf_from_text).
     ├── PlanExecutor.js   # Handles execution of planned steps, including special Orchestrator actions (ExploreSearchResults, GeminiStepExecutor, FileSystemTool, FileDownloaderTool), queue interactions, data summarization, CWC data collection, and identifying pre-synthesized final answers.
     ├── SubTaskQueue.js   # (In-memory initially) for dispatching tasks to worker agents.
     └── ResultsQueue.js # (In-memory initially) for receiving results from worker agents.
@@ -125,7 +120,7 @@ A task queue-based system will manage communication and task distribution.
     ├── WebSearchTool.js
     ├── CalculatorTool.js
     ├── ReadWebpageTool.js # Uses Playwright and Cheerio for web content extraction.
-    ├── FileSystemTool.js  # Provides sandboxed file system operations for the Orchestrator/PlanExecutor.
+    ├── FileSystemTool.js  # Provides sandboxed file system operations for the Orchestrator/PlanExecutor, including PDF generation from text with custom font support.
     ├── FileDownloaderTool.js # Provides sandboxed file downloading for the Orchestrator/PlanExecutor.
     └── ...
     frontend/

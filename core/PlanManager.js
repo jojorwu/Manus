@@ -146,13 +146,23 @@ class PlanManager {
                                 if (subTask.sub_task_input.params.fontName !== undefined && typeof subTask.sub_task_input.params.fontName !== 'string') {
                                     return { success: false, message: `'params.fontName' for 'create_pdf_from_text' must be a string if provided.`, rawResponse: cleanedString, stages: [] };
                                 }
+                                if (subTask.sub_task_input.params.customFontFileName !== undefined) {
+                                    if (typeof subTask.sub_task_input.params.customFontFileName !== 'string') {
+                                        return { success: false, message: `'params.customFontFileName' for 'create_pdf_from_text' must be a string if provided.`, rawResponse: cleanedString, stages: [] };
+                                    }
+                                    if (!subTask.sub_task_input.params.customFontFileName.toLowerCase().endsWith('.ttf') && !subTask.sub_task_input.params.customFontFileName.toLowerCase().endsWith('.otf')) {
+                                        return { success: false, message: `'params.customFontFileName' for 'create_pdf_from_text' must end with '.ttf' or '.otf'.`, rawResponse: cleanedString, stages: [] };
+                                    }
+                                }
                             }
                             if ((subTask.sub_task_input.operation === "create_file" ||
                                  subTask.sub_task_input.operation === "append_to_file" ||
                                  subTask.sub_task_input.operation === "overwrite_file") &&
                                 (typeof subTask.sub_task_input.params.content !== 'string')
                                ) {
-                                 if (subTask.sub_task_input.operation !== "append_to_file" || subTask.sub_task_input.params.content === undefined) { // append allows empty content in tool, but create/overwrite need it
+                                 // append_to_file specific check for non-empty content is in the tool itself.
+                                 // Here we just check if content is a string for relevant operations.
+                                 if (subTask.sub_task_input.operation !== "append_to_file" || subTask.sub_task_input.params.content === undefined) {
                                      return { success: false, message: `'params.content' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
                                  }
                             }
@@ -248,7 +258,7 @@ Orchestrator Special Actions:
        - append_to_file: { "filename": "string", "content": "string", "directory"?: "string" } (content must be non-empty)
        - list_files: { "directory"?: "string" } (lists contents of this subdirectory within the workspace, or root if empty)
        - overwrite_file: (alias for create_file) { "filename": "string", "content": "string", "directory"?: "string" }
-       - create_pdf_from_text: { "filename": "string_ending_with.pdf", "text_content": "string", "directory"?: "string", "fontSize"?: number, "fontName"?: "string" }
+       - create_pdf_from_text: { "filename": "string_ending_with.pdf", "text_content": "string", "directory"?: "string", "fontSize"?: number, "fontName"?: "string", "customFontFileName"?: "string_ending_with.ttf_or_otf" (e.g., "DejaVuSans.ttf", from 'assets/fonts/') }
    Output: Varies by operation (e.g., success message, file content, list of files/dirs).
    When to use: For tasks requiring intermediate data storage, reading specific files, or organizing outputs within a dedicated workspace for the current task. All paths are relative to the task's workspace root.
  - FileDownloaderTool: Allows Orchestrator to download files from a URL into the task-specific workspace.
@@ -282,13 +292,15 @@ Example of a plan using FileSystemTool (including create_pdf_from_text):
       "sub_task_input": {
         "operation": "create_pdf_from_text",
         "params": {
-          "filename": "report.pdf",
-          "text_content": "This is the content of the PDF report.",
+          "filename": "report_custom_font.pdf",
+          "text_content": "This is a PDF report with a custom font if available.",
           "directory": "reports",
-          "fontSize": 10
+          "fontSize": 11,
+          "fontName": "Times-Roman",
+          "customFontFileName": "DejaVuSans.ttf"
         }
       },
-      "narrative_step": "Create a PDF report with specified content."
+      "narrative_step": "Create a PDF report with a custom font."
     }
   ],
   [
@@ -296,7 +308,7 @@ Example of a plan using FileSystemTool (including create_pdf_from_text):
       "assigned_agent_role": "Orchestrator",
       "tool_name": "GeminiStepExecutor",
       "sub_task_input": {
-        "prompt": "The PDF report 'reports/report.pdf' has been created. This is the final confirmation.",
+        "prompt": "The PDF report 'reports/report_custom_font.pdf' has been created. This is the final confirmation.",
         "isFinalAnswer": true
       },
       "narrative_step": "Confirm PDF creation and provide final status."
@@ -324,5 +336,3 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 }
 
 module.exports = PlanManager;
-
-[end of core/PlanManager.js]
