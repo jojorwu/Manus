@@ -1,4 +1,5 @@
 const fs = require('fs');
+const fsp = require('fs').promises;
 const path = require('path');
 const { saveTaskState, loadTaskState, saveTaskJournal } = require('../utils/taskStateUtil');
 const PlanManager = require('../core/PlanManager');
@@ -12,6 +13,7 @@ class OrchestratorAgent {
     this.resultsQueue = resultsQueue;
     this.llmService = llmService;
     this.agentApiKeysConfig = agentApiKeysConfig;
+    this.savedTasksBaseDir = path.join(__dirname, '..', 'saved_tasks');
 
     const capabilitiesPath = path.join(__dirname, '..', 'config', 'agentCapabilities.json');
     try {
@@ -35,6 +37,32 @@ class OrchestratorAgent {
             { /* Tools can be passed here if PlanExecutor needs them directly */ },
             path.join(__dirname, '..', 'saved_tasks') // Pass baseSavedTasksPath
     );
+  }
+
+  async _cleanupWorkspace(parentTaskId) {
+    if (!parentTaskId) {
+        console.warn("OrchestratorAgent._cleanupWorkspace: parentTaskId is undefined, skipping cleanup.");
+        return;
+    }
+    const workspaceDirPath = path.join(this.savedTasksBaseDir, parentTaskId, 'workspace');
+
+    try {
+        // Check if directory exists
+        await fsp.stat(workspaceDirPath);
+        // If stat succeeds, directory exists, so proceed with removal
+        console.log(`OrchestratorAgent._cleanupWorkspace: Attempting to remove workspace directory: ${workspaceDirPath}`);
+        await fsp.rm(workspaceDirPath, { recursive: true, force: true });
+        console.log(`OrchestratorAgent._cleanupWorkspace: Successfully removed workspace directory: ${workspaceDirPath}`);
+    } catch (error) {
+        if (error.code === 'ENOENT') {
+            // Directory does not exist, which is fine. Nothing to cleanup.
+            console.log(`OrchestratorAgent._cleanupWorkspace: Workspace directory not found (already removed or never created): ${workspaceDirPath}`);
+        } else {
+            // For other errors (e.g., permission issues), re-throw to be caught by the caller in handleUserTask
+            console.error(`OrchestratorAgent._cleanupWorkspace: Error during workspace cleanup for ${workspaceDirPath}. Error: ${error.message}`);
+            throw error;
+        }
+    }
   }
 
   _createOrchestratorJournalEntry(type, message, details = {}) {
@@ -445,6 +473,19 @@ Based on the original user task, execution history, and current working context,
 
         await saveTaskState(taskStateToSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`));
         finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "TASK_COMPLETED_SUCCESSFULLY" : "TASK_FAILED_FINAL", `Task processing finished. Overall Success: ${overallSuccess}`, { parentTaskId, finalStatus: taskStatusToSave }));
+
+        if (parentTaskId && (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK")) {
+            try {
+                console.log(`OrchestratorAgent: Attempting workspace cleanup for ParentTaskID ${parentTaskId}`);
+                await this._cleanupWorkspace(parentTaskId);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("WORKSPACE_CLEANUP_SUCCESS", `Workspace cleanup successful for ParentTaskID ${parentTaskId}.`, { parentTaskId }));
+            } catch (cleanupError) {
+                console.error(`OrchestratorAgent: Workspace cleanup failed for ParentTaskID ${parentTaskId}. Error: ${cleanupError.message}`);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("WORKSPACE_CLEANUP_FAILED", `Workspace cleanup failed for ParentTaskID ${parentTaskId}. Error: ${cleanupError.message}`, { parentTaskId, error: cleanupError.message }));
+                // Do not let cleanup error affect the overall task result
+            }
+        }
+
         await saveTaskJournal(parentTaskId, finalJournalEntries, path.join(__dirname, '..', 'saved_tasks'));
 
         return { success: overallSuccess, message: responseMessage, originalTask: currentOriginalTask, plan: planStages, executedPlan: executionContext, finalAnswer, currentWorkingContext };
@@ -465,6 +506,20 @@ Based on the original user task, execution history, and current working context,
         // Attempt to save state and journal even on critical error
         try {
             await saveTaskState(errorStateForSave, path.join(__dirname, '..', 'saved_tasks', `tasks_${new Date().toISOString().slice(5,7)}${new Date().toISOString().slice(8,10)}${new Date().toISOString().slice(0,4)}`, `task_state_${parentTaskId}.json`)); // Placeholder path
+
+            // Workspace cleanup attempt in critical error path
+            // Check if parentTaskId is available and if some processing that might create a workspace happened (currentOriginalTask might be an indicator)
+            // The executionMode check isn't directly available here, but if critical error happened after planning/execution attempt, cleanup is relevant.
+            if (parentTaskId && (currentOriginalTask !== undefined || taskIdToLoad !== null)) {
+                try {
+                    console.log(`OrchestratorAgent: Attempting workspace cleanup for ParentTaskID ${parentTaskId} after critical error.`);
+                    await this._cleanupWorkspace(parentTaskId);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("WORKSPACE_CLEANUP_SUCCESS", `Workspace cleanup successful for ParentTaskID ${parentTaskId} after critical error.`, { parentTaskId }));
+                } catch (cleanupError) {
+                    console.error(`OrchestratorAgent: Workspace cleanup failed for ParentTaskID ${parentTaskId} after critical error. Error: ${cleanupError.message}`);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("WORKSPACE_CLEANUP_FAILED", `Workspace cleanup failed for ParentTaskID ${parentTaskId} after critical error. Error: ${cleanupError.message}`, { parentTaskId, error: cleanupError.message }));
+                }
+            }
             await saveTaskJournal(parentTaskId, finalJournalEntries, path.join(__dirname, '..', 'saved_tasks'));
         } catch (saveError) {
             console.error(`OrchestratorAgent: Failed to save state/journal during critical error handling: ${saveError.message}`);
