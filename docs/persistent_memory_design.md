@@ -35,13 +35,13 @@ The following key pieces of information should be persisted for each task:
     *   `confidenceScore` (number, 0.0-1.0): The agent's current confidence in its ability to meet the user's goal. (Future use).
     *   `errorsEncountered` (array of objects): A list of errors encountered during execution. Each object might contain:
         *   `errorId` (string, UUID): Unique ID for the error instance.
-        *   `sourceStepNarrative` (string): Narrative of the step that failed.
-        *   `sourceToolName` (string): Name of the tool that failed.
+        *   `sourceStepNarrative` (string): Narrative of the step that failed. For composite tools like `ExploreSearchResults`, this might be further detailed to indicate the specific sub-item that caused the error (e.g., "Explore websites (processing URL: http://example.com/failed_url)").
+        *   `sourceToolName` (string): Name of the tool that failed (or the primary tool if the error originated from a sub-operation).
         *   `errorMessage` (string): The error message.
         *   `timestamp` (string, ISO8601): When the error was recorded.
 *   **`TaskJournal`**: A detailed, append-only log of all significant events and state changes during the task lifecycle, stored in a separate `task_journal_{parentTaskId}.jsonl` file. Each line is a JSON object representing a journal entry. Entries include:
     *   `timestamp` (string, ISO8601): Time of the event.
-    *   `type` (string): Type of the event (e.g., "TASK_RECEIVED", "PLANNING_STARTED", "EXECUTION_STEP_DISPATCHED", "CWC_UPDATED", "FINAL_SYNTHESIS_FAILED", "EXECUTION_ATTEMPT_START", "EXECUTION_ATTEMPT_SUCCESS", "EXECUTION_ATTEMPT_FAILED", "REPLANNING_STARTED", "REPLANNING_SUCCESS", "REPLANNING_FAILED", "MAX_REVISIONS_REACHED").
+    *   `type` (string): Type of the event (e.g., "TASK_RECEIVED", "PLANNING_STARTED", "EXECUTION_STEP_DISPATCHED", "CWC_UPDATED", "FINAL_SYNTHESIS_FAILED", "EXECUTION_ATTEMPT_START", "EXECUTION_ATTEMPT_SUCCESS", "EXECUTION_ATTEMPT_FAILED", "REPLANNING_STARTED", "REPLANNING_SUCCESS", "REPLANNING_FAILED", "MAX_REVISIONS_REACHED", "EXECUTION_STEP_PARTIAL_ERRORS").
     *   `source` (string): Originator of the event (e.g., "OrchestratorAgent", "PlanManager", "PlanExecutor").
     *   `message` (string): Human-readable description of the event.
     *   `details` (object): Any relevant data associated with the event (e.g., step details, error messages, CWC summary).
@@ -150,8 +150,13 @@ The `OrchestratorAgent` is primarily responsible for managing the lifecycle of t
     *   Log `EXECUTION_CYCLE_STARTED` to journal.
     *   A loop begins for execution attempts (up to `MAX_REVISIONS` + 1 total attempts).
         *   Log `EXECUTION_ATTEMPT_START` or `REPLANNING_EXECUTION_ATTEMPT_START`. Update CWC.
-        *   `PlanExecutor.executePlan()` is called. It internally generates journal entries for its operations and collects `keyFindings` and `errorsEncountered`.
-        *   `OrchestratorAgent` merges executor's journal entries. It updates its main CWC with `keyFindings` and `errorsEncountered` from this attempt.
+        *   `PlanExecutor.executePlan()` is called.
+            *   It internally generates journal entries for its operations.
+            *   It collects `keyFindings` from successful steps.
+            *   It collects `errorsEncountered` for steps that fail entirely.
+            *   Specifically for tools like `ExploreSearchResults`, if the tool itself completes but reports `partial_errors` (e.g., some URLs failed to load), `PlanExecutor` will iterate these `partial_errors`, create standardized error entries, and add them to its `collectedErrors` list. It will also log an `EXECUTION_STEP_PARTIAL_ERRORS` event to the journal.
+        *   `OrchestratorAgent` merges executor's journal entries into its `finalJournalEntries`.
+        *   `OrchestratorAgent` updates its main CWC with `keyFindings` and all `errorsEncountered` (including those from `partial_errors`) from this attempt.
         *   **If execution is successful:**
             *   Log `EXECUTION_ATTEMPT_SUCCESS`. Update CWC. The loop breaks.
         *   **If execution fails:**

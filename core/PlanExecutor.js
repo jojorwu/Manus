@@ -21,47 +21,56 @@ class PlanExecutor {
         }
     }
 
-    _resolveOutputReferences(data, stepOutputs, currentStepIdForLog = '') {
+    async _resolveOutputReferences(data, stepOutputs, currentStepIdForLog = '') {
         const referenceRegex = /^@{outputs\.([a-zA-Z0-9_.-]+)\.(result_data|processed_result_data)}$/; // Full string match
 
         if (typeof data === 'string') {
             const match = data.match(referenceRegex);
             if (match) {
                 const sourceStepId = match[1];
-                const fieldName = match[2];
+                const requestedFieldName = match[2]; // Use a different name to avoid confusion with actual field in stepOutputs
 
                 if (!stepOutputs[sourceStepId]) {
                     throw new Error(`Unresolved reference: Step ID '${sourceStepId}' not found in outputs (referenced by step ${currentStepIdForLog}).`);
                 }
+                // Strict check for COMPLETED status
                 if (stepOutputs[sourceStepId].status !== "COMPLETED") {
-                    // Allow referencing outputs of FAILED steps if necessary for some specific recovery/logging tools,
-                    // but typically one would expect to reference COMPLETED steps.
-                    // For now, strict check for COMPLETED. This can be relaxed if a use case arises.
-                     console.warn(`PlanExecutor._resolveOutputReferences: Referenced step '${sourceStepId}' did not complete successfully. Status: ${stepOutputs[sourceStepId].status} (referenced by step ${currentStepIdForLog}). Output might be null or incomplete.`);
-                     // If strict failure is desired:
-                     // throw new Error(`Unresolved reference: Referenced step '${sourceStepId}' did not complete successfully. Status: ${stepOutputs[sourceStepId].status} (referenced by step ${currentStepIdForLog}).`);
-                }
-                if (!(fieldName in stepOutputs[sourceStepId])) {
-                    // This case should ideally not happen if stepOutputs always populates both fields (even if null/undefined)
-                    throw new Error(`Unresolved reference: Field '${fieldName}' not found in output of step '${sourceStepId}' (referenced by step ${currentStepIdForLog}).`);
+                     throw new Error(`Referenced step '${sourceStepId}' did not complete successfully. Status: ${stepOutputs[sourceStepId].status} (referenced by step ${currentStepIdForLog}). Cannot use its output.`);
                 }
 
-                // If fieldName is 'processed_result_data' and it's undefined or null, fallback to 'result_data'
-                let resolvedValue = stepOutputs[sourceStepId][fieldName];
-                if (fieldName === 'processed_result_data' && (resolvedValue === undefined || resolvedValue === null)) {
-                    resolvedValue = stepOutputs[sourceStepId]['result_data'];
+                let actualFieldName = requestedFieldName;
+                let resolvedValue = stepOutputs[sourceStepId][actualFieldName];
+
+                // Fallback logic for processed_result_data
+                if (requestedFieldName === 'processed_result_data' && (resolvedValue === undefined || resolvedValue === null)) {
+                    if (stepOutputs[sourceStepId].hasOwnProperty('result_data')) { // Check if result_data actually exists
+                        console.warn(`PlanExecutor._resolveOutputReferences: Field 'processed_result_data' for step '${sourceStepId}' is null or undefined. Falling back to 'result_data' (referenced by step ${currentStepIdForLog}).`);
+                        actualFieldName = 'result_data';
+                        resolvedValue = stepOutputs[sourceStepId][actualFieldName];
+                    } else {
+                        // If even result_data doesn't exist (should be rare for completed steps), this is an issue.
+                         console.warn(`PlanExecutor._resolveOutputReferences: Field 'processed_result_data' for step '${sourceStepId}' is null/undefined, and fallback 'result_data' also does not exist (referenced by step ${currentStepIdForLog}).`);
+                        // Keep resolvedValue as is (null/undefined) or throw error based on strictness desired.
+                        // For now, let it pass as null/undefined if both are missing.
+                    }
                 }
 
-                // If the entire string is a reference, return the resolved value directly (could be an object/array)
+                // Check if the (potentially fallback) fieldName actually exists in the output
+                if (!stepOutputs[sourceStepId].hasOwnProperty(actualFieldName)) {
+                     throw new Error(`Unresolved reference: Field '${actualFieldName}' not found in output of step '${sourceStepId}' (referenced by step ${currentStepIdForLog}).`);
+                }
+
                 return resolvedValue;
             }
-            return data; // Not a reference or not a full-string reference
+            return data; // Not a reference
         } else if (Array.isArray(data)) {
-            return data.map(item => this._resolveOutputReferences(item, stepOutputs, currentStepIdForLog));
+            // Use Promise.all for concurrent async resolution of array items
+            const resolvedArray = await Promise.all(data.map(item => this._resolveOutputReferences(item, stepOutputs, currentStepIdForLog)));
+            return resolvedArray;
         } else if (typeof data === 'object' && data !== null) {
             const newData = {};
             for (const key in data) {
-                newData[key] = this._resolveOutputReferences(data[key], stepOutputs, currentStepIdForLog);
+                newData[key] = await this._resolveOutputReferences(data[key], stepOutputs, currentStepIdForLog);
             }
             return newData;
         }
@@ -124,25 +133,15 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId) {
         console.log(`PlanExecutor: Handling special step ExploreSearchResults: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
-        // Use resolvedSubTaskInput for logic, but subTaskDefinition.sub_task_input for returning in context
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
+        const pageProcessingErrors = []; // Initialize array for partial errors
 
         let previousSearchResults = null;
-        // previous_step_output or specific stepId reference should be resolved by _resolveOutputReferences
-        // If ExploreSearchResults relies on implicit last WebSearchTool output, this logic needs adjustment
-        // For now, assuming 'previousSearchResults' might be directly provided via resolvedSubTaskInput if the plan uses output referencing
-        // or we keep the existing logic if it's implicitly the last WebSearchTool result.
-        // Let's assume for now that specific search results are passed in via resolvedSubTaskInput if needed.
-        // If not, this part needs to be smarter or the plan more explicit.
-        // For this iteration, we'll keep the existing implicit search for previous WebSearchTool if not directly provided.
-        // A more robust way would be for the plan to *always* reference the search results explicitly.
-
-        const searchResultsInput = resolvedSubTaskInput?.searchResults; // Example: plan could specify @{outputs.search_step.result_data}
+        const searchResultsInput = resolvedSubTaskInput?.searchResults;
 
         if (searchResultsInput && Array.isArray(searchResultsInput)) {
             previousSearchResults = searchResultsInput;
         } else {
-            // Fallback to existing implicit search if not explicitly provided
             for (let k = executionContext.length - 1; k >= 0; k--) {
                 const potentialResults = executionContext[k].processed_result_data || executionContext[k].raw_result_data;
                 if (executionContext[k].tool_name === "WebSearchTool" && executionContext[k].status === "COMPLETED" && potentialResults) {
@@ -156,19 +155,19 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             }
         }
 
-
         if (!previousSearchResults || !Array.isArray(previousSearchResults) || previousSearchResults.length === 0) {
-            console.warn(`PlanExecutor.ExploreSearchResults (StepID: ${subTaskDefinition.stepId}): No valid search results found from previous steps or resolved input.`);
+            console.warn(`PlanExecutor.ExploreSearchResults (StepID: ${subTaskDefinition.stepId}): No valid search results found.`);
             return {
                 sub_task_id: sub_task_id,
-                stepId: subTaskDefinition.stepId, // Ensure stepId is returned
+                stepId: subTaskDefinition.stepId,
                 narrative_step: subTaskDefinition.narrative_step,
                 tool_name: "ExploreSearchResults",
                 assigned_agent_role: "Orchestrator",
-                sub_task_input: originalSubTaskInput, // Return original input
-                status: "COMPLETED", // Or FAILED if this is critical
+                sub_task_input: originalSubTaskInput,
+                status: "COMPLETED",
                 result_data: "No search results available to explore or results format was incompatible.",
-                error_details: null // Or an error if considered a failure
+                partial_errors: pageProcessingErrors,
+                error_details: { message: "No valid search results found to explore." }
             };
         }
 
@@ -187,7 +186,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 sub_task_input: originalSubTaskInput,
                 status: "COMPLETED",
                 result_data: "No valid links found in search results to explore.",
-                error_details: null
+                partial_errors: pageProcessingErrors,
+                error_details: { message: "No valid links found in search results to explore." }
             };
         }
 
@@ -196,27 +196,37 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
         for (const url of linksToRead) {
             try {
-                console.log(`PlanExecutor._handleExploreSearchResults: Reading URL - ${url} for SubTaskID: ${sub_task_id}`);
+                console.log(`PlanExecutor._handleExploreSearchResults: Reading URL - ${url} for SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId}`);
                 const readResult = await webpageReader.execute({ url });
                 if (readResult.error) {
+                    const errorDetail = { url: url, errorMessage: readResult.error };
+                    pageProcessingErrors.push(errorDetail);
                     aggregatedContent += `Error reading ${url}: ${readResult.error}\n---\n`;
                 } else if (readResult.result) {
                     aggregatedContent += `Content from ${url}:\n${readResult.result}\n---\n`;
                 }
             } catch (e) {
+                const errorDetail = { url: url, errorMessage: e.message };
+                pageProcessingErrors.push(errorDetail);
                 aggregatedContent += `Exception while reading ${url}: ${e.message}\n---\n`;
             }
         }
+
+        const finalErrorDetails = pageProcessingErrors.length > 0
+            ? { message: `Encountered ${pageProcessingErrors.length} error(s) while processing URLs. See partial_errors for details.` }
+            : null;
+
         return {
             sub_task_id: sub_task_id,
             stepId: subTaskDefinition.stepId,
             narrative_step: subTaskDefinition.narrative_step,
             tool_name: "ExploreSearchResults",
             assigned_agent_role: "Orchestrator",
-            sub_task_input: originalSubTaskInput, // Return original input
-            status: "COMPLETED",
-            result_data: aggregatedContent || "No content could be fetched from the explored pages.",
-            error_details: null
+            sub_task_input: originalSubTaskInput,
+            status: "COMPLETED", // Step itself completed, even if some pages failed
+            result_data: aggregatedContent.trim() || "No content could be fetched from the explored pages.",
+            partial_errors: pageProcessingErrors,
+            error_details: finalErrorDetails
         };
     }
 
@@ -526,7 +536,41 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                         result_data: contextEntry.raw_result_data,
                         processed_result_data: contextEntry.processed_result_data,
                         error_details: contextEntry.error_details
+                        // Note: partial_errors from ExploreSearchResults are not stored in stepOutputs directly,
+                        // as they are specific to that tool's execution instance.
+                        // They are processed below to be added to collectedErrors for CWC.
                     };
+                }
+
+                // Process partial_errors from ExploreSearchResults
+                if (contextEntry.tool_name === "ExploreSearchResults" &&
+                    resultOfSubTask.partial_errors &&
+                    resultOfSubTask.partial_errors.length > 0) {
+
+                    journalEntries.push(this._createJournalEntry(
+                        "EXECUTION_STEP_PARTIAL_ERRORS",
+                        `Step '${contextEntry.narrative_step}' (Tool: ${contextEntry.tool_name}, StepID: ${contextEntry.stepId}) completed with ${resultOfSubTask.partial_errors.length} partial error(s) while processing URLs.`,
+                        {
+                            parentTaskId,
+                            stageIndex: stageIndex,
+                            subTaskId: contextEntry.sub_task_id,
+                            stepId: contextEntry.stepId,
+                            partialErrorCount: resultOfSubTask.partial_errors.length,
+                            errors: resultOfSubTask.partial_errors
+                        }
+                    ));
+
+                    for (const partialErr of resultOfSubTask.partial_errors) {
+                        const encounteredErrorEntry = {
+                            errorId: uuidv4(),
+                            sourceStepNarrative: `${contextEntry.narrative_step} (processing URL: ${partialErr.url || 'Unknown URL'})`,
+                            sourceToolName: contextEntry.tool_name,
+                            // subToolName: "ReadWebpageTool", // Optional: if we want this level of detail
+                            errorMessage: partialErr.errorMessage,
+                            timestamp: new Date().toISOString()
+                        };
+                        collectedErrors.push(encounteredErrorEntry);
+                    }
                 }
 
 
