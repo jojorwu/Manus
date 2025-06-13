@@ -82,15 +82,19 @@ A task queue-based system will manage communication and task distribution.
 1.  User submits task via frontend to a backend API endpoint (e.g., `/api/generate-plan`).
 2.  API routes task to `OrchestratorAgent`; `parent_task_id` generated.
 3.  `OrchestratorAgent` invokes `PlanManager` to obtain an execution plan.
-    *   `PlanManager` attempts to use a template or generates a new plan using an LLM (prompt includes FileSystemTool with its operations like `create_pdf_from_text`, & FileDownloaderTool for Orchestrator).
-    *   `PlanManager` validates the plan and returns it to `OrchestratorAgent`.
+    *   `PlanManager` attempts to use a template or generates a new plan using an LLM. The LLM is instructed to:
+        *   Assign a unique `stepId` to each step in the plan.
+        *   Use the `@{outputs.SOURCE_STEP_ID.FIELD_NAME}` syntax in a step's `sub_task_input` if it needs to reference the output (`result_data` or `processed_result_data`) of a previous step.
+        *   Utilize other features like `isFinalAnswer` flag, Orchestrator tools (FileSystemTool, FileDownloaderTool), etc.
+    *   `PlanManager` validates the generated plan, including the correctness of `stepId`s (presence, uniqueness) and the syntax of output references. It then returns the plan to `OrchestratorAgent`.
 4.  **Execution Cycle Begins:** `OrchestratorAgent` initiates the execution/replanning loop.
-    *   **Attempt Execution:** `OrchestratorAgent` calls `PlanExecutor.executePlan` with the current plan (initially, the one from `PlanManager`).
-        *   `PlanExecutor` iterates through stages/steps:
-            *   Worker agent tasks are dispatched via `SubTaskQueue`.
-            *   Orchestrator-level actions (e.g., `ExploreSearchResults`, `FileSystemTool`, `FileDownloaderTool`) are handled directly by `PlanExecutor`.
-            *   `PlanExecutor` awaits results from worker agents (via `ResultsQueue`) or from its direct actions.
-        *   `PlanExecutor` returns its outcome: `success` (boolean), `executionContext`, `journalEntries`, `updatesForWorkingContext`, `failedStepDetails` (if failed), and potentially `finalAnswer` (if pre-synthesized).
+    *   **Attempt Execution:** `OrchestratorAgent` calls `PlanExecutor.executePlan` with the current plan.
+        *   `PlanExecutor` iterates through stages and steps:
+            *   **Reference Resolution:** Before executing each step, `PlanExecutor` resolves any `@{outputs...}` references in its `sub_task_input` by looking up the `SOURCE_STEP_ID` in its internal `stepOutputs` map (which stores results of already executed steps). If a reference is invalid (e.g., source step not found, not completed successfully, field name incorrect), the current step fails at this resolution phase.
+            *   Worker agent tasks (with resolved inputs) are dispatched via `SubTaskQueue`.
+            *   Orchestrator-level actions (with resolved inputs) are handled directly by `PlanExecutor`.
+            *   `PlanExecutor` awaits results. After each step completes (or fails), its output (and `stepId`) is stored in the `stepOutputs` map for potential future references, and also recorded in `contextEntry` (with the original, unresolved `sub_task_input`).
+        *   `PlanExecutor` returns its overall outcome: `success` (boolean), `executionContext` (containing `stepId` and original `sub_task_input` for each step), `journalEntries`, `updatesForWorkingContext`, `failedStepDetails` (if failed), and potentially `finalAnswer`.
     *   Worker agents (`ResearchAgent`, `UtilityAgent`) process tasks from `SubTaskQueue` and send results to `ResultsQueue` as before.
     *   **Outcome Processing by OrchestratorAgent:**
         *   `OrchestratorAgent` merges `PlanExecutor`'s journal entries and updates its `CurrentWorkingContext` with `keyFindings` and `errorsEncountered`.
@@ -123,8 +127,16 @@ A task queue-based system will manage communication and task distribution.
     ├── UtilityAgent.js
     └── BaseAgent.js      # (Optional)
     core/
-    ├── PlanManager.js    # Handles initial plan generation and plan revision (replanning). Accepts `isRevision` flag and context for revisions. Instructs LLM on 'isFinalAnswer' and Orchestrator tools.
-    ├── PlanExecutor.js   # Handles execution of a given plan. Returns `failedStepDetails` on failure. Collects CWC data, identifies pre-synthesized answers.
+    ├── PlanManager.js    # Handles initial plan generation and plan revision (replanning).
+    #                       - Accepts `isRevision` flag and context for revisions.
+    #                       - Instructs LLM on 'isFinalAnswer', Orchestrator tools, `stepId` generation for each step, and the use of `@{outputs.SOURCE_STEP_ID.FIELD_NAME}` syntax for referencing outputs of prior steps in `sub_task_input`.
+    #                       - Validates `stepId` (presence, format, uniqueness) and the basic syntax of `@{outputs...}` references in the generated plan.
+    ├── PlanExecutor.js   # Handles execution of a given plan.
+    #                       - Before executing each step, resolves `@{outputs...}` references in its `sub_task_input` using a map of previously completed step outputs (`stepOutputs`).
+    #                       - A reference to a non-successfully completed step (`status !== "COMPLETED"`) or an invalid reference will cause the dependent step to fail during resolution.
+    #                       - Stores the `stepId` (from the plan) in each `contextEntry`.
+    #                       - Populates the `stepOutputs` map with the results of each completed/failed step, keyed by `stepId`.
+    #                       - Returns `failedStepDetails` on failure. Collects CWC data, identifies pre-synthesized answers.
     ├── SubTaskQueue.js   # (In-memory initially) for dispatching tasks to worker agents.
     └── ResultsQueue.js # (In-memory initially) for receiving results from worker agents.
     tools/

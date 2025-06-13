@@ -51,6 +51,11 @@ This project consists of two main components: a Node.js backend that houses the 
     *   **Task Journal (`task_journal_{taskId}.jsonl`):** Detailed JSONL log of all significant events.
     *   **CurrentWorkingContext (CWC):** Evolves during task execution, holding `summaryOfProgress`, `keyFindings`, `errorsEncountered`, `nextObjective`. `summaryOfProgress` and `nextObjective` can be intelligently updated by an LLM.
 *   **Context-Aware Result Summarization**: Intermediate results can be summarized by LLM within `PlanExecutor`.
+*   **Step Output Referencing & Data Dependency:**
+    *   Each step in a plan is assigned a unique `stepId` by the LLM during planning.
+    *   Subsequent steps can reference the output of previously executed steps in their `sub_task_input` using the syntax `@{outputs.SOURCE_STEP_ID.FIELD_NAME}`.
+    *   `FIELD_NAME` can be `result_data` (raw output) or `processed_result_data` (summarized/processed output).
+    *   This allows for creating dynamic plans where data flows between steps. `PlanManager` validates syntax, and `PlanExecutor` resolves these references at runtime.
 *   **Avoids Double Synthesis:** Checks if `PlanExecutor` has already generated a final answer.
 *   **Modern Web Interface:** React/Vite/Tailwind/Shadcn/UI frontend.
 
@@ -123,6 +128,8 @@ CSE_ID="YOUR_CSE_ID_HERE"
 The process generally involves:
 1.  Defining the tool class in `tools/`.
 2.  Importing and instantiating it in `index.js` (if it's a worker agent tool) or ensuring `PlanExecutor` can instantiate it (if it's an Orchestrator-level tool).
-3.  Adding its description to `config/agentCapabilities.json` (for worker agent tools) or to the `planningPrompt` in `PlanManager.js` (for Orchestrator-level tools).
-4.  Ensuring `PlanExecutor` can handle it correctly.
+3.  Adding its description to `config/agentCapabilities.json` (for worker agent tools) or to the `planningPrompt` in `core/PlanManager.js` (for Orchestrator-level tools).
+    *   `PlanManager.js`: Its `planningPrompt` instructs the LLM on tool usage, `stepId` generation, and the `@{outputs...}` syntax for data dependencies. It also validates these aspects in the generated plan.
+4.  Ensuring `core/PlanExecutor.js` can handle the tool correctly.
+    *   `PlanExecutor.js`: Manages the actual execution, including resolving `@{outputs...}` references at runtime using a map of step outputs, before dispatching to the tool or agent.
 ```

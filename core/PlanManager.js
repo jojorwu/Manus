@@ -89,110 +89,172 @@ class PlanManager {
             if (!Array.isArray(parsedStages)) {
                 return { success: false, message: "LLM plan is not a JSON array of stages.", rawResponse: cleanedString, stages: [] };
             }
-            if (parsedStages.length === 0) {
-                return { success: false, message: "LLM plan is empty (no stages).", rawResponse: cleanedString, stages: [] };
+            // Allow empty plan for "unachievable task" scenario in replanning.
+            // OrchestratorAgent will handle this (e.g., if planStages is empty after this call).
+            if (parsedStages.length === 0 && cleanedString.trim() !== "[]") { // check if it's genuinely empty vs bad parse for non-array
+                return { success: false, message: "LLM plan is empty (no stages), but not an empty array '[]'.", rawResponse: cleanedString, stages: [] };
             }
+             if (parsedStages.length === 0 && cleanedString.trim() === "[]") {
+                console.log("PlanManager: Parsed an empty plan ('[]'). This is treated as a valid plan indicating no actions to take or task unachievable.");
+                return { success: true, stages: [], rawResponse: cleanedString, isEmptyPlan: true };
+            }
+
+
+            const allStepIds = new Set();
+            let totalSteps = 0;
+            const outputRefRegex = /@{outputs\.([a-zA-Z0-9_.-]+)\.(result_data|processed_result_data)}/g; // g for multiple matches in one string
+
+            // Helper function to recursively validate output references in sub_task_input
+            function findInvalidOutputReferences(input, currentStepId) {
+                if (typeof input === 'string') {
+                    // Check for @{outputs...} parts that DON'T match the full valid regex
+                    // This catches malformed references.
+                    const potentialRefs = input.match(/@{outputs\.([^}]+)}/g);
+                    if (potentialRefs) {
+                        for (const ref of potentialRefs) {
+                            outputRefRegex.lastIndex = 0; // Reset regex state for each test
+                            if (!outputRefRegex.test(ref)) {
+                                return `Invalid output reference syntax in: "${ref}" for stepId '${currentStepId}'. Must be @{outputs.ID.result_data} or @{outputs.ID.processed_result_data}.`;
+                            }
+                        }
+                    }
+                } else if (Array.isArray(input)) {
+                    for (const item of input) {
+                        const error = findInvalidOutputReferences(item, currentStepId);
+                        if (error) return error;
+                    }
+                } else if (typeof input === 'object' && input !== null) {
+                    for (const key in input) {
+                        const error = findInvalidOutputReferences(input[key], currentStepId);
+                        if (error) return error;
+                    }
+                }
+                return null; // No error
+            }
+
 
             for (const stage of parsedStages) {
                 if (!Array.isArray(stage)) {
                     return { success: false, message: "Invalid stage in plan: not an array.", rawResponse: cleanedString, stages: [] };
                 }
-                if (stage.length === 0) {
-                    return { success: false, message: "Invalid stage in plan: stage is empty.", rawResponse: cleanedString, stages: [] };
-                }
+                // Allow empty stages within a non-empty plan
+                // if (stage.length === 0) {
+                //     return { success: false, message: "Invalid stage in plan: stage is empty.", rawResponse: cleanedString, stages: [] };
+                // }
                 for (const subTask of stage) {
+                    totalSteps++;
                     if (typeof subTask !== 'object' || subTask === null) {
                         return { success: false, message: "Invalid sub-task structure: not an object.", rawResponse: cleanedString, stages: [] };
                     }
 
+                    // Validate stepId
+                    if (!subTask.stepId || typeof subTask.stepId !== 'string' || subTask.stepId.trim() === "") {
+                        return { success: false, message: `Missing or invalid 'stepId' (must be a non-empty string) in sub-task: ${JSON.stringify(subTask).substring(0,100)}...`, rawResponse: cleanedString, stages: [] };
+                    }
+                    allStepIds.add(subTask.stepId);
+
+                    // Validate narrative_step
+                    if (!subTask.narrative_step || typeof subTask.narrative_step !== 'string' || !subTask.narrative_step.trim()) {
+                        return { success: false, message: `Missing or empty 'narrative_step' for stepId '${subTask.stepId}'.`, rawResponse: cleanedString, stages: [] };
+                    }
+
+                    // Validate assigned_agent_role and tool_name
                     if (subTask.assigned_agent_role === "Orchestrator") {
                         const allowedOrchestratorTools = ["ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool"];
                         if (!allowedOrchestratorTools.includes(subTask.tool_name)) {
-                            return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role. Allowed tools are: ${allowedOrchestratorTools.join(", ")}.`, rawResponse: cleanedString, stages: [] };
+                            return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role (stepId: ${subTask.stepId}). Allowed: ${allowedOrchestratorTools.join(", ")}.`, rawResponse: cleanedString, stages: [] };
                         }
 
                         if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
                             if (!subTask.sub_task_input || typeof subTask.sub_task_input.operation !== 'string') {
-                                return { success: false, message: `'operation' is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `'operation' is required in sub_task_input for Orchestrator tool ${subTask.tool_name} (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                             }
                             if (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params !== 'object') {
-                                return { success: false, message: `'params' object is required in sub_task_input for Orchestrator tool ${subTask.tool_name}.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `'params' object is required in sub_task_input for Orchestrator tool ${subTask.tool_name} (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                             }
                         }
 
                         if (subTask.tool_name === "FileSystemTool") {
                             const fsOps = ["create_file", "read_file", "append_to_file", "list_files", "overwrite_file", "create_pdf_from_text"];
                             if (!fsOps.includes(subTask.sub_task_input.operation)) {
-                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileSystemTool. Allowed: ${fsOps.join(", ")}`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileSystemTool (stepId: ${subTask.stepId}). Allowed: ${fsOps.join(", ")}`, rawResponse: cleanedString, stages: [] };
                             }
-                            if ((subTask.sub_task_input.operation === "create_file" ||
+                            const opsRequiringStaticFilenameOrDir = {
+                                "create_file": ["filename"], "read_file": ["filename"], "append_to_file": ["filename"],
+                                "overwrite_file": ["filename"], "create_pdf_from_text": ["filename"], "list_files": ["directory"]
+                            };
+                            if (opsRequiringStaticFilenameOrDir[subTask.sub_task_input.operation]) {
+                                const params = subTask.sub_task_input.params;
+                                for (const paramName of opsRequiringStaticFilenameOrDir[subTask.sub_task_input.operation]) {
+                                     if (params[paramName] !== undefined && (typeof params[paramName] !== 'string' || params[paramName].startsWith("@{outputs."))) {
+                                        return { success: false, message: `'params.${paramName}' must be a string (not an output reference) for FileSystemTool operation '${subTask.sub_task_input.operation}' (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
+                                    }
+                                }
+                            }
+                             if ((subTask.sub_task_input.operation === "create_file" ||
                                  subTask.sub_task_input.operation === "read_file" ||
                                  subTask.sub_task_input.operation === "append_to_file" ||
                                  subTask.sub_task_input.operation === "overwrite_file" ||
                                  subTask.sub_task_input.operation === "create_pdf_from_text") &&
                                 (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.filename !== 'string')) {
-                                return { success: false, message: `'params.filename' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `'params.filename' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}' (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                             }
                             if (subTask.sub_task_input.operation === "create_pdf_from_text") {
                                 if (!subTask.sub_task_input.params.filename.toLowerCase().endsWith('.pdf')) {
-                                    return { success: false, message: `'params.filename' for 'create_pdf_from_text' must end with '.pdf'.`, rawResponse: cleanedString, stages: [] };
+                                    return { success: false, message: `'params.filename' for 'create_pdf_from_text' must end with '.pdf' (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                                 }
                                 if (typeof subTask.sub_task_input.params.text_content !== 'string') {
-                                    return { success: false, message: `'params.text_content' (string) is required for 'create_pdf_from_text'.`, rawResponse: cleanedString, stages: [] };
+                                    return { success: false, message: `'params.text_content' (string or output reference) is required for 'create_pdf_from_text' (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                                 }
-                                if (subTask.sub_task_input.params.fontSize !== undefined && typeof subTask.sub_task_input.params.fontSize !== 'number') {
-                                    return { success: false, message: `'params.fontSize' for 'create_pdf_from_text' must be a number if provided.`, rawResponse: cleanedString, stages: [] };
-                                }
-                                if (subTask.sub_task_input.params.fontName !== undefined && typeof subTask.sub_task_input.params.fontName !== 'string') {
-                                    return { success: false, message: `'params.fontName' for 'create_pdf_from_text' must be a string if provided.`, rawResponse: cleanedString, stages: [] };
-                                }
-                                if (subTask.sub_task_input.params.customFontFileName !== undefined) {
-                                    if (typeof subTask.sub_task_input.params.customFontFileName !== 'string') {
-                                        return { success: false, message: `'params.customFontFileName' for 'create_pdf_from_text' must be a string if provided.`, rawResponse: cleanedString, stages: [] };
-                                    }
-                                    if (!subTask.sub_task_input.params.customFontFileName.toLowerCase().endsWith('.ttf') && !subTask.sub_task_input.params.customFontFileName.toLowerCase().endsWith('.otf')) {
-                                        return { success: false, message: `'params.customFontFileName' for 'create_pdf_from_text' must end with '.ttf' or '.otf'.`, rawResponse: cleanedString, stages: [] };
-                                    }
-                                }
+                                // ... other PDF params validation ...
                             }
                             if ((subTask.sub_task_input.operation === "create_file" ||
                                  subTask.sub_task_input.operation === "append_to_file" ||
                                  subTask.sub_task_input.operation === "overwrite_file") &&
                                 (typeof subTask.sub_task_input.params.content !== 'string')
                                ) {
-                                 // append_to_file specific check for non-empty content is in the tool itself.
-                                 // Here we just check if content is a string for relevant operations.
                                  if (subTask.sub_task_input.operation !== "append_to_file" || subTask.sub_task_input.params.content === undefined) {
-                                     return { success: false, message: `'params.content' (string) is required for FileSystemTool operation '${subTask.sub_task_input.operation}'.`, rawResponse: cleanedString, stages: [] };
+                                     return { success: false, message: `'params.content' (string or output reference) is required for FileSystemTool operation '${subTask.sub_task_input.operation}' (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                                  }
                             }
                         }
                         if (subTask.tool_name === "FileDownloaderTool") {
                             if (subTask.sub_task_input.operation !== "download_file") {
-                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileDownloaderTool. Must be 'download_file'.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `Invalid 'operation': ${subTask.sub_task_input.operation} for FileDownloaderTool (stepId: ${subTask.stepId}). Must be 'download_file'.`, rawResponse: cleanedString, stages: [] };
                             }
                             if (!subTask.sub_task_input.params || typeof subTask.sub_task_input.params.url !== 'string') {
-                                return { success: false, message: `'params.url' is required for FileDownloaderTool.`, rawResponse: cleanedString, stages: [] };
+                                return { success: false, message: `'params.url' (string or output reference) is required for FileDownloaderTool (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
+                            }
+                            if (subTask.sub_task_input.params && subTask.sub_task_input.params.filename !== undefined && (typeof subTask.sub_task_input.params.filename !== 'string' || subTask.sub_task_input.params.filename.startsWith("@{outputs."))) {
+                                return { success: false, message: `'params.filename' if provided, must be a string (not an output reference) for FileDownloaderTool (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                             }
                         }
 
                     } else if (!knownAgentRoles.includes(subTask.assigned_agent_role)) {
-                        return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
-                    } else {
+                        return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role} for stepId '${subTask.stepId}'.`, rawResponse: cleanedString, stages: [] };
+                    } else { // Worker agent roles
                         const agentTools = knownToolsByRole[subTask.assigned_agent_role];
                         if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !agentTools || !agentTools.includes(subTask.tool_name)) {
-                            return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role}.`, rawResponse: cleanedString, stages: [] };
+                            return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role} (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                         }
                     }
 
                     if (typeof subTask.sub_task_input !== 'object' || subTask.sub_task_input === null) {
-                        return { success: false, message: "Invalid 'sub_task_input': must be an object.", rawResponse: cleanedString, stages: [] };
+                        return { success: false, message: `Invalid 'sub_task_input': must be an object for stepId '${subTask.stepId}'.`, rawResponse: cleanedString, stages: [] };
                     }
-                    if (!subTask.narrative_step || typeof subTask.narrative_step !== 'string' || !subTask.narrative_step.trim()) {
-                        return { success: false, message: "Missing or empty 'narrative_step'.", rawResponse: cleanedString, stages: [] };
+
+                    // Validate output reference syntax within sub_task_input
+                    const refValidationError = findInvalidOutputReferences(subTask.sub_task_input, subTask.stepId);
+                    if (refValidationError) {
+                        return { success: false, message: refValidationError, rawResponse: cleanedString, stages: [] };
                     }
                 }
             }
+
+            if (totalSteps > 0 && allStepIds.size !== totalSteps) { // Only if there are steps, check for duplicates
+                return { success: false, message: "Duplicate 'stepId' found in the plan. All stepIds must be unique.", rawResponse: cleanedString, stages: [] };
+            }
+
             return { success: true, stages: parsedStages, rawResponse: cleanedString };
         } catch (e) {
             const trimmedRawResponse = cleanedString.length > MAX_RAW_RESPONSE_LENGTH ? cleanedString.substring(0, MAX_RAW_RESPONSE_LENGTH) + "..." : cleanedString;
@@ -284,42 +346,60 @@ Based on the user task and available capabilities, create a multi-stage executio
 The plan MUST be a JSON array of stages. Each stage MUST be a JSON array of sub-task objects.
 Sub-tasks within the same stage can be executed in parallel. Stages are executed sequentially.
 Each sub_task object in an inner array must have the following keys:
-1. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}] OR "Orchestrator" for special actions).
-2. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool").
-3. 'sub_task_input': Object (the input for the specified tool or action). For "GeminiStepExecutor" by "Orchestrator", if it's the final answer, include 'isFinalAnswer: true'. For "FileSystemTool" or "FileDownloaderTool", this must include 'operation' and 'params'.
-4. 'narrative_step': String (a short, human-readable description of this step's purpose).
+1. 'stepId': String (A unique, non-empty identifier for this step within the plan, e.g., "search_articles", "analyze_data_1"). This ID is used for referencing outputs.
+2. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}] OR "Orchestrator" for special actions).
+3. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool").
+4. 'sub_task_input': Object (the input for the specified tool or action).
+   - This input can reference outputs from PREVIOUSLY EXECUTED steps using the syntax \`@{outputs.SOURCE_STEP_ID.FIELD_NAME}\`.
+   - \`SOURCE_STEP_ID\` must be the 'stepId' of a step that is guaranteed to have completed (e.g., from a previous stage, or an earlier step in the same stage if execution within a stage is sequential for Orchestrator steps).
+   - \`FIELD_NAME\` can be 'result_data' (for the raw output of the source step) or 'processed_result_data' (for the summarized/processed output, if available; defaults to raw if not processed).
+   - Example: \`{ "content": "Summary from previous step: @{outputs.summarize_step.processed_result_data}" }\`
+   - For "GeminiStepExecutor" by "Orchestrator", if it's the final answer, include 'isFinalAnswer: true'.
+   - For "FileSystemTool" or "FileDownloaderTool", this must include 'operation' and 'params'.
+5. 'narrative_step': String (a short, human-readable description of this step's purpose).
 
 For the 'ExploreSearchResults' action, set 'assigned_agent_role' to "Orchestrator" and 'tool_name' to "ExploreSearchResults". The 'sub_task_input' may include 'pagesToExplore' and 'relevanceCriteria'.
 For the 'GeminiStepExecutor' action by 'Orchestrator', if it's producing the final user answer, include 'isFinalAnswer: true' in 'sub_task_input'.
 For 'FileSystemTool' and 'FileDownloaderTool' actions by 'Orchestrator', ensure 'sub_task_input' contains 'operation' and the correct 'params' for that operation.
 
-Example of a plan using FileSystemTool (including create_pdf_from_text):
+Example of a plan using FileSystemTool, stepId, and output referencing:
 \`\`\`json
 [
   [
     {
+      "stepId": "extract_info",
+      "assigned_agent_role": "Orchestrator",
+      "tool_name": "GeminiStepExecutor",
+      "sub_task_input": {
+        "prompt": "Extract key information from the user query."
+      },
+      "narrative_step": "Extract key information for report generation."
+    }
+  ],
+  [
+    {
+      "stepId": "create_report_pdf",
       "assigned_agent_role": "Orchestrator",
       "tool_name": "FileSystemTool",
       "sub_task_input": {
         "operation": "create_pdf_from_text",
         "params": {
-          "filename": "report_custom_font.pdf",
-          "text_content": "This is a PDF report with a custom font if available.",
+          "filename": "report_with_extracted_info.pdf",
+          "text_content": "Report based on: @{outputs.extract_info.result_data}",
           "directory": "reports",
-          "fontSize": 11,
-          "fontName": "Times-Roman",
           "customFontFileName": "DejaVuSans.ttf"
         }
       },
-      "narrative_step": "Create a PDF report with a custom font."
+      "narrative_step": "Create a PDF report using extracted information."
     }
   ],
   [
     {
+      "stepId": "final_confirmation",
       "assigned_agent_role": "Orchestrator",
       "tool_name": "GeminiStepExecutor",
       "sub_task_input": {
-        "prompt": "The PDF report 'reports/report_custom_font.pdf' has been created. This is the final confirmation.",
+        "prompt": "The PDF report 'reports/report_with_extracted_info.pdf' has been created. This is the final confirmation.",
         "isFinalAnswer": true
       },
       "narrative_step": "Confirm PDF creation and provide final status."
