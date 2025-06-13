@@ -2,24 +2,36 @@ class ResearchAgent {
   constructor(subTaskQueue, resultsQueue, toolsMap, agentApiKeysConfig) {
     this.subTaskQueue = subTaskQueue;
     this.resultsQueue = resultsQueue;
+const { t } = require('../utils/localization');
+
+class ResearchAgent {
+  constructor(subTaskQueue, resultsQueue, toolsMap, agentApiKeysConfig) {
+    this.subTaskQueue = subTaskQueue;
+    this.resultsQueue = resultsQueue;
     this.toolsMap = toolsMap; // Expected: { "WebSearchTool": webSearchToolInstance, "ReadWebpageTool": readWebpageToolInstance }
     this.agentApiKeysConfig = agentApiKeysConfig; // For future tools that might need agent-specific keys
     this.agentRole = "ResearchAgent";
-    console.log("ResearchAgent: Инициализирован.");
+    console.log(t('INIT_DONE', { componentName: 'ResearchAgent' }));
   }
 
   startListening() {
-    console.log(`ResearchAgent (${this.agentRole}): Начинает прослушивание задач...`);
+    console.log(t('AGENT_LISTENING', { agentName: 'ResearchAgent', agentRole: this.agentRole }));
     this.subTaskQueue.subscribe(this.agentRole, this.processTaskMessage.bind(this));
   }
 
   async processTaskMessage(taskMessage) {
     const TOOL_EXECUTION_TIMEOUT_MS = 30000; // 30 секунд
-    console.log(`ResearchAgent (${this.agentRole}): Получена задача ID ${taskMessage.sub_task_id}, инструмент: ${taskMessage.tool_name}`);
-    console.log('ResearchAgent: Полное сообщение о задаче получено:', JSON.stringify(taskMessage, null, 2));
+    console.log(t('AGENT_RECEIVED_TASK', { agentName: 'ResearchAgent', agentRole: this.agentRole, subTaskId: taskMessage.sub_task_id, toolName: taskMessage.tool_name }));
+    console.log(t('AGENT_FULL_TASK_MSG', { agentName: 'ResearchAgent', taskMessage: JSON.stringify(taskMessage, null, 2) }));
 
     const { tool_name, sub_task_input, sub_task_id, parent_task_id } = taskMessage;
-    let outcome = { result: null, error: `ResearchAgent: Неизвестный инструмент '${tool_name}' или неверные входные данные.` };
+    // Note: Error messages returned in 'outcome.error' are already localized from previous subtasks.
+    // The t() function here is for console logging, not for the returned error strings.
+    let outcome = { result: null, error: t('UNKNOWN_TOOL_ERROR', { toolName: tool_name, agentName: 'ResearchAgent' }) }; // Assuming UNKNOWN_TOOL_ERROR is a key for the *returned* error
+    // However, the instruction was "Error messages that are *returned* by functions ... should remain as they are".
+    // So, the Russian string directly is correct as per previous subtasks.
+    // The console logs related to these errors will use t().
+    outcome = { result: null, error: `ResearchAgent: Неизвестный инструмент '${tool_name}' или неверные входные данные.` };
     let status = "FAILED"; // Default status
 
     const selectedTool = this.toolsMap[tool_name];
@@ -71,16 +83,16 @@ class ResearchAgent {
         // Any other scenario (e.g. executionPromise existed but outcome is somehow undefined) will also default to FAILED status.
 
       } catch (e) { // This catch block handles rejections from Promise.race (i.e., timeout) or other unexpected errors.
-        console.error(`ResearchAgent: Ошибка выполнения или таймаут для инструмента ${tool_name} для задачи ${sub_task_id}:`, e.message);
+        console.error(t('AGENT_EXEC_TIMEOUT', { agentName: 'ResearchAgent', toolName: tool_name, subTaskId: sub_task_id, errorMessage: e.message }), e);
         // Ensure outcome reflects the error from the catch block
         // The error message from timeoutPromise is already translated.
         // If e.message is from another source, it might not be.
-        const errorMessage = e.message || `ResearchAgent: Произошла непредвиденная ошибка во время выполнения инструмента или таймаута.`;
+        const errorMessage = e.message || `ResearchAgent: Произошла непредвиденная ошибка во время выполнения инструмента или таймаута.`; // This is a returned error, should be Russian.
         outcome = { result: null, error: errorMessage };
         // status remains "FAILED" (as initialized)
       }
     } else {
-        console.error(`ResearchAgent: Инструмент '${tool_name}' не найден в toolsMap для задачи ${sub_task_id}.`);
+        console.error(t('AGENT_TOOL_NOT_FOUND', { agentName: 'ResearchAgent', toolName: tool_name, subTaskId: sub_task_id }));
         // outcome is already set to the Russian version of "Unknown tool..."
     }
 
@@ -93,7 +105,7 @@ class ResearchAgent {
       error_details: outcome.error ? { message: outcome.error } : null // outcome.error is now in Russian if set by agent
     };
 
-    console.log(`ResearchAgent (${this.agentRole}): Добавление результата в очередь для sub_task_id ${sub_task_id}. Статус: ${status}`);
+    console.log(t('AGENT_ENQUEUING_RESULT', { agentName: 'ResearchAgent', agentRole: this.agentRole, subTaskId: sub_task_id, status: status }));
     this.resultsQueue.enqueueResult(resultMessage);
   }
 }
