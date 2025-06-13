@@ -5,21 +5,21 @@ class ResearchAgent {
     this.toolsMap = toolsMap; // Expected: { "WebSearchTool": webSearchToolInstance, "ReadWebpageTool": readWebpageToolInstance }
     this.agentApiKeysConfig = agentApiKeysConfig; // For future tools that might need agent-specific keys
     this.agentRole = "ResearchAgent";
-    console.log("ResearchAgent initialized.");
+    console.log("ResearchAgent: Инициализирован.");
   }
 
   startListening() {
-    console.log(`ResearchAgent (${this.agentRole}) starting to listen for tasks...`);
+    console.log(`ResearchAgent (${this.agentRole}): Начинает прослушивание задач...`);
     this.subTaskQueue.subscribe(this.agentRole, this.processTaskMessage.bind(this));
   }
 
   async processTaskMessage(taskMessage) {
     const TOOL_EXECUTION_TIMEOUT_MS = 30000; // 30 секунд
-    console.log(`ResearchAgent (${this.agentRole}): Received task ID ${taskMessage.sub_task_id}, tool: ${taskMessage.tool_name}`);
-    console.log('ResearchAgent: Full taskMessage received:', JSON.stringify(taskMessage, null, 2));
+    console.log(`ResearchAgent (${this.agentRole}): Получена задача ID ${taskMessage.sub_task_id}, инструмент: ${taskMessage.tool_name}`);
+    console.log('ResearchAgent: Полное сообщение о задаче получено:', JSON.stringify(taskMessage, null, 2));
 
     const { tool_name, sub_task_input, sub_task_id, parent_task_id } = taskMessage;
-    let outcome = { result: null, error: `Unknown tool '${tool_name}' for ResearchAgent or invalid input.` };
+    let outcome = { result: null, error: `ResearchAgent: Неизвестный инструмент '${tool_name}' или неверные входные данные.` };
     let status = "FAILED"; // Default status
 
     const selectedTool = this.toolsMap[tool_name];
@@ -34,23 +34,23 @@ class ResearchAgent {
                 validInput = true;
                 executionPromise = selectedTool.execute(sub_task_input);
             } else {
-                outcome = { result: null, error: "Invalid input for WebSearchTool: 'query' string is required." };
+                outcome = { result: null, error: "ResearchAgent: Неверный ввод для WebSearchTool: требуется строковый параметр 'query'." };
             }
         } else if (tool_name === "ReadWebpageTool") {
             if (sub_task_input && typeof sub_task_input.url === 'string') {
                 validInput = true;
                 executionPromise = selectedTool.execute(sub_task_input);
             } else {
-                outcome = { result: null, error: "Invalid input for ReadWebpageTool: 'url' string is required." };
+                outcome = { result: null, error: "ResearchAgent: Неверный ввод для ReadWebpageTool: требуется строковый параметр 'url'." };
             }
         } else {
             // This case should ideally not be hit if Orchestrator assigns valid tools
-            outcome = { result: null, error: `Tool '${tool_name}' not specifically handled by ResearchAgent logic, though it exists in toolsMap.` };
+            outcome = { result: null, error: `ResearchAgent: Инструмент '${tool_name}' существует в toolsMap, но не обрабатывается специальной логикой ResearchAgent.` };
         }
 
         if (validInput && executionPromise) {
             const timeoutPromise = new Promise((_, reject) =>
-                setTimeout(() => reject(new Error(`Tool '${tool_name}' execution timed out after ${TOOL_EXECUTION_TIMEOUT_MS}ms`)), TOOL_EXECUTION_TIMEOUT_MS)
+                setTimeout(() => reject(new Error(`ResearchAgent: Время выполнения инструмента '${tool_name}' истекло через ${TOOL_EXECUTION_TIMEOUT_MS}мс.`)), TOOL_EXECUTION_TIMEOUT_MS)
             );
             // Promise.race will either resolve with the tool's outcome or reject with the timeout error
             outcome = await Promise.race([executionPromise, timeoutPromise]);
@@ -71,14 +71,17 @@ class ResearchAgent {
         // Any other scenario (e.g. executionPromise existed but outcome is somehow undefined) will also default to FAILED status.
 
       } catch (e) { // This catch block handles rejections from Promise.race (i.e., timeout) or other unexpected errors.
-        console.error(`ResearchAgent: Error executing or timeout for tool ${tool_name} for task ${sub_task_id}:`, e.message);
+        console.error(`ResearchAgent: Ошибка выполнения или таймаут для инструмента ${tool_name} для задачи ${sub_task_id}:`, e.message);
         // Ensure outcome reflects the error from the catch block
-        outcome = { result: null, error: e.message || "An unexpected error occurred during tool execution or timeout." };
+        // The error message from timeoutPromise is already translated.
+        // If e.message is from another source, it might not be.
+        const errorMessage = e.message || `ResearchAgent: Произошла непредвиденная ошибка во время выполнения инструмента или таймаута.`;
+        outcome = { result: null, error: errorMessage };
         // status remains "FAILED" (as initialized)
       }
     } else {
-        console.error(`ResearchAgent: Tool '${tool_name}' not found in toolsMap for task ${sub_task_id}.`);
-        // outcome is already set to "Unknown tool..."
+        console.error(`ResearchAgent: Инструмент '${tool_name}' не найден в toolsMap для задачи ${sub_task_id}.`);
+        // outcome is already set to the Russian version of "Unknown tool..."
     }
 
     const resultMessage = {
@@ -87,10 +90,10 @@ class ResearchAgent {
       worker_agent_role: this.agentRole,
       status: status,
       result_data: outcome.result, // This will be null if there was an error
-      error_details: outcome.error ? { message: outcome.error } : null
+      error_details: outcome.error ? { message: outcome.error } : null // outcome.error is now in Russian if set by agent
     };
 
-    console.log(`ResearchAgent (${this.agentRole}): Enqueuing result for sub_task_id ${sub_task_id}. Status: ${status}`);
+    console.log(`ResearchAgent (${this.agentRole}): Добавление результата в очередь для sub_task_id ${sub_task_id}. Статус: ${status}`);
     this.resultsQueue.enqueueResult(resultMessage);
   }
 }

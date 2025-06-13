@@ -7,27 +7,30 @@ const PDFDocument = require('pdfkit');
 class FileSystemTool {
     constructor(taskWorkspaceDir) {
         if (!taskWorkspaceDir || typeof taskWorkspaceDir !== 'string' || taskWorkspaceDir.trim() === "") {
+            // This error is thrown on construction, so it might not be caught by the standard error handling of execute()
+            // For now, keeping it in English as it's a setup error. If localization is needed here, it's more complex.
+            // Consider: console.error("FileSystemTool: taskWorkspaceDir является обязательным параметром и должен быть непустой строкой.");
             throw new Error("FileSystemTool: taskWorkspaceDir is required and must be a non-empty string.");
         }
         this.taskWorkspaceDir = path.resolve(taskWorkspaceDir); // Ensure it's an absolute path
         // Create the base workspace directory if it doesn't exist
         fsp.mkdir(this.taskWorkspaceDir, { recursive: true })
-            .catch(err => console.error(`FileSystemTool: Failed to create root taskWorkspaceDir ${this.taskWorkspaceDir} on construction:`, err));
+            .catch(err => console.error(`FileSystemTool: Не удалось создать корневую taskWorkspaceDir ${this.taskWorkspaceDir} при инициализации:`, err));
     }
 
     async _getSafePath(userPath = '') {
         if (typeof userPath !== 'string') {
-            console.error("FileSystemTool._getSafePath: userPath was not a string, which is unexpected internally.");
-            throw new Error("FileSystemTool: Internal error - userPath must be a string for _getSafePath.");
+            console.error("FileSystemTool._getSafePath: userPath не является строкой, что является внутренней ошибкой.");
+            throw new Error("FileSystemTool: Внутренняя ошибка - userPath должен быть строкой для _getSafePath.");
         }
         const normalizedUserPath = path.normalize(userPath);
         if (normalizedUserPath.split(path.sep).includes('..')) {
-            throw new Error("FileSystemTool: Relative path components '..' are not allowed.");
+            throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены.");
         }
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
         if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
-            console.error(`FileSystemTool: Path traversal attempt. Workspace: '${this.taskWorkspaceDir}', UserPath: '${userPath}', Resolved: '${resolvedPath}'`);
-            throw new Error("FileSystemTool: Path traversal attempt detected.");
+            console.error(`FileSystemTool: Обнаружена попытка обхода пути. Рабочая область: '${this.taskWorkspaceDir}', Пользовательский путь: '${userPath}', Разрешенный путь: '${resolvedPath}'`);
+            throw new Error("FileSystemTool: Обнаружена попытка обхода пути.");
         }
         let dirToEnsure;
         let isDirectoryLike = userPath === '' || normalizedUserPath.endsWith(path.sep);
@@ -56,10 +59,10 @@ class FileSystemTool {
 
     async create_file(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            return { result: null, error: "Invalid input: 'filename' is required and must be a non-empty string." };
+            return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
         if (params.content === undefined || params.content === null || typeof params.content !== 'string') {
-            return { result: null, error: "Invalid input: 'content' is required and must be a string (can be empty)." };
+            return { result: null, error: "Неверный ввод: 'content' является обязательным и должен быть строкой (может быть пустой)." };
         }
         const directory = params.directory || '';
         const relativeFilePath = path.join(directory, params.filename);
@@ -68,23 +71,23 @@ class FileSystemTool {
             try {
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
-                    return { result: null, error: `Cannot create file, path '${relativeFilePath}' refers to an existing directory.`};
+                    return { result: null, error: `Не удается создать файл, путь '${relativeFilePath}' указывает на существующую директорию.`};
                 }
             } catch (e) {
                 if (e.code !== 'ENOENT') throw e;
             }
             await fsp.writeFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-            return { result: `File '${displayPath}' created successfully.`, error: null };
+            return { result: `Файл '${displayPath}' успешно создан.`, error: null };
         } catch (error) {
-            console.error(`FileSystemTool.create_file: Error creating file '${params.filename}' in directory '${directory}':`, error.message);
-            return { result: null, error: error.message };
+            console.error(`FileSystemTool.create_file: Ошибка создания файла '${params.filename}' в директории '${directory}':`, error.message);
+            return { result: null, error: error.message }; // Keep original error for now, or make it generic Russian
         }
     }
 
     async read_file(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            return { result: null, error: "Invalid input: 'filename' is required and must be a non-empty string." };
+            return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
         const directory = params.directory || '';
         const relativeFilePath = path.join(directory, params.filename);
@@ -96,27 +99,27 @@ class FileSystemTool {
                 throw e;
             });
             if (stats && stats.isDirectory()) {
-                 return { result: null, error: `Cannot read file, path '${relativeFilePath}' refers to a directory.`};
+                 return { result: null, error: `Не удается прочитать файл, путь '${relativeFilePath}' указывает на директорию.`};
             }
             const content = await fsp.readFile(safeFilePath, 'utf8');
             return { result: content, error: null };
         } catch (error) {
             const displayPath = safeFilePath ? path.relative(this.taskWorkspaceDir, safeFilePath) : relativeFilePath;
             if (error.code === 'ENOENT') {
-                console.warn(`FileSystemTool.read_file: File not found '${displayPath}'.`);
-                return { result: null, error: `File not found: '${displayPath}'.` };
+                console.warn(`FileSystemTool.read_file: Файл не найден '${displayPath}'.`);
+                return { result: null, error: `Файл не найден: '${displayPath}'.` };
             }
-            console.error(`FileSystemTool.read_file: Error reading file '${displayPath}':`, error.message);
-            return { result: null, error: error.message };
+            console.error(`FileSystemTool.read_file: Ошибка чтения файла '${displayPath}':`, error.message);
+            return { result: null, error: error.message }; // Keep original error for now
         }
     }
 
     async append_to_file(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            return { result: null, error: "Invalid input: 'filename' is required and must be a non-empty string." };
+            return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
-        if (typeof params.content !== 'string' || params.content === "") {
-            return { result: null, error: "Invalid input: 'content' is required and must be a non-empty string for append." };
+        if (typeof params.content !== 'string' || params.content === "") { // Assuming content must be non-empty for append
+            return { result: null, error: "Неверный ввод: 'content' является обязательным и должен быть непустой строкой для дозаписи." };
         }
         const directory = params.directory || '';
         const relativeFilePath = path.join(directory, params.filename);
@@ -125,17 +128,17 @@ class FileSystemTool {
             try {
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
-                    return { result: null, error: `Cannot append to file, path '${relativeFilePath}' refers to an existing directory.`};
+                    return { result: null, error: `Не удается дописать в файл, путь '${relativeFilePath}' указывает на существующую директорию.`};
                 }
             } catch (e) {
                 if (e.code !== 'ENOENT') throw e;
             }
             await fsp.appendFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-            return { result: `Content appended to '${displayPath}'.`, error: null };
+            return { result: `Содержимое добавлено в '${displayPath}'.`, error: null };
         } catch (error) {
-            console.error(`FileSystemTool.append_to_file: Error appending to file '${params.filename}' in directory '${directory}':`, error.message);
-            return { result: null, error: error.message };
+            console.error(`FileSystemTool.append_to_file: Ошибка дозаписи в файл '${params.filename}' в директории '${directory}':`, error.message);
+            return { result: null, error: error.message }; // Keep original error for now
         }
     }
 
@@ -148,17 +151,17 @@ class FileSystemTool {
         try {
             const safeDirPath = await this._getSafePath(directory);
             const stats = await fsp.stat(safeDirPath).catch(e => {
-                if (e.code === 'ENOENT') return null;
+                if (e.code === 'ENOENT') return null; // Will be handled by !stats check
                 throw e;
             });
             if (!stats) {
-                 const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
-                 console.warn(`FileSystemTool.list_files: Directory not found '${displayPath}'.`);
-                 return { result: null, error: `Directory not found: '${displayPath}'.` };
+                 const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath); // path.join(this.taskWorkspaceDir, directory)
+                 console.warn(`FileSystemTool.list_files: Директория не найдена '${displayPath}'.`);
+                 return { result: null, error: `Директория не найдена: '${displayPath}'.` };
             }
             if (!stats.isDirectory()) {
                 const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
-                return { result: null, error: `'${displayPath}' is not a directory.` };
+                return { result: null, error: `'${displayPath}' не является директорией.` };
             }
             const dirents = await fsp.readdir(safeDirPath, { withFileTypes: true });
             const files = [];
@@ -174,25 +177,29 @@ class FileSystemTool {
             directories.sort();
             return { result: { files, directories }, error: null };
         } catch (error) {
+            // This displayPath might be incorrect if _getSafePath fails early for a root-level issue
             const displayPath = path.relative(this.taskWorkspaceDir, path.join(this.taskWorkspaceDir, directory) );
-            if (error.code === 'ENOENT') {
-                 console.warn(`FileSystemTool.list_files: Directory not found '${displayPath}'.`);
-                return { result: null, error: `Directory not found: '${displayPath}'.` };
+            if (error.code === 'ENOENT') { // This specific ENOENT check might be redundant if _getSafePath's ENOENT handling is robust
+                 console.warn(`FileSystemTool.list_files: Директория не найдена '${displayPath}'.`);
+                return { result: null, error: `Директория не найдена: '${displayPath}'.` };
             }
-            console.error(`FileSystemTool.list_files: Error listing files in directory '${displayPath}':`, error.message);
-            return { result: null, error: error.message };
+            // For other errors, including those from _getSafePath (like permission issues before stat)
+            console.error(`FileSystemTool.list_files: Ошибка вывода списка файлов в директории '${displayPath}':`, error.message);
+            // Return the specific error from _getSafePath if it's one of our custom errors, otherwise generic
+            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message };
+            return { result: null, error: `Ошибка при обработке директории '${displayPath}': ${error.message}` };
         }
     }
 
     async create_pdf_from_text(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            return { result: null, error: "Invalid input: 'filename' is required and must be a non-empty string." };
+            return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
         if (!params.filename.toLowerCase().endsWith('.pdf')) {
-            return { result: null, error: "Invalid input: 'filename' must end with '.pdf'." };
+            return { result: null, error: "Неверный ввод: 'filename' должен заканчиваться на '.pdf'." };
         }
-        if (typeof params.text_content !== 'string') {
-            return { result: null, error: "Invalid input: 'text_content' is required and must be a string." };
+        if (typeof params.text_content !== 'string') { // Allow empty string for text_content
+            return { result: null, error: "Неверный ввод: 'text_content' является обязательным и должен быть строкой." };
         }
         const directory = params.directory || '';
         const fontSize = params.fontSize || 12;
@@ -208,10 +215,12 @@ class FileSystemTool {
             try {
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
-                    return { result: null, error: `Cannot create PDF, path '${relativeFilePath}' points to an existing directory.` };
+                    return { result: null, error: `Не удается создать PDF, путь '${relativeFilePath}' указывает на существующую директорию.` };
                 }
             } catch (statError) {
-                if (statError.code !== 'ENOENT') { throw statError; } // Re-throw unexpected errors
+                if (statError.code !== 'ENOENT') { // ENOENT = File Not Found, which is fine for creation
+                    throw statError;
+                }
                 // ENOENT is fine, means file doesn't exist, which is expected for creation.
             }
 
@@ -232,22 +241,20 @@ class FileSystemTool {
 
                 if (customFontFileName) {
                     if (typeof customFontFileName !== 'string' || (!customFontFileName.toLowerCase().endsWith('.ttf') && !customFontFileName.toLowerCase().endsWith('.otf'))) {
-                        fontWarning = `Invalid 'customFontFileName': Must be a string ending with .ttf or .otf. Falling back to '${fontName}'.`;
+                        fontWarning = `Неверный 'customFontFileName': Должен быть строкой, заканчивающейся на .ttf или .otf. Используется шрифт по умолчанию '${fontName}'.`;
                         console.warn(`FileSystemTool: ${fontWarning}`);
                         doc.font(fontName);
                     } else {
-                        // Assuming assets/fonts/ is at the root of the project, relative to where the process is run.
-                        // __dirname for FileSystemTool.js is tools/
                         const fontPath = path.join(__dirname, '..', 'assets', 'fonts', customFontFileName);
                         try {
                             await fsp.access(fontPath, fs.constants.R_OK);
                             doc.font(fontPath);
                             effectiveFont = customFontFileName;
                             customFontApplied = true;
-                            console.log(`FileSystemTool: Using custom font: ${fontPath}`);
+                            console.log(`FileSystemTool: Используется кастомный шрифт: ${fontPath}`);
                         } catch (fontError) {
-                            console.warn(`FileSystemTool: Custom font '${customFontFileName}' not found/readable at '${fontPath}'. Falling back to '${fontName}'. Error: ${fontError.message}`);
-                            fontWarning = `Custom font '${customFontFileName}' not found or not readable. Used default font '${fontName}'.`;
+                            fontWarning = `Кастомный шрифт '${customFontFileName}' не найден или не читается. Использован шрифт по умолчанию '${fontName}'.`;
+                            console.warn(`FileSystemTool: ${fontWarning} Путь: '${fontPath}'. Ошибка: ${fontError.message}`);
                             doc.font(fontName); // Fallback
                         }
                     }
@@ -263,24 +270,29 @@ class FileSystemTool {
 
                 stream.on('finish', () => {
                     const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-                    let successMessage = `PDF file '${displayPath}' created successfully. Font used: ${customFontApplied ? effectiveFont : fontName}.`;
+                    let successMessage = `PDF файл '${displayPath}' успешно создан. Использованный шрифт: ${customFontApplied ? effectiveFont : fontName}.`;
                     if (fontWarning) {
-                        successMessage += ` Warning: ${fontWarning}`;
+                        // Add the Russian warning to the success message for the user
+                        successMessage += ` Предупреждение: ${fontWarning}`;
                     }
                     resolve({ result: successMessage, error: null });
                 });
                 stream.on('error', (err) => {
-                    console.error(`FileSystemTool.create_pdf_from_text: Error writing PDF stream for '${relativeFilePath}':`, err.message);
-                    fsp.unlink(safeFilePath).catch(unlinkErr => console.error(`FileSystemTool.create_pdf_from_text: Failed to delete partial PDF '${safeFilePath}':`, unlinkErr.message));
-                    reject({ result: null, error: `Failed to write PDF to disk: ${err.message}` });
+                    console.error(`FileSystemTool.create_pdf_from_text: Ошибка записи PDF потока для '${relativeFilePath}':`, err.message);
+                    fsp.unlink(safeFilePath).catch(unlinkErr => console.error(`FileSystemTool.create_pdf_from_text: Не удалось удалить частичный PDF '${safeFilePath}':`, unlinkErr.message));
+                    reject({ result: null, error: `Не удалось записать PDF на диск: ${err.message}` });
                 });
-            }).catch(error => { // Catch rejections from the promise, e.g., if stream.on('error') calls reject
-                 return { result: null, error: error.error || error.message }; // Return the nested error object or message
+            }).catch(error => {
+                 // This catch is for rejections from the promise, typically from stream.on('error')
+                 // The error object should already be in the desired format { result: null, error: "message" }
+                 return error; // error should be { result: null, error: "message" }
             });
 
-        } catch (error) { // Catch errors from _getSafePath or initial setup
-            console.error(`FileSystemTool.create_pdf_from_text: Error creating PDF '${relativeFilePath}':`, error.message);
-            return { result: null, error: error.message };
+        } catch (error) { // Catch errors from _getSafePath or initial setup (e.g. directory creation failure)
+            console.error(`FileSystemTool.create_pdf_from_text: Ошибка создания PDF '${relativeFilePath}':`, error.message);
+            // Return the specific error from _getSafePath if it's one of our custom errors, otherwise generic
+            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message };
+            return { result: null, error: `Ошибка при создании PDF '${relativeFilePath}': ${error.message}` };
         }
     }
 }
