@@ -43,13 +43,27 @@ class MemoryManager {
         }
     }
 
-    async getSummarizedRecords(taskStateDirPath, recordIdentifiers, aiService, summarizationOptions = {}) {
-        // 1. Input Validation (remains the same)
+    async getSummarizedRecords(taskStateDirPath, recordInputs, aiService, summarizationOptions = {}) {
+        // 1. Input Validation
         if (!taskStateDirPath || typeof taskStateDirPath !== 'string' || taskStateDirPath.trim() === '') {
             throw new Error("MemoryManager.getSummarizedRecords: taskStateDirPath must be a non-empty string.");
         }
-        if (!Array.isArray(recordIdentifiers) || recordIdentifiers.some(id => typeof id !== 'string' || id.trim() === '')) {
-            throw new Error("MemoryManager.getSummarizedRecords: recordIdentifiers must be an array of non-empty strings.");
+        if (!Array.isArray(recordInputs) || recordInputs.some(item => {
+            if (!item || typeof item.id !== 'string' || item.id.trim() === '' || !item.type) {
+                return true;
+            }
+            if (item.type === 'path' && (typeof item.path !== 'string' || item.path.trim() === '')) {
+                return true;
+            }
+            if (item.type === 'content' && typeof item.content !== 'string') { // Allow empty string content
+                return true;
+            }
+            if (item.type !== 'path' && item.type !== 'content') {
+                return true;
+            }
+            return false;
+        })) {
+            throw new Error("MemoryManager.getSummarizedRecords: recordInputs must be an array of objects, each with id, type ('path' or 'content'), and corresponding 'path' or 'content'.");
         }
         if (!aiService || typeof aiService.generateText !== 'function') {
             throw new Error("MemoryManager.getSummarizedRecords: aiService is required and must have a generateText method.");
@@ -67,13 +81,19 @@ class MemoryManager {
         // --- Caching Logic Start ---
         const cacheSubDir = 'batch_summaries_cache';
         let recordInfoForCacheKey = [];
-        // Create a sorted list of identifiers for stable cache key generation
-        const sortedRecordIdentifiers = [...recordIdentifiers].sort();
 
-        for (const identifier of sortedRecordIdentifiers) {
-            const content = await this.loadMemory(taskStateDirPath, identifier, { isJson: false, defaultValue: null });
-            const contentHash = content !== null ? this._calculateHash(content) : "FILE_NOT_FOUND_HASH";
-            recordInfoForCacheKey.push({ identifier, contentHash });
+        // Create a sorted list of record inputs by id for stable cache key generation
+        const sortedRecordInputsForCacheKey = [...recordInputs].sort((a, b) => a.id.localeCompare(b.id));
+
+        for (const recordInput of sortedRecordInputsForCacheKey) {
+            let contentHash;
+            if (recordInput.type === 'path') {
+                const content = await this.loadMemory(taskStateDirPath, recordInput.path, { isJson: false, defaultValue: null });
+                contentHash = content !== null ? this._calculateHash(content) : "FILE_NOT_FOUND_HASH";
+            } else { // type === 'content'
+                contentHash = this._calculateHash(recordInput.content);
+            }
+            recordInfoForCacheKey.push({ id: recordInput.id, contentHash });
         }
 
         const relevantOptionsForCache = {
@@ -120,32 +140,40 @@ class MemoryManager {
         }
         // --- Caching Logic End: Cache Miss or Invalid/Expired ---
 
-        // 2. Load Content (if not already loaded for cache key generation, or re-load for processing)
+        // 2. Load Content
         const loadedContents = [];
         let totalRawContentLength = 0;
 
-        for (const identifier of recordIdentifiers) {
+        for (const recordInput of recordInputs) { // Iterate original recordInputs to preserve order for main logic
+            let contentToProcess = null;
+            let originalPathForSummarization = null; // Only if type is 'path'
+
             try {
-                // Assuming records are text-based and not JSON by default for summarization purposes.
-                // If a record itself is JSON and needs to be stringified, that should be handled by how it was saved,
-                // or this loadMemory call might need { isJson: true } if the stored file is a JSON string of an object.
-                // For now, assuming text content.
-                const content = await this.loadMemory(taskStateDirPath, identifier, { isJson: false, defaultValue: null });
-                if (content !== null) {
-                    loadedContents.push({ identifier, content });
-                    totalRawContentLength += content.length;
+                if (recordInput.type === 'path') {
+                    originalPathForSummarization = recordInput.path;
+                    contentToProcess = await this.loadMemory(taskStateDirPath, recordInput.path, { isJson: false, defaultValue: null });
+                } else { // type === 'content'
+                    contentToProcess = recordInput.content;
+                }
+
+                if (contentToProcess !== null) {
+                    loadedContents.push({
+                        id: recordInput.id,
+                        content: contentToProcess,
+                        originalType: recordInput.type, // Keep track of original type
+                        originalPath: originalPathForSummarization // Store path if applicable
+                    });
+                    totalRawContentLength += contentToProcess.length;
                 } else {
-                    console.warn(`MemoryManager.getSummarizedRecords: Record not found or empty for identifier: ${identifier}`);
-                    // Optionally include a placeholder or skip. For now, skipping.
+                    console.warn(`MemoryManager.getSummarizedRecords: Content not found or empty for record id: ${recordInput.id} (type: ${recordInput.type}${recordInput.type === 'path' ? ', path: ' + recordInput.path : ''})`);
                 }
             } catch (error) {
-                console.error(`MemoryManager.getSummarizedRecords: Error loading record ${identifier}: ${error.message}`);
-                // Decide if one error should stop all, or just skip this record. For now, skipping.
+                console.error(`MemoryManager.getSummarizedRecords: Error processing record id: ${recordInput.id}: ${error.message}`);
             }
         }
 
         if (loadedContents.length === 0) {
-            return "No content found for the provided record identifiers to summarize.";
+            return "No content found for the provided record inputs to summarize.";
         }
 
         // 3. Prepare Combined Content for LLM
@@ -154,36 +182,48 @@ class MemoryManager {
         if (totalRawContentLength < maxCombinedLength) {
             console.log(`MemoryManager.getSummarizedRecords: Combining full content of ${loadedContents.length} records (total length: ${totalRawContentLength}).`);
             finalCombinedContentString = loadedContents.map(record => {
-                return recordSeparator.replace('{identifier}', record.identifier) + record.content;
+                return recordSeparator.replace('{identifier}', record.id) + record.content;
             }).join('');
         } else {
             console.log(`MemoryManager.getSummarizedRecords: Total raw content length ${totalRawContentLength} exceeds maxCombinedLength ${maxCombinedLength}. Summarizing records individually.`);
             const individualSummaries = [];
             for (const record of loadedContents) {
                 try {
-                    // Use a sensible default for individual summarization prompt if not provided
+                    let summary;
                     const individualOpts = {
                         promptTemplate: "Summarize this text concisely: {text_to_summarize}",
-                        ...individualSummarizationOptions // User can override default promptTemplate here
+                        ...(individualSummarizationOptions || {})
                     };
-                    const summary = await this.getSummarizedMemory(taskStateDirPath, record.identifier, aiService, individualOpts);
-                    individualSummaries.push({ identifier: record.identifier, content: summary });
+
+                    if (record.originalType === 'path') {
+                        summary = await this.getSummarizedMemory(taskStateDirPath, record.originalPath, aiService, individualOpts);
+                    } else { // 'content'
+                        // Check if content itself needs summarization based on a length threshold
+                        const maxIndivLength = individualOpts.maxOriginalLength || 3000; // Default similar to getSummarizedMemory
+                        if (record.content.length <= maxIndivLength && !individualOpts.forceSummarize) {
+                             summary = record.content;
+                        } else {
+                            const prompt = (individualOpts.customPromptTemplate || individualOpts.promptTemplate).replace('{text_to_summarize}', record.content);
+                            summary = await aiService.generateText(prompt, individualOpts.llmParams || {});
+                        }
+                    }
+                    individualSummaries.push({ id: record.id, content: summary });
                 } catch (error) {
-                    console.error(`MemoryManager.getSummarizedRecords: Error summarizing individual record ${record.identifier}: ${error.message}. Using raw content as fallback if short, or placeholder.`);
-                    // Fallback strategy: use raw content if short, or a placeholder.
-                    if (record.content.length < (individualSummarizationOptions.maxOriginalLength || 3000) ) { // Check against typical maxOriginalLength for getSummarizedMemory
-                        individualSummaries.push({ identifier: record.identifier, content: record.content });
+                    console.error(`MemoryManager.getSummarizedRecords: Error summarizing individual record ${record.id}: ${error.message}. Using raw content as fallback if short, or placeholder.`);
+                    const fallbackMaxLength = individualSummarizationOptions?.maxOriginalLength || 3000;
+                    if (record.content.length < fallbackMaxLength) {
+                        individualSummaries.push({ id: record.id, content: record.content });
                     } else {
-                        individualSummaries.push({ identifier: record.identifier, content: `[Content of record ${record.identifier} was too long and individual summarization failed]`});
+                        individualSummaries.push({ id: record.id, content: `[Content of record ${record.id} was too long and individual summarization failed]`});
                     }
                 }
             }
             finalCombinedContentString = individualSummaries.map(record => {
-                return recordSeparator.replace('{identifier}', record.identifier) + record.content;
+                return recordSeparator.replace('{identifier}', record.id) + record.content;
             }).join('');
         }
 
-        // 4. Final Batch Summarization
+        // 4. Final Batch Summarization (remains largely the same)
         const finalPrompt = promptTemplate.replace('{combined_content}', finalCombinedContentString);
 
         let overallSummary;
@@ -201,8 +241,8 @@ class MemoryManager {
             const dataToCache = {
                 summary: overallSummary,
                 timestamp: new Date().toISOString(),
-                sourceRecordIdentifiers: recordIdentifiers, // Original unsorted identifiers
-                optionsUsed: relevantOptionsForCache, // Store the options that defined this cache entry
+                sourceRecordInputs: recordInputs, // Store original recordInputs
+                optionsUsed: relevantOptionsForCache,
                 cacheKeyUsed: cacheKey
             };
             await fsp.writeFile(cacheFilePath, this._stableStringify(dataToCache), 'utf8');
@@ -214,7 +254,7 @@ class MemoryManager {
         return overallSummary;
     }
 
-    _stableStringify(obj) {
+    _stableStringify(obj) { // Keep this helper method
         const allKeys = new Set();
         JSON.stringify(obj, (key, value) => {
             if (typeof value !== 'function') { // Functions can't be reliably stringified/compared

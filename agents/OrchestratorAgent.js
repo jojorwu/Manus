@@ -428,7 +428,7 @@ class OrchestratorAgent {
                 currentWorkingContext.summaryOfProgress = `${attemptMessage}. Current objective: ${currentWorkingContext.nextObjective || 'Execute plan and achieve task.'}`;
                 currentWorkingContext.lastUpdatedAt = new Date().toISOString();
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_PRE_ATTEMPT", currentWorkingContext.summaryOfProgress, { parentTaskId }));
-                await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+                // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
                 let currentExecutionResult = await this.planExecutor.executePlan(planForNextAttempt, parentTaskId, currentOriginalTask);
 
@@ -583,7 +583,7 @@ class OrchestratorAgent {
                         finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_STARTED", `Attempting replanning. Revision ${currentAttempt + 1}.`, { parentTaskId, revisionAttempt: currentAttempt + 1 }));
                         currentWorkingContext.nextObjective = `Replanning attempt ${currentAttempt + 1} due to execution failure.`;
                         currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-                        await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+                        // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
                         const structuredFailedStepInfo = currentExecutionResult.failedStepDetails ? {
                             narrative_step: currentExecutionResult.failedStepDetails.narrative_step,
@@ -633,46 +633,46 @@ class OrchestratorAgent {
             currentWorkingContext.lastUpdatedAt = new Date().toISOString();
             currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Task failed after execution/replanning attempts.";
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_POST_EXECUTION_CYCLE", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
-            await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+            // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+            // This save is covered by the saves after each attempt, and the CWC object in memory is up-to-date for the following batch summarization.
 
             // --- New Batch Summarization of Key Findings using getSummarizedRecords ---
             finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_START", "Attempting to generate batch summary of key findings.", { parentTaskId }));
-            const recordIdentifiersForBatchSummary = [];
-            const tempFileSubDir = 'temp_batch_summary_input';
+            const recordInputsForBatchSummary = [];
             // Limit to most recent 20 findings to avoid excessive processing
             const findingsToConsiderForBatchSummary = currentWorkingContext.keyFindings.slice(-20);
 
             for (const finding of findingsToConsiderForBatchSummary) {
                 if (finding.data && finding.data.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
-                    recordIdentifiersForBatchSummary.push(finding.data.rawContentPath);
+                    recordInputsForBatchSummary.push({
+                        id: finding.id || path.basename(finding.data.rawContentPath),
+                        type: 'path',
+                        path: finding.data.rawContentPath
+                    });
                 } else {
                     let stringifiedData;
                     if (typeof finding.data === 'string') {
                         stringifiedData = finding.data;
                     } else if (finding.data === null || finding.data === undefined) {
-                        stringifiedData = ""; // Represent null/undefined as empty string
+                        stringifiedData = "";
                     } else {
                         try {
                             stringifiedData = JSON.stringify(finding.data);
                         } catch (e) {
-                            console.warn(`OrchestratorAgent: Could not stringify finding.data for temp storage (finding ID: ${finding.id}): ${e.message}`);
+                            console.warn(`OrchestratorAgent: Could not stringify finding.data for batch summary input (finding ID: ${finding.id}): ${e.message}`);
                             stringifiedData = `Error: Could not stringify data for finding ${finding.id}`;
                         }
                     }
-                    // Ensure finding.id is somewhat unique for a filename, or use uuid.
-                    const tempFileNameSuffix = (finding.id ? String(finding.id).replace(/[^a-zA-Z0-9_.-]/g, '_') : uuidv4());
-                    const tempFileName = path.join(tempFileSubDir, `finding_${tempFileNameSuffix}.txt`);
-                    try {
-                        await this.memoryManager.overwriteMemory(taskDirPath, tempFileName, stringifiedData);
-                        recordIdentifiersForBatchSummary.push(tempFileName);
-                    } catch (tempSaveError) {
-                        console.error(`OrchestratorAgent: Failed to save temporary finding data for batch summary (finding ID: ${finding.id}): ${tempSaveError.message}`);
-                        finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_TEMP_SAVE_ERROR", `Failed to save temp finding data: ${tempSaveError.message}`, { parentTaskId, findingId: finding.id }));
-                    }
+                    recordInputsForBatchSummary.push({
+                        id: finding.id || uuidv4(),
+                        type: 'content',
+                        content: stringifiedData
+                    });
+                    // REMOVED: Temporary file creation logic
                 }
             }
 
-            if (recordIdentifiersForBatchSummary.length > 0) {
+            if (recordInputsForBatchSummary.length > 0) {
                 const batchSummarizationOptions = {
                     promptTemplate: `The following is a collection of records, findings, and data points accumulated during a complex task. Provide a single, coherent summary of the overall progress, current understanding, key achievements, and any unresolved issues or critical information. Focus on a high-level overview suitable for understanding the task's current state.
 
@@ -689,13 +689,12 @@ Comprehensive Task Status Summary:`,
                 try {
                     const newBatchSummary = await this.memoryManager.getSummarizedRecords(
                         taskDirPath,
-                        recordIdentifiersForBatchSummary,
+                        recordInputsForBatchSummary, // Pass the structured inputs
                         this.aiService,
                         batchSummarizationOptions
                     );
                     currentWorkingContext.batchProgressSummary = newBatchSummary; // Store the new summary
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_SUCCESS", "Successfully generated batch summary of key findings.", { parentTaskId, summaryPreview: String(newBatchSummary).substring(0, 100) + "..." }));
-                    // Note: Temporary files in temp_batch_summary_input/ are not cleaned up in this subtask.
                 } catch (batchSummaryError) {
                     console.error(`OrchestratorAgent: Failed to get summarized records for CWC update: ${batchSummaryError.message}`);
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_FAILED", `Failed to generate batch summary: ${batchSummaryError.message}`, { parentTaskId, error: batchSummaryError.message }));
