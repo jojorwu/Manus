@@ -1,135 +1,145 @@
-# Gemini Powered AI Agent
+# Manus: AI-Powered Multi-Agent System
 
-> Current Version: **v0.1.0-beta** — For a detailed list of features and changes, please see the [CHANGELOG.md](./CHANGELOG.md).
-
-## Overview
-
-This project is a Node.js-based AI agent that leverages the Google Gemini API to understand tasks, generate multi-step execution plans, and execute those plans using a variety of tools. It features a Gemini execution tool for general reasoning, a Web Search tool, a Calculator tool, a Webpage Reading tool, and Orchestrator-level tools for file system operations (including PDF generation) and downloading. The agent is designed to handle complex tasks by breaking them into stages, with parallel execution of sub-tasks within each stage. It saves task states (including a `CurrentWorkingContext` and `TaskJournal`) and supports different operational modes via its API. Interaction with the agent is primarily through a modern React-based web interface.
-
-## Project Architecture
-
-This project consists of two main components: a Node.js backend that houses the AI agent logic, and a modern React frontend for user interaction.
-
-*   **Backend (Root Directory - `index.js`):**
-    *   Built with Node.js and Express.js.
-    *   Responsible for all core AI agent functionalities.
-    *   Exposes an API (currently `/api/generate-plan`).
-
-*   **Frontend (`frontend/` Directory):**
-    *   A modern single-page application (SPA) built with React and Vite.
-    *   Provides the user interface for task submission and visualization.
-
-**Interaction Flow:**
-(Simplified for brevity - full flow in `docs/multi_agent_design.md`)
-1.  User submits task.
-2.  Backend (`OrchestratorAgent`) processes task:
-    *   Initializes `CurrentWorkingContext` (CWC) and `TaskJournal`.
-    *   Delegates to `PlanManager` for plan generation.
-    *   Delegates to `PlanExecutor` for plan execution (which handles worker agents and Orchestrator-level tools).
-    *   Updates CWC (possibly via LLM), merges journals.
-    *   Synthesizes final answer (if not pre-synthesized by `PlanExecutor`).
-3.  Backend returns response.
-4.  Frontend renders response.
+Manus is a flexible and extensible Node.js-based multi-agent system designed to accomplish complex tasks through collaborative AI. It leverages Large Language Models (LLMs) for planning, execution, and data synthesis, and can be integrated with various external tools and services.
 
 ## Key Features
 
-*   **LLM-Driven Planning:** Uses Google Gemini. Handled by `PlanManager`.
-*   **Tool-Aware Execution:** Gemini determines tools/agents. Handled by `PlanExecutor`.
-*   **Multi-Tool Architecture:**
-    *   **GeminiStepExecutor:** For general reasoning, text generation, summarization. Can be marked to produce the final answer.
-    *   **WebSearchTool:** For real-time web searches.
-    *   **CalculatorTool:** For mathematical expressions.
-    *   **ReadWebpageTool:** Fetches fully rendered HTML using Playwright. Then, it prioritizes extracting the main article content using Mozilla's Readability library (with JSDOM). If Readability fails or doesn't find substantial content, it falls back to using Cheerio for a more general text extraction from the page body. Effective for articles and SPAs.
-    *   **ExploreSearchResults (Orchestrator Action):** Reads content from multiple search results using `ReadWebpageTool`.
-    *   **FileSystemTool (Orchestrator Action):**
-        *   Performs operations like creating, reading, appending to, and listing text files within a sandboxed, task-specific workspace.
-        *   Can generate simple PDF documents from text using `create_pdf_from_text`, with support for specifying custom `.ttf` or `.otf` fonts from the `assets/fonts/` directory (e.g., for non-Latin characters). If a custom font is not found or specified, it falls back to a default font (e.g., Helvetica).
-    *   **FileDownloaderTool (Orchestrator Action):** Downloads files from URLs into the task-specific workspace, with size checks.
-*   **Staged and Parallel Execution:** Supports complex plan structures.
-*   **Persistent Memory:**
-    *   **Task State (`task_state_{taskId}.json`):** Stores task details, plan, `executionContext`, `finalAnswer`, and `CurrentWorkingContext`.
-    *   **Task Journal (`task_journal_{taskId}.jsonl`):** Detailed JSONL log of all significant events.
-    *   **CurrentWorkingContext (CWC):** Evolves during task execution, holding `summaryOfProgress`, `keyFindings`, `errorsEncountered`, `nextObjective`. `summaryOfProgress` and `nextObjective` can be intelligently updated by an LLM.
-*   **Context-Aware Result Summarization**: Intermediate results can be summarized by LLM within `PlanExecutor`.
-*   **Step Output Referencing & Data Dependency:**
-    *   Each step in a plan is assigned a unique `stepId` by the LLM during planning.
-    *   Subsequent steps can reference the output of previously executed steps in their `sub_task_input` using the syntax `@{outputs.SOURCE_STEP_ID.FIELD_NAME}`.
-    *   `FIELD_NAME` can be `result_data` (raw output) or `processed_result_data` (summarized/processed output).
-    *   This allows for creating dynamic plans where data flows between steps. `PlanManager` validates syntax, and `PlanExecutor` resolves these references at runtime.
-*   **Avoids Double Synthesis:** Checks if `PlanExecutor` has already generated a final answer.
-*   **Modern Web Interface:** React/Vite/Tailwind/Shadcn/UI frontend.
+*   **Multi-Agent Architecture**: Employs an Orchestrator agent to manage and coordinate tasks executed by specialized worker agents (e.g., ResearchAgent, UtilityAgent).
+*   **Dynamic Task Planning**: Utilizes LLMs to generate step-by-step execution plans based on user requests and agent capabilities. Includes support for replanning on failure.
+*   **Extensible Toolset**: Agents can use a variety of tools to perform actions, such as web searching, reading web content, calculations, file system operations, and fetching external documentation.
+*   **Multi-AI Service Support**:
+    *   Abstracted AI service layer (`BaseAIService`) allows integration with multiple LLM providers.
+    *   Includes full implementations for **OpenAI** (`OpenAIService`) and **Google Gemini** (`GeminiService`).
+    *   Choice of AI service can be specified per API request.
+*   **Persistent Memory Bank**:
+    *   Tasks can maintain a "memory bank" to store context, key decisions, learnings, and results.
+    *   Supports summarization of large memory segments using LLMs to optimize context for future LLM calls.
+    *   Summaries are cached based on content hash for efficiency.
+*   **Context7 MCP Integration**:
+    *   Acts as a client to a Context7 Model Context Protocol (MCP) server.
+    *   Can fetch up-to-date documentation for software libraries via `Context7DocumentationTool` to provide LLMs with current information, reducing hallucinations.
+*   **Configuration Driven**: Agent capabilities, plan templates, and service configurations are managed externally.
 
-## Known Issues / Limitations (v0.1.0-beta)
+## Architectural Overview
 
-*   **Tool Implementations**:
-    *   `ReadWebpageTool`: Now uses Playwright -> Readability/JSDOM -> Cheerio. This improves main content extraction from articles but may increase processing time. Effectiveness on non-article pages depends on the heuristics of Readability and Cheerio.
-    *   `FileSystemTool`: PDF creation (`create_pdf_from_text`) supports basic text and custom TTF/OTF fonts; complex PDF styling or embedding is not supported. Other file operations are primarily for text.
-    *   `FileDownloaderTool`: Basic download functionality; no advanced streaming optimizations for very large files.
-*   **Task State Loading & Execution:** `SYNTHESIZE_ONLY` file search is basic; `EXECUTE_PLANNED_TASK` might re-plan.
-*   **User Interface:** May not fully support all new API modes or CWC/Journal visualization.
-*   **Error Handling & Retries:** Advanced error handling is not yet implemented.
-*   **CWC Intelligence:** LLM-based CWC updates are functional but could be further enhanced.
+Manus consists of several core components:
 
-## Technology Stack
+*   **Orchestrator Agent**: The central "brain" that receives tasks, generates plans (via `PlanManager`), oversees plan execution (via `PlanExecutor`), manages the `CurrentWorkingContext` (CWC), and interacts with the Memory Bank.
+*   **Worker Agents**: Specialized agents (e.g., `ResearchAgent`) that execute specific sub-tasks using their assigned tools.
+*   **AI Services**: (`OpenAIService`, `GeminiService`) Provide access to Large Language Models for planning, synthesis, and other AI-driven operations.
+*   **Tools**: Modules that perform specific actions (e.g., web search, file operations, fetching documentation).
+*   **Memory Manager**: Manages the persistent "Memory Bank" for each task.
+*   **Queues**: `SubTaskQueue` and `ResultsQueue` facilitate communication between the Orchestrator and worker agents.
 
-*   **Backend:** Node.js, Express.js, `dotenv`
-*   **LLM:** Google Gemini API (via `@google/generative-ai`)
-*   **Tools & Libraries (Backend):**
-    *   Web Search: `axios` (for Google CSE API)
-    *   Calculator: `mathjs`
-    *   Web Page Reading: Playwright, @mozilla/readability, JSDOM, Cheerio
-    *   File System Operations: Node.js `fs` module (via `FileSystemTool`), `pdfkit` (for PDF generation)
-    *   File Downloading: `axios` (via `FileDownloaderTool`)
-*   **Frontend (`frontend/` directory):** React, Vite, Tailwind CSS, Shadcn/UI, `axios`
+For a detailed description of the architecture, component interactions, and data flows, please see [docs/architecture.md](docs/architecture.md).
 
-## Design Documents
-*   **[Multi-Agent System Design](./docs/multi_agent_design.md)**
-*   **[Persistent Task Memory Design](./docs/persistent_memory_design.md)**
+## Quick Start
 
-## Setup and Installation
 ### Prerequisites
-*   Node.js (v18.x or later recommended)
-*   npm (usually comes with Node.js)
+
+*   Node.js (v18.0.0 or higher recommended)
+*   npm (usually comes with Node.js) or yarn
+*   Access to AI service APIs (OpenAI, Google Gemini)
+*   (Optional) A running instance of a Context7 MCP server for documentation fetching.
 
 ### Installation
-1.  Clone this repository.
-2.  Navigate to the project root: `cd <repository_name>`
-3.  Install backend dependencies: `npm install`
-4.  Navigate to the `frontend` directory and install frontend dependencies: `cd frontend && npm install && cd ..`
-    *   **Playwright Browsers:** Playwright (a dependency of `ReadWebpageTool`) requires browser binaries. After `npm install`, run:
-        ```bash
-        npx playwright install --with-deps
-        ```
-        This installs default browsers and their system dependencies.
 
-### Environment Variables
-*   **`GEMINI_API_KEY`**: For Google Gemini API.
-*   **`SEARCH_API_KEY`**: For Google Custom Search Engine API.
-*   **`CSE_ID`**: Your Custom Search Engine ID.
+1.  Clone the repository:
+    ```bash
+    git clone <your-repo-url>
+    cd <repo-name>
+    ```
+2.  Install dependencies:
+    ```bash
+    npm install
+    ```
+    (or `yarn install`)
 
-**Example `.env` file (place in project root):**
+### Environment Configuration
+
+Create a `.env` file in the root of the project by copying `.env.example` (if it exists) or creating a new one. Add the following necessary API keys and configurations:
+
+```env
+# Server Port
+PORT=3000
+
+# OpenAI API Key
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Google Gemini API Key
+GEMINI_API_KEY=your_gemini_api_key_here
+
+# Google Custom Search Engine (for WebSearchTool)
+SEARCH_API_KEY=your_google_search_api_key_here
+CSE_ID=your_custom_search_engine_id_here
+
+# Context7 MCP Server URL (optional, defaults to http://localhost:8080/mcp if not set)
+# Ensure your Context7 server is running and accessible at this URL.
+CONTEXT7_SERVER_URL=http://localhost:8080/mcp
 ```
-GEMINI_API_KEY="YOUR_GEMINI_API_KEY_HERE"
-SEARCH_API_KEY="YOUR_GOOGLE_SEARCH_API_KEY_HERE"
-CSE_ID="YOUR_CSE_ID_HERE"
+
+**Note on Context7 Server:**
+If you plan to use the `Context7DocumentationTool`, you need a running Context7 MCP server. You can run one locally:
+```bash
+npx -y @upstash/context7-mcp@latest --transport http --port 8080
+```
+Ensure the `CONTEXT7_SERVER_URL` in your `.env` file matches the URL of your running Context7 server.
+
+### Running the Application
+
+To start the Manus application server:
+```bash
+npm start
+```
+(This command might vary based on your `package.json` scripts. Check `scripts.start`.)
+
+The server will typically start on the port specified in your `.env` file (default 3000).
+
+## API Usage
+
+The primary way to interact with Manus is through its HTTP API.
+
+**Endpoint**: `POST /api/generate-plan`
+
+This endpoint accepts a JSON body to define a task, specify an execution mode, and optionally choose an AI service.
+
+**Request Parameters**:
+
+*   `task` (string): The user's task description.
+*   `mode` (string, optional): Execution mode (e.g., `EXECUTE_FULL_PLAN`, `PLAN_ONLY`). Defaults to `EXECUTE_FULL_PLAN`.
+*   `aiService` (string, optional): AI service to use (`"openai"` or `"gemini"`). Defaults to `"openai"`.
+*   `taskIdToLoad` (string, optional): ID of a saved task to resume or use.
+
+**Example Request**:
+```json
+{
+  "task": "Research the latest advancements in quantum computing and provide a summary.",
+  "mode": "EXECUTE_FULL_PLAN",
+  "aiService": "openai"
+}
 ```
 
-## Development Workflow
-(Content remains the same: run backend `node index.js`, run frontend `cd frontend && npm run dev`)
+For detailed API documentation, including all modes, parameters, and response structures, please see [docs/api.md](docs/api.md).
 
-## How to Use
-(Content remains the same)
+## Project Structure
 
-## Modifying, Forking, and Contributing
-(Content remains largely the same)
+A brief overview of the main project directories:
 
-### Adding New Tools (Backend):
-(This section should be reviewed to ensure it aligns with `PlanManager`'s role in providing tool capabilities to the LLM for planning).
-The process generally involves:
-1.  Defining the tool class in `tools/`.
-2.  Importing and instantiating it in `index.js` (if it's a worker agent tool) or ensuring `PlanExecutor` can instantiate it (if it's an Orchestrator-level tool).
-3.  Adding its description to `config/agentCapabilities.json` (for worker agent tools) or to the `planningPrompt` in `core/PlanManager.js` (for Orchestrator-level tools).
-    *   `PlanManager.js`: Its `planningPrompt` instructs the LLM on tool usage, `stepId` generation, and the `@{outputs...}` syntax for data dependencies. It also validates these aspects in the generated plan.
-4.  Ensuring `core/PlanExecutor.js` can handle the tool correctly.
-    *   `PlanExecutor.js`: Manages the actual execution, including resolving `@{outputs...}` references at runtime using a map of step outputs, before dispatching to the tool or agent.
-```
+*   `/agents`: Contains the logic for different types of agents (Orchestrator, Research, etc.).
+*   `/config`: Holds configuration files like `agentCapabilities.json` and plan templates.
+*   `/core`: Core components of the system, including `PlanManager`, `PlanExecutor`, `MemoryManager`, and queues.
+*   `/docs`: Contains detailed documentation files.
+*   `/locales`: JSON files for localization of console messages.
+*   `/services`: External service integrations, including `Context7Client` and AI service clients (`BaseAIService`, `OpenAIService`, `GeminiService`).
+*   `/tools`: Reusable tools that agents can use to perform actions.
+*   `/utils`: Utility functions, including localization and task state management.
+*   `index.js`: The main entry point for the application, sets up the server and initializes components.
+*   `saved_tasks/`: Default directory where task states, journals, and memory banks are saved. (Should be in `.gitignore`)
+
+## Contributing
+
+(Details on how to contribute to the project, if applicable)
+
+## License
+
+(Project's license information, e.g., MIT)
