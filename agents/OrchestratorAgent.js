@@ -51,7 +51,75 @@ class OrchestratorAgent {
     };
   }
 
+  async _getSummarizedKeyFindingsForPrompt(keyFindingsArray, parentTaskIdForJournal, finalJournalEntriesInput) { // Renamed finalJournalEntries to avoid conflict
+    const MAX_KEY_FINDINGS_FOR_PROMPT = 5;
+    const MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT = 4000;
+    const findingsSummarizationPromptTemplate = `The following text is a collection of key findings obtained while working on a task. Each finding might be a piece of data, an observation, or a result from a tool. Please synthesize these findings into a brief, coherent summary that captures the most important information relevant to the overall task progress. Focus on actionable insights or critical data points.\n\nCollection of Key Findings:\n---\n{text_to_summarize}\n---\nBrief Synthesized Summary:`;
+
+    if (!keyFindingsArray || keyFindingsArray.length === 0) {
+        return "No key findings.";
+    }
+
+    let findingsTextForPrompt = "";
+    let currentLength = 0;
+    let findingsToIncludeDirectly = [];
+
+    const reversedFindings = [...keyFindingsArray].reverse();
+    for (let i = 0; i < reversedFindings.length && findingsToIncludeDirectly.length < MAX_KEY_FINDINGS_FOR_PROMPT; i++) {
+        const finding = reversedFindings[i];
+        const findingDataStr = typeof finding.data === 'string' ? finding.data : JSON.stringify(finding.data);
+        const findingRepresentation = `Finding (Tool: ${finding.sourceToolName}, Step: "${finding.sourceStepNarrative}"): ${findingDataStr}\n`;
+        if (currentLength + findingRepresentation.length > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && findingsToIncludeDirectly.length > 0) {
+            break;
+        }
+        findingsToIncludeDirectly.unshift(finding);
+        currentLength += findingRepresentation.length;
+    }
+
+    if (findingsToIncludeDirectly.length === keyFindingsArray.length ||
+        (findingsToIncludeDirectly.length >= MAX_KEY_FINDINGS_FOR_PROMPT && currentLength <= MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT) ||
+         keyFindingsArray.length <= MAX_KEY_FINDINGS_FOR_PROMPT ) {
+
+        if (findingsToIncludeDirectly.length < keyFindingsArray.length && keyFindingsArray.length > MAX_KEY_FINDINGS_FOR_PROMPT) {
+             findingsTextForPrompt = `Summary of earlier findings is omitted. Recent ${findingsToIncludeDirectly.length} findings are:\n`;
+        } else if (keyFindingsArray.length === 0) {
+             findingsTextForPrompt = "No key findings recorded yet.\n";
+        } else {
+             findingsTextForPrompt = "Key findings:\n";
+        }
+        findingsToIncludeDirectly.forEach(f => {
+            const findingDataStr = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
+            findingsTextForPrompt += `Tool: ${f.sourceToolName}, Step: "${f.sourceStepNarrative}"\nData: ${findingDataStr.substring(0, 500) + (findingDataStr.length > 500 ? '...' : '')}\n---\n`;
+        });
+        return findingsTextForPrompt.trim();
+    }
+
+    let allFindingsText = "Key findings to summarize:\n";
+    keyFindingsArray.forEach(f => {
+         const findingDataStr = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
+         allFindingsText += `Tool: ${f.sourceToolName}, Step: "${f.sourceStepNarrative}"\nData: ${findingDataStr}\n---\n`;
+    });
+
+    // Caller (handleUserTask) will be responsible for logging summarization start/success/failure
+    try {
+        const summary = await this.aiService.generateText(
+            findingsSummarizationPromptTemplate.replace('{text_to_summarize}', allFindingsText),
+            {
+                model: (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'),
+                temperature: 0.3,
+                maxTokens: 500
+            }
+        );
+        return `Summary of Key Findings:\n${summary}`;
+    } catch (e) {
+        // console.error("OrchestratorAgent: Failed to summarize key findings for prompt:", e.message); // For future t()
+        return "Key findings were too extensive to include directly, and summarization failed. Refer to detailed execution context if needed.";
+    }
+  }
+
   async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
+    const MAX_ERRORS_FOR_CWC_PROMPT = 3;
+
     const initialJournalEntries = []; // Orchestrator-specific entries before execution
     initialJournalEntries.push(this._createOrchestratorJournalEntry(
         "TASK_RECEIVED",
@@ -173,10 +241,28 @@ class OrchestratorAgent {
                 const taskDefFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'task_definition.md', { defaultValue: currentOriginalTask });
                 memoryContextForPlanning.taskDefinition = taskDefFromMemory;
 
-                const decisionsFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'key_decisions_and_learnings.md', { defaultValue: "" });
-                if (decisionsFromMemory && decisionsFromMemory.trim() !== "") memoryContextForPlanning.retrievedKeyDecisions = decisionsFromMemory;
+                const decisionsPromptTemplate = `The following text contains a log of key decisions, learnings, and events related to solving a complex task. Please provide a concise summary, highlighting:\n- The most impactful decisions made.\n- Key problems encountered and how they were (or were not) resolved.\n- Significant learnings or insights gained.\nThe summary should help in quickly understanding the critical junctures and takeaways from this log.\n\nLog content:\n---\n{text_to_summarize}\n---\nConcise Summary:`;
+                const summarizationLlmParams = {
+                    model: (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'),
+                    temperature: 0.3,
+                    maxTokens: 500
+                };
+                const decisionsFromMemory = await this.memoryManager.getSummarizedMemory(
+                    taskDirPath,
+                    'key_decisions_and_learnings.md',
+                    this.aiService,
+                    {
+                        maxOriginalLength: 3000,
+                        promptTemplate: decisionsPromptTemplate,
+                        llmParams: summarizationLlmParams,
+                        cacheSummary: true,
+                        defaultValue: ""
+                    }
+                );
+                if (decisionsFromMemory && decisionsFromMemory.trim() !== "") {
+                    memoryContextForPlanning.retrievedKeyDecisions = decisionsFromMemory;
+                }
 
-                // Load CWC snapshot from memory, especially if resuming or not a fresh EXECUTE_FULL_PLAN
                 if (executionMode !== "EXECUTE_FULL_PLAN" || taskIdToLoad) {
                     const cwcSnapshotFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'current_working_context.json', { isJson: true, defaultValue: null });
                     if (cwcSnapshotFromMemory) memoryContextForPlanning.retrievedCwcSnapshot = cwcSnapshotFromMemory;
@@ -185,7 +271,6 @@ class OrchestratorAgent {
                 console.warn(`OrchestratorAgent: Error loading memory for planning for task ${parentTaskId}: ${memError.message}`);
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_LOAD_ERROR", `Failed to load memory for planning: ${memError.message}`, { parentTaskId }));
             }
-            // Removed: currentCWC.loadedMemoryDecisions = decisions;
 
             planResult = await this.planManager.getPlan(currentOriginalTask, knownAgentRoles, knownToolsByRole, memoryContextForPlanning, currentWorkingContext);
 
@@ -306,13 +391,13 @@ class OrchestratorAgent {
                             currentOriginalTask,
                             knownAgentRoles,
                             knownToolsByRole,
-                            currentWorkingContext,
+                            memoryContextForPlanning, // 4th: memoryContext
+                            currentWorkingContext,    // 5th: currentCWC
                             lastExecutionContext,
                             structuredFailedStepInfo,
                             planForNextAttempt,
                             true,
-                            currentAttempt + 1,
-                            memoryContextForPlanning // Pass memoryContextForPlanning to replan too
+                            currentAttempt + 1        // 10th: revisionAttemptNumber
                         );
 
                         if (newPlanResult.success && newPlanResult.plan && newPlanResult.plan.length > 0) {
@@ -345,10 +430,14 @@ class OrchestratorAgent {
             await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective post-execution cycle.", { parentTaskId }));
-            const MAX_FINDINGS_FOR_CWC_PROMPT = 5;
-            const MAX_ERRORS_FOR_CWC_PROMPT = 3;
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_START", "Attempting to summarize key findings for CWC update.", { parentTaskId }));
+            const summarizedKeyFindingsTextForCwc = await this._getSummarizedKeyFindingsForPrompt(currentWorkingContext.keyFindings, parentTaskId, finalJournalEntries);
+            if (summarizedKeyFindingsTextForCwc.startsWith("Key findings were too extensive") || summarizedKeyFindingsTextForCwc === "No key findings.") {
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SKIPPED_OR_FAILED", "Summarization of key findings skipped or failed for CWC update.", { parentTaskId, reason: summarizedKeyFindingsTextForCwc }));
+            } else if (currentWorkingContext.keyFindings && currentWorkingContext.keyFindings.length > 0) { // Only log success if there were findings to summarize
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SUCCESS", "Key findings summarized for CWC update.", { parentTaskId }));
+            }
 
-            const recentFindingsSummary = currentWorkingContext.keyFindings.slice(-MAX_FINDINGS_FOR_CWC_PROMPT).map(f => ({ narrative: f.sourceStepNarrative, tool: f.sourceToolName, dataPreview: String(f.data).substring(0,100)+"..." }) );
             const recentErrorsSummary = currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT).map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage}));
 
             const cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
@@ -356,7 +445,7 @@ The previous summary of progress was: "${currentWorkingContext.summaryOfProgress
 The previous next objective was: "${currentWorkingContext.nextObjective}".
 Recent plan execution overall success: ${overallSuccess}.
 Recent key findings:
-${JSON.stringify(recentFindingsSummary, null, 2)}
+${summarizedKeyFindingsTextForCwc}
 Recent errors encountered:
 ${JSON.stringify(recentErrorsSummary, null, 2)}
 
@@ -419,13 +508,17 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
                 const synthesisPrompt = `The original user task was: "${currentOriginalTask}".
 Execution History (JSON Array):
 ${synthesisContextString}
-Current Working Context:
-${JSON.stringify(currentWorkingContext, null, 2)}
+Current Working Context Summary:
+Progress: ${currentWorkingContext.summaryOfProgress}
+Next Objective: ${currentWorkingContext.nextObjective}
+Key Findings (Summarized):
+${await this._getSummarizedKeyFindingsForPrompt(currentWorkingContext.keyFindings, parentTaskId, finalJournalEntries)}
+Errors Encountered (Last ${MAX_ERRORS_FOR_CWC_PROMPT}):
+${JSON.stringify(currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT),null,2)}
 ---
 Based on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
                 try {
-                    // finalAnswer = await this.llmService(synthesisPrompt); // OLD
-                    finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) || 'gpt-4' }); // NEW
+                    finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) || 'gpt-4' });
                     responseMessage = "Task completed and final answer synthesized.";
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SUCCESS", responseMessage, { parentTaskId }));
                 } catch (synthError) {

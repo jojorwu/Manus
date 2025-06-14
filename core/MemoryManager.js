@@ -99,6 +99,85 @@ class MemoryManager {
             throw error;
         }
     }
+
+    _getSummaryFilePath(originalMemoryFilePath) {
+        const dir = path.dirname(originalMemoryFilePath);
+        const ext = path.extname(originalMemoryFilePath);
+        const base = path.basename(originalMemoryFilePath, ext);
+        return path.join(dir, `${base}_summary${ext}`);
+    }
+
+    async getSummarizedMemory(taskStateDirPath, memoryCategoryFileName, aiService, summarizationOptions = {}) {
+        const {
+            maxOriginalLength = 3000,
+            promptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}",
+            llmParams = {}, // User can pass model, temp, etc. here
+            cacheSummary = true,
+            forceSummarize = false,
+            defaultValue = null
+        } = summarizationOptions;
+
+        const originalFilePath = this.getMemoryFilePath(taskStateDirPath, memoryCategoryFileName);
+        let originalContent;
+
+        try {
+            originalContent = await fsp.readFile(originalFilePath, 'utf8');
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                return defaultValue;
+            }
+            throw error;
+        }
+
+        if (!forceSummarize && originalContent.length <= maxOriginalLength) {
+            return originalContent;
+        }
+
+        const summaryFilePath = this._getSummaryFilePath(originalFilePath);
+
+        if (cacheSummary && !forceSummarize) {
+            try {
+                const originalStats = await fsp.stat(originalFilePath);
+                const summaryStats = await fsp.stat(summaryFilePath);
+                if (summaryStats.mtimeMs > originalStats.mtimeMs) {
+                    return await fsp.readFile(summaryFilePath, 'utf8');
+                }
+            } catch (error) {
+                if (error.code !== 'ENOENT') {
+                    // console.warn(`MemoryManager: Error checking summary cache for '${memoryCategoryFileName}': ${error.message}. Will attempt to regenerate.`);
+                }
+            }
+        }
+
+        if (!aiService || typeof aiService.generateText !== 'function') {
+            throw new Error("aiService is required for summarization and must have a generateText method.");
+        }
+
+        const prompt = promptTemplate.replace('{text_to_summarize}', originalContent);
+
+        const effectiveLlmParams = {
+            model: (llmParams && llmParams.model) || (aiService.baseConfig && aiService.baseConfig.summarizationModel) || 'gpt-3.5-turbo',
+            ...llmParams
+        };
+
+        try {
+            const summary = await aiService.generateText(prompt, effectiveLlmParams);
+
+            if (cacheSummary) {
+                try {
+                    // Use this.overwriteMemory to ensure the memory_bank path is created.
+                    // Pass the base name of the summary file as memoryCategoryFileName.
+                    await this.overwriteMemory(taskStateDirPath, path.basename(summaryFilePath), summary);
+                } catch (writeError) {
+                    // console.error(`MemoryManager: Failed to cache summary for '${memoryCategoryFileName}': ${writeError.message}`);
+                }
+            }
+            return summary;
+        } catch (llmError) {
+            // console.warn(`MemoryManager: Summarization failed for '${memoryCategoryFileName}'. Rethrowing error.`);
+            throw new Error(`Failed to summarize '${memoryCategoryFileName}': ${llmError.message}`);
+        }
+    }
 }
 
 module.exports = MemoryManager;
