@@ -2,6 +2,7 @@
 const fsp = require('fs').promises;
 const fs = require('fs'); // For sync operations if needed (e.g. existsSync, though fsp.access is better for async checks)
 const path = require('path');
+const crypto = require('crypto'); // Added for hashing
 
 const MEMORY_BANK_DIR_NAME = 'memory_bank';
 
@@ -100,6 +101,14 @@ class MemoryManager {
         }
     }
 
+    _calculateHash(content) {
+        if (typeof content !== 'string') {
+            // console.warn("MemoryManager:_calculateHash: Content is not a string, cannot calculate hash."); // use t()
+            return null;
+        }
+        return crypto.createHash('sha256').update(content).digest('hex');
+    }
+
     _getSummaryFilePath(originalMemoryFilePath) {
         const dir = path.dirname(originalMemoryFilePath);
         const ext = path.extname(originalMemoryFilePath);
@@ -111,7 +120,7 @@ class MemoryManager {
         const {
             maxOriginalLength = 3000,
             promptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}",
-            llmParams = {}, // User can pass model, temp, etc. here
+            llmParams = {},
             cacheSummary = true,
             forceSummarize = false,
             defaultValue = null
@@ -129,26 +138,36 @@ class MemoryManager {
             throw error;
         }
 
+        const currentOriginalHash = this._calculateHash(originalContent);
+        if (!currentOriginalHash) {
+            throw new Error("MemoryManager: Could not calculate hash for original content.");
+        }
+
+        const summaryFilePath = this._getSummaryFilePath(originalFilePath);
+        const summaryMetaFilePath = this._getSummaryMetaFilePath(summaryFilePath);
+
         if (!forceSummarize && originalContent.length <= maxOriginalLength) {
             return originalContent;
         }
 
-        const summaryFilePath = this._getSummaryFilePath(originalFilePath);
-
         if (cacheSummary && !forceSummarize) {
             try {
-                const originalStats = await fsp.stat(originalFilePath);
-                const summaryStats = await fsp.stat(summaryFilePath);
-                if (summaryStats.mtimeMs > originalStats.mtimeMs) {
+                const metaContentString = await fsp.readFile(summaryMetaFilePath, 'utf8');
+                const metaContent = JSON.parse(metaContentString);
+                if (metaContent.originalContentHash === currentOriginalHash) {
+                    // console.log(`MemoryManager: Found valid cached summary for '${memoryCategoryFileName}' based on hash.`); // use t()
                     return await fsp.readFile(summaryFilePath, 'utf8');
+                } else {
+                    // console.log(`MemoryManager: Hash mismatch for cached summary of '${memoryCategoryFileName}'. Will regenerate.`); // use t()
                 }
             } catch (error) {
                 if (error.code !== 'ENOENT') {
-                    // console.warn(`MemoryManager: Error checking summary cache for '${memoryCategoryFileName}': ${error.message}. Will attempt to regenerate.`);
+                    // console.warn(`MemoryManager: Error checking summary cache for '${memoryCategoryFileName}': ${error.message}. Will attempt to regenerate.`); // use t()
                 }
             }
         }
 
+        // console.log(`MemoryManager: Summarizing content of '${memoryCategoryFileName}'...`); // use t()
         if (!aiService || typeof aiService.generateText !== 'function') {
             throw new Error("aiService is required for summarization and must have a generateText method.");
         }
@@ -161,22 +180,31 @@ class MemoryManager {
         };
 
         try {
-            const summary = await aiService.generateText(prompt, effectiveLlmParams);
+            const summaryContent = await aiService.generateText(prompt, effectiveLlmParams);
 
             if (cacheSummary) {
                 try {
-                    // Use this.overwriteMemory to ensure the memory_bank path is created.
-                    // Pass the base name of the summary file as memoryCategoryFileName.
-                    await this.overwriteMemory(taskStateDirPath, path.basename(summaryFilePath), summary);
+                    await this.overwriteMemory(taskStateDirPath, path.basename(summaryFilePath), summaryContent);
+
+                    const metaData = {
+                        originalContentHash: currentOriginalHash,
+                        summaryGeneratedTimestamp: new Date().toISOString()
+                    };
+                    await this.overwriteMemory(taskStateDirPath, path.basename(summaryMetaFilePath), metaData, { isJson: true });
+                    // console.log(`MemoryManager: Saved new summary and meta for '${memoryCategoryFileName}'.`); // use t()
                 } catch (writeError) {
-                    // console.error(`MemoryManager: Failed to cache summary for '${memoryCategoryFileName}': ${writeError.message}`);
+                    // console.error(`MemoryManager: Failed to cache summary or meta for '${memoryCategoryFileName}': ${writeError.message}`); // use t()
                 }
             }
-            return summary;
+            return summaryContent;
         } catch (llmError) {
-            // console.warn(`MemoryManager: Summarization failed for '${memoryCategoryFileName}'. Rethrowing error.`);
+            // console.error(`MemoryManager: Error summarizing content for '${memoryCategoryFileName}': ${llmError.message}`); // use t()
             throw new Error(`Failed to summarize '${memoryCategoryFileName}': ${llmError.message}`);
         }
+    }
+
+    _getSummaryMetaFilePath(summaryFilePath) { // Added helper method
+        return `${summaryFilePath}.meta.json`;
     }
 }
 
