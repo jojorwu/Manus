@@ -274,6 +274,7 @@ class PlanManager {
         userTaskString,
         knownAgentRoles,
         knownToolsByRole,
+        memoryContext = null, // New parameter
         currentCWC = null,
         executionContextSoFar = null,
         failedStepInfo = null,
@@ -281,6 +282,38 @@ class PlanManager {
         isRevision = false,
         revisionAttemptNumber = 0
     ) {
+        let initialPromptSection = `User task: '${userTaskString}'.`;
+        if (memoryContext && memoryContext.taskDefinition && memoryContext.taskDefinition !== userTaskString) {
+            initialPromptSection = `Original task definition from memory: "${memoryContext.taskDefinition}"
+Current user request (if refining or different): "${userTaskString}"`;
+        } else if (memoryContext && memoryContext.taskDefinition) {
+            initialPromptSection = `User task (from memory): "${memoryContext.taskDefinition}"`;
+        }
+
+        let memoryContextPromptSection = "";
+        if (memoryContext) {
+            if (memoryContext.retrievedKeyDecisions && memoryContext.retrievedKeyDecisions.trim() !== "") {
+                memoryContextPromptSection += `
+
+Previously noted key decisions and learnings:
+---
+${memoryContext.retrievedKeyDecisions}
+---`;
+            }
+            if (memoryContext.retrievedCwcSnapshot && Object.keys(memoryContext.retrievedCwcSnapshot).length > 0) {
+                const cwcSnap = memoryContext.retrievedCwcSnapshot;
+                let cwcSummaryForPrompt = `
+
+Snapshot of relevant prior working context (summary):
+- Prior Progress Summary: ${cwcSnap.summaryOfProgress || 'N/A'}
+- Prior Next Objective: ${cwcSnap.nextObjective || 'N/A'}
+- Prior Key Findings (count): ${(cwcSnap.keyFindings && cwcSnap.keyFindings.length) || 0}
+- Prior Errors Encountered (count): ${(cwcSnap.errorsEncountered && cwcSnap.errorsEncountered.length) || 0}`;
+                memoryContextPromptSection += `${cwcSummaryForPrompt}
+---`;
+            }
+        }
+
         if (!isRevision) {
             const templatePlan = await this.tryGetPlanFromTemplate(userTaskString);
             if (templatePlan) {
@@ -467,10 +500,19 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 
             revisionContext += "Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using LLMStepExecutor with isFinalAnswer: true."; // Changed GeminiStepExecutor
 
-            planningPrompt = `${revisionContext}\n\nAvailable agent capabilities:\n---\n${formattedAgentCapabilitiesString}\n---\n${orchestratorSpecialActionsDescription}\n---\n${planFormatInstructions}`;
+            planningPrompt = `${revisionContext}${memoryContextPromptSection}
+
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}`;
 
         } else {
-            planningPrompt = `User task: '${userTaskString}'.
+            planningPrompt = `${initialPromptSection}${memoryContextPromptSection}
+
 Available agent capabilities:
 ---
 ${formattedAgentCapabilitiesString}
