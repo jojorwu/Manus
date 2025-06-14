@@ -1,64 +1,64 @@
-// File: tools/Context7DocumentationTool.js
-// const { t } = require('../utils/localization'); // For future localization of logs
-const Context7Client = require('../services/Context7Client'); // Adjust path if Context7Client is elsewhere
+// Файл: tools/Context7DocumentationTool.js
+const { t } = require('../utils/localization'); // Для будущей локализации логов
+const Context7Client = require('../services/Context7Client'); // Скорректируйте путь, если Context7Client находится в другом месте
 
 class Context7DocumentationTool {
     constructor(context7ClientInstance) {
         if (!context7ClientInstance || typeof context7ClientInstance.resolveLibraryId !== 'function' || typeof context7ClientInstance.getLibraryDocs !== 'function') {
-            // console.error(t('C7TOOL_ERROR_INVALID_CLIENT')); // Or a more direct error for now
-            throw new Error("Context7DocumentationTool: Invalid Context7Client instance provided.");
+            console.error(t('C7TOOL_ERROR_INVALID_CLIENT')); // Или пока более прямое сообщение об ошибке
+            throw new Error("Context7DocumentationTool: Предоставлен недействительный экземпляр Context7Client.");
         }
         this.client = context7ClientInstance;
-        // console.log(t('C7TOOL_INIT_DONE', { serviceName: 'Context7DocumentationTool' }));
+        console.log(t('C7TOOL_INIT_DONE', { serviceName: 'Context7DocumentationTool' }));
     }
 
     /**
-     * Fetches documentation for a given library name, optionally focused on a topic.
-     * This method encapsulates the two-step process: resolving library ID and then getting docs.
-     * @param {object} input - The input object.
-     * @param {string} input.libraryName - The common name of the library (e.g., "React", "Next.js").
-     * @param {string} [input.topic] - Optional topic to focus the documentation on (e.g., "hooks", "routing").
-     * @param {number} [input.maxTokens=5000] - Optional max number of tokens for the documentation.
-     * @returns {Promise<{result: string, error?: string}>} An object containing the documentation text or an error message.
+     * Получает документацию для указанного имени библиотеки, опционально сфокусированную на теме.
+     * Этот метод инкапсулирует двухэтапный процесс: определение ID библиотеки и затем получение документации.
+     * @param {object} input - Входной объект.
+     * @param {string} input.libraryName - Общепринятое имя библиотеки (например, "React", "Next.js").
+     * @param {string} [input.topic] - Необязательная тема для фокусировки документации (например, "hooks", "routing").
+     * @param {number} [input.maxTokens=5000] - Необязательное максимальное количество токенов для документации.
+     * @returns {Promise<{result: string, error?: string}>} Объект, содержащий текст документации или сообщение об ошибке.
      */
     async execute(input) {
         const { libraryName, topic = null, maxTokens = 5000 } = input;
 
         if (!libraryName || typeof libraryName !== 'string' || libraryName.trim() === '') {
-            // console.warn(t('C7TOOL_WARN_INVALID_LIB_NAME'));
-            return { result: null, error: "Invalid input: 'libraryName' must be a non-empty string." };
+            console.warn(t('C7TOOL_WARN_INVALID_LIB_NAME'));
+            return { result: null, error: "Неверный ввод: 'libraryName' должен быть непустой строкой." };
         }
 
-        // console.log(t('C7TOOL_LOG_FETCHING_DOCS', { libraryName, topic }));
+        console.log(t('C7TOOL_LOG_FETCHING_DOCS', { libraryName, topic }));
         try {
-            // Step 1: Resolve Library ID
-            // console.log(t('C7TOOL_LOG_RESOLVING_ID', { libraryName }));
+            // Шаг 1: Определение ID библиотеки
+            console.log(t('C7TOOL_LOG_RESOLVING_ID', { libraryName }));
             const libraryId = await this.client.resolveLibraryId(libraryName);
 
             if (!libraryId || libraryId.trim() === '') {
-                // console.warn(t('C7TOOL_WARN_ID_NOT_RESOLVED', { libraryName }));
-                return { result: null, error: `Could not resolve library ID for "${libraryName}". The library might not be supported by Context7.` };
+                console.warn(t('C7TOOL_WARN_ID_NOT_RESOLVED', { libraryName }));
+                return { result: null, error: `Не удалось определить ID для библиотеки "${libraryName}". Возможно, Context7 не поддерживает эту библиотеку.` };
             }
-            // console.log(t('C7TOOL_LOG_ID_RESOLVED', { libraryName, libraryId }));
+            console.log(t('C7TOOL_LOG_ID_RESOLVED', { libraryName, libraryId }));
 
-            // Step 2: Get Library Documentation
-            // console.log(t('C7TOOL_LOG_GETTING_DOCS', { libraryId, topic }));
+            // Шаг 2: Получение документации по библиотеке
+            console.log(t('C7TOOL_LOG_GETTING_DOCS', { libraryId, topic }));
             const documentation = await this.client.getLibraryDocs(libraryId, topic, maxTokens);
 
             if (documentation === null || documentation.trim() === '') {
-                // console.log(t('C7TOOL_LOG_DOCS_EMPTY', { libraryId, topic }));
-                 return { result: `No specific documentation found for library ID "${libraryId}" (topic: ${topic || 'general'}).`, error: null };
+                console.log(t('C7TOOL_LOG_DOCS_EMPTY', { libraryId, topic }));
+                 return { result: `Для ID библиотеки "${libraryId}" (тема: ${topic || 'общая'}) не найдено конкретной документации.`, error: null };
             }
 
-            // console.log(t('C7TOOL_LOG_DOCS_RECEIVED', { libraryId, topic, length: documentation.length }));
+            console.log(t('C7TOOL_LOG_DOCS_RECEIVED', { libraryId, topic, length: documentation.length }));
             return { result: documentation, error: null };
 
         } catch (error) {
-            // console.error(t('C7TOOL_ERROR_FETCH_FAILED', { libraryName, errorMessage: error.message }), error);
+            console.error(t('C7TOOL_ERROR_FETCH_FAILED', { libraryName, errorMessage: error.message }), error);
             if (error.message && error.message.startsWith('Context7Client') || error.message.startsWith('Context7 RPC Error')) {
-                 return { result: null, error: error.message };
+                 return { result: null, error: error.message }; // Assuming these are already localized or specific enough
             }
-            return { result: null, error: `Failed to fetch documentation for "${libraryName}": ${error.message}` };
+            return { result: null, error: `Ошибка получения документации для "${libraryName}": ${error.message}` };
         }
     }
 }

@@ -1,6 +1,6 @@
-// tools/FileSystemTool.js
-const fsp = require('fs').promises; // Renamed for clarity
-const fs = require('fs'); // For createWriteStream (synchronous part of stream setup)
+// tools/FileSystemTool.js - Инструмент для работы с файловой системой
+const fsp = require('fs').promises; // Переименовано для ясности
+const fs = require('fs'); // Для createWriteStream (синхронная часть настройки потока)
 const path =require('path');
 const PDFDocument = require('pdfkit');
 const { t } = require('../utils/localization');
@@ -8,13 +8,13 @@ const { t } = require('../utils/localization');
 class FileSystemTool {
     constructor(taskWorkspaceDir) {
         if (!taskWorkspaceDir || typeof taskWorkspaceDir !== 'string' || taskWorkspaceDir.trim() === "") {
-            // This error is thrown on construction, so it might not be caught by the standard error handling of execute()
-            // For now, keeping it in English as it's a setup error. If localization is needed here, it's more complex.
-            // Consider: console.error(t("FS_CONSTRUCTOR_ERROR", { message: "taskWorkspaceDir is required..."}));
-            throw new Error("FileSystemTool: taskWorkspaceDir is required and must be a non-empty string.");
+            // Эта ошибка выбрасывается при создании экземпляра, поэтому она может не перехватываться стандартной обработкой ошибок execute()
+            // Пока что оставляем на английском, так как это ошибка настройки. Если здесь потребуется локализация, это будет сложнее.
+            // Рассмотреть: console.error(t("FS_CONSTRUCTOR_ERROR", { message: "taskWorkspaceDir is required..."}));
+            throw new Error("FileSystemTool: Параметр taskWorkspaceDir является обязательным и должен быть непустой строкой.");
         }
-        this.taskWorkspaceDir = path.resolve(taskWorkspaceDir); // Ensure it's an absolute path
-        // Create the base workspace directory if it doesn't exist
+        this.taskWorkspaceDir = path.resolve(taskWorkspaceDir); // Гарантируем, что это абсолютный путь
+        // Создаем базовую рабочую директорию, если она не существует
         fsp.mkdir(this.taskWorkspaceDir, { recursive: true })
             .catch(err => console.error(t('FS_ROOT_DIR_CREATION_FAILED_LOG', { componentName: 'FileSystemTool', path: this.taskWorkspaceDir }), err));
     }
@@ -22,18 +22,18 @@ class FileSystemTool {
     async _getSafePath(userPath = '') {
         if (typeof userPath !== 'string') {
             console.error(t('FS_GETSAFEPATH_NOT_STRING_LOG', { componentName: 'FileSystemTool' }));
-            // This is a returned error, already Russian.
+            // Это возвращаемая ошибка, уже на русском языке.
             throw new Error("FileSystemTool: Внутренняя ошибка - userPath должен быть строкой для _getSafePath.");
         }
         const normalizedUserPath = path.normalize(userPath);
         if (normalizedUserPath.split(path.sep).includes('..')) {
-            // This is a returned error, already Russian.
+            // Это возвращаемая ошибка, уже на русском языке.
             throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены.");
         }
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
         if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
             console.error(t('FS_PATH_TRAVERSAL_ATTEMPT_LOG', { componentName: 'FileSystemTool', workspaceDir: this.taskWorkspaceDir, userPath: userPath, resolvedPath: resolvedPath }));
-            // This is a returned error, already Russian.
+            // Это возвращаемая ошибка, уже на русском языке.
             throw new Error("FileSystemTool: Обнаружена попытка обхода пути.");
         }
         let dirToEnsure;
@@ -82,7 +82,7 @@ class FileSystemTool {
             }
             await fsp.writeFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-            // Returned result is already Russian.
+            // Возвращаемый результат, уже на русском языке.
             return { result: `Файл '${displayPath}' успешно создан.`, error: null };
         } catch (error) {
             console.error(t('FS_CREATE_FILE_ERROR_LOG', { componentName: 'FileSystemTool', filename: params.filename, directory: directory }), error);
@@ -92,7 +92,7 @@ class FileSystemTool {
 
     async read_file(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            // Returned error is already Russian.
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
         const directory = params.directory || '';
@@ -101,11 +101,11 @@ class FileSystemTool {
         try {
             safeFilePath = await this._getSafePath(relativeFilePath);
             const stats = await fsp.stat(safeFilePath).catch(e => {
-                if (e.code === 'ENOENT') throw e; // Handled by specific ENOENT catch below
-                throw e; // Other stat errors
+                if (e.code === 'ENOENT') throw e; // Обрабатывается специальным перехватом ENOENT ниже
+                throw e; // Другие ошибки stat
             });
             if (stats && stats.isDirectory()) {
-                // Returned error is already Russian.
+                // Возвращаемая ошибка, уже на русском языке.
                  return { result: null, error: `Не удается прочитать файл, путь '${relativeFilePath}' указывает на директорию.`};
             }
             const content = await fsp.readFile(safeFilePath, 'utf8');
@@ -114,7 +114,7 @@ class FileSystemTool {
             const displayPath = safeFilePath ? path.relative(this.taskWorkspaceDir, safeFilePath) : relativeFilePath;
             if (error.code === 'ENOENT') {
                 console.warn(t('FS_READ_FILE_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
-                // Returned error is already Russian.
+                // Возвращаемая ошибка, уже на русском языке.
                 return { result: null, error: `Файл не найден: '${displayPath}'.` };
             }
             console.error(t('FS_READ_FILE_ERROR_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }), error);
@@ -124,11 +124,11 @@ class FileSystemTool {
 
     async append_to_file(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            // Returned error is already Russian.
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
-        if (typeof params.content !== 'string' || params.content === "") { // Assuming content must be non-empty for append
-            // Returned error is already Russian.
+        if (typeof params.content !== 'string' || params.content === "") { // Предполагаем, что содержимое должно быть непустым для дозаписи
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'content' является обязательным и должен быть непустой строкой для дозаписи." };
         }
         const directory = params.directory || '';
@@ -138,15 +138,15 @@ class FileSystemTool {
             try {
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
-                    // Returned error is already Russian.
+                    // Возвращаемая ошибка, уже на русском языке.
                     return { result: null, error: `Не удается дописать в файл, путь '${relativeFilePath}' указывает на существующую директорию.`};
                 }
             } catch (e) {
-                if (e.code !== 'ENOENT') throw e; // If it's not ENOENT, throw and let outer catch handle.
+                if (e.code !== 'ENOENT') throw e; // Если это не ENOENT, выбрасываем ошибку, и пусть ее обработает внешний catch.
             }
             await fsp.appendFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-            // Returned result is already Russian.
+            // Возвращаемый результат, уже на русском языке.
             return { result: `Содержимое добавлено в '${displayPath}'.`, error: null };
         } catch (error) {
             console.error(t('FS_APPEND_FILE_ERROR_LOG', { componentName: 'FileSystemTool', filename: params.filename, directory: directory }), error);
@@ -163,18 +163,18 @@ class FileSystemTool {
         try {
             const safeDirPath = await this._getSafePath(directory);
             const stats = await fsp.stat(safeDirPath).catch(e => {
-                if (e.code === 'ENOENT') return null; // Will be handled by !stats check below
-                throw e; // Other stat errors
+                if (e.code === 'ENOENT') return null; // Будет обработано проверкой !stats ниже
+                throw e; // Другие ошибки stat
             });
             if (!stats) {
                  const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
                  console.warn(t('FS_LIST_FILES_DIR_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
-                 // Returned error is already Russian.
+                 // Возвращаемая ошибка, уже на русском языке.
                  return { result: null, error: `Директория не найдена: '${displayPath}'.` };
             }
             if (!stats.isDirectory()) {
                 const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
-                // Returned error is already Russian.
+                // Возвращаемая ошибка, уже на русском языке.
                 return { result: null, error: `'${displayPath}' не является директорией.` };
             }
             const dirents = await fsp.readdir(safeDirPath, { withFileTypes: true });
@@ -194,54 +194,54 @@ class FileSystemTool {
             const displayPath = path.relative(this.taskWorkspaceDir, path.join(this.taskWorkspaceDir, directory) );
             if (error.code === 'ENOENT') {
                  console.warn(t('FS_LIST_FILES_DIR_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
-                 // Returned error is already Russian.
+                 // Возвращаемая ошибка, уже на русском языке.
                 return { result: null, error: `Директория не найдена: '${displayPath}'.` };
             }
             console.error(t('FS_LIST_FILES_ERROR_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }), error);
-            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message }; // Already Russian
-            // Generic error message for other cases, keeping original error.message for details
+            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message }; // Уже на русском
+            // Общее сообщение об ошибке для других случаев, сохраняя исходное error.message для деталей
             return { result: null, error: `Ошибка при обработке директории '${displayPath}': ${error.message}` };
         }
     }
 
     async create_pdf_from_text(params) {
         if (!params || typeof params.filename !== 'string' || params.filename.trim() === "") {
-            // Returned error is already Russian.
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'filename' является обязательным и должен быть непустой строкой." };
         }
         if (!params.filename.toLowerCase().endsWith('.pdf')) {
-            // Returned error is already Russian.
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'filename' должен заканчиваться на '.pdf'." };
         }
         if (typeof params.text_content !== 'string') {
-            // Returned error is already Russian.
+            // Возвращаемая ошибка, уже на русском языке.
             return { result: null, error: "Неверный ввод: 'text_content' является обязательным и должен быть строкой." };
         }
         const directory = params.directory || '';
         const fontSize = params.fontSize || 12;
         const fontName = params.fontName || 'Helvetica';
-        const customFontFileName = params.customFontFileName || null; // New parameter
+        const customFontFileName = params.customFontFileName || null; // Новый параметр
         const relativeFilePath = path.join(directory, params.filename);
         let safeFilePath;
 
         try {
             safeFilePath = await this._getSafePath(relativeFilePath);
 
-            // Check if safeFilePath points to an existing directory before creating write stream
+            // Проверяем, указывает ли safeFilePath на существующую директорию, перед созданием потока записи
             try {
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
-                    // Returned error is already Russian.
+                    // Возвращаемая ошибка, уже на русском языке.
                     return { result: null, error: `Не удается создать PDF, путь '${relativeFilePath}' указывает на существующую директорию.` };
                 }
             } catch (statError) {
                 if (statError.code !== 'ENOENT') {
                     throw statError;
                 }
-                // ENOENT is fine, means file doesn't exist, which is expected for creation.
+                // ENOENT - это нормально, означает, что файл не существует, что ожидаемо при создании.
             }
 
-            return new Promise(async (resolve, reject) => { // Made promise callback async for await fsp.access
+            return new Promise(async (resolve, reject) => { // Сделали колбэк промиса асинхронным для await fsp.access
                 const doc = new PDFDocument({
                     size: 'A4',
                     margins: { top: 50, bottom: 50, left: 72, right: 72 },
@@ -258,7 +258,7 @@ class FileSystemTool {
 
                 if (customFontFileName) {
                     if (typeof customFontFileName !== 'string' || (!customFontFileName.toLowerCase().endsWith('.ttf') && !customFontFileName.toLowerCase().endsWith('.otf'))) {
-                        // fontWarning is already Russian.
+                        // fontWarning уже на русском языке.
                         fontWarning = `Неверный 'customFontFileName': Должен быть строкой, заканчивающейся на .ttf или .otf. Используется шрифт по умолчанию '${fontName}'.`;
                         console.warn(t('FS_PDF_CUSTOM_FONT_INVALID_LOG', { componentName: 'FileSystemTool', warningMessage: fontWarning }));
                         doc.font(fontName);
@@ -271,10 +271,10 @@ class FileSystemTool {
                             customFontApplied = true;
                             console.log(t('FS_PDF_CUSTOM_FONT_USING_LOG', { componentName: 'FileSystemTool', fontPath: fontPath }));
                         } catch (fontError) {
-                            // fontWarning is already Russian.
+                            // fontWarning уже на русском языке.
                             fontWarning = `Кастомный шрифт '${customFontFileName}' не найден или не читается. Использован шрифт по умолчанию '${fontName}'.`;
                             console.warn(t('FS_PDF_CUSTOM_FONT_NOT_FOUND_LOG', { componentName: 'FileSystemTool', customFontFileName: customFontFileName, fontPath: fontPath, fallbackFont: fontName }), fontError);
-                            doc.font(fontName); // Fallback
+                            doc.font(fontName); // Резервный вариант
                         }
                     }
                 } else {
@@ -289,7 +289,7 @@ class FileSystemTool {
 
                 stream.on('finish', () => {
                     const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
-                    // successMessage and fontWarning are already Russian.
+                    // successMessage и fontWarning уже на русском языке.
                     let successMessage = `PDF файл '${displayPath}' успешно создан. Использованный шрифт: ${customFontApplied ? effectiveFont : fontName}.`;
                     if (fontWarning) {
                         successMessage += ` Предупреждение: ${fontWarning}`;
@@ -299,16 +299,16 @@ class FileSystemTool {
                 stream.on('error', (err) => {
                     console.error(t('FS_PDF_STREAM_ERROR_LOG', { componentName: 'FileSystemTool', relativeFilePath: relativeFilePath }), err);
                     fsp.unlink(safeFilePath).catch(unlinkErr => console.error(t('FS_PDF_UNLINK_ERROR_LOG', { componentName: 'FileSystemTool', safeFilePath: safeFilePath }), unlinkErr));
-                    // Returned error is already Russian.
+                    // Возвращаемая ошибка, уже на русском языке.
                     reject({ result: null, error: `Не удалось записать PDF на диск: ${err.message}` });
                 });
             }).catch(error => {
-                 return error;
+                 return error; // This will be an object { result: null, error: ... } if rejected from stream.on('error')
             });
 
         } catch (error) {
             console.error(t('FS_PDF_CREATE_ERROR_LOG', { componentName: 'FileSystemTool', relativeFilePath: relativeFilePath }), error);
-            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message }; // Already Russian
+            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message }; // Уже на русском
             return { result: null, error: `Ошибка при создании PDF '${relativeFilePath}': ${error.message}` };
         }
     }
