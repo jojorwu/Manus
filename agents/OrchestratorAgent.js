@@ -2,6 +2,7 @@ const fs = require('fs'); // Keep for existing sync operations if any
 const fsp = require('fs').promises; // Added for async file operations
 const path = require('path');
 const crypto = require('crypto'); // Added for hashing search queries
+const { v4: uuidv4 } = require('uuid'); // For unique temporary file names
 const { saveTaskState, loadTaskState, saveTaskJournal } = require('../utils/taskStateUtil');
 const PlanManager = require('../core/PlanManager');
 const PlanExecutor = require('../core/PlanExecutor');
@@ -633,6 +634,77 @@ class OrchestratorAgent {
             currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Task failed after execution/replanning attempts.";
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_POST_EXECUTION_CYCLE", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
             await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+
+            // --- New Batch Summarization of Key Findings using getSummarizedRecords ---
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_START", "Attempting to generate batch summary of key findings.", { parentTaskId }));
+            const recordIdentifiersForBatchSummary = [];
+            const tempFileSubDir = 'temp_batch_summary_input';
+            // Limit to most recent 20 findings to avoid excessive processing
+            const findingsToConsiderForBatchSummary = currentWorkingContext.keyFindings.slice(-20);
+
+            for (const finding of findingsToConsiderForBatchSummary) {
+                if (finding.data && finding.data.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
+                    recordIdentifiersForBatchSummary.push(finding.data.rawContentPath);
+                } else {
+                    let stringifiedData;
+                    if (typeof finding.data === 'string') {
+                        stringifiedData = finding.data;
+                    } else if (finding.data === null || finding.data === undefined) {
+                        stringifiedData = ""; // Represent null/undefined as empty string
+                    } else {
+                        try {
+                            stringifiedData = JSON.stringify(finding.data);
+                        } catch (e) {
+                            console.warn(`OrchestratorAgent: Could not stringify finding.data for temp storage (finding ID: ${finding.id}): ${e.message}`);
+                            stringifiedData = `Error: Could not stringify data for finding ${finding.id}`;
+                        }
+                    }
+                    // Ensure finding.id is somewhat unique for a filename, or use uuid.
+                    const tempFileNameSuffix = (finding.id ? String(finding.id).replace(/[^a-zA-Z0-9_.-]/g, '_') : uuidv4());
+                    const tempFileName = path.join(tempFileSubDir, `finding_${tempFileNameSuffix}.txt`);
+                    try {
+                        await this.memoryManager.overwriteMemory(taskDirPath, tempFileName, stringifiedData);
+                        recordIdentifiersForBatchSummary.push(tempFileName);
+                    } catch (tempSaveError) {
+                        console.error(`OrchestratorAgent: Failed to save temporary finding data for batch summary (finding ID: ${finding.id}): ${tempSaveError.message}`);
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_TEMP_SAVE_ERROR", `Failed to save temp finding data: ${tempSaveError.message}`, { parentTaskId, findingId: finding.id }));
+                    }
+                }
+            }
+
+            if (recordIdentifiersForBatchSummary.length > 0) {
+                const batchSummarizationOptions = {
+                    promptTemplate: `The following is a collection of records, findings, and data points accumulated during a complex task. Provide a single, coherent summary of the overall progress, current understanding, key achievements, and any unresolved issues or critical information. Focus on a high-level overview suitable for understanding the task's current state.
+
+Combined Records:
+{combined_content}
+
+Comprehensive Task Status Summary:`,
+                    llmParams: {
+                        model: (this.aiService.baseConfig && this.aiService.baseConfig.cwcUpdateModel) || 'gpt-3.5-turbo',
+                        temperature: 0.5
+                    },
+                    // ttlSeconds: 3600 // Example: Cache for 1 hour if desired
+                };
+                try {
+                    const newBatchSummary = await this.memoryManager.getSummarizedRecords(
+                        taskDirPath,
+                        recordIdentifiersForBatchSummary,
+                        this.aiService,
+                        batchSummarizationOptions
+                    );
+                    currentWorkingContext.batchProgressSummary = newBatchSummary; // Store the new summary
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_SUCCESS", "Successfully generated batch summary of key findings.", { parentTaskId, summaryPreview: String(newBatchSummary).substring(0, 100) + "..." }));
+                    // Note: Temporary files in temp_batch_summary_input/ are not cleaned up in this subtask.
+                } catch (batchSummaryError) {
+                    console.error(`OrchestratorAgent: Failed to get summarized records for CWC update: ${batchSummaryError.message}`);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_FAILED", `Failed to generate batch summary: ${batchSummaryError.message}`, { parentTaskId, error: batchSummaryError.message }));
+                }
+            } else {
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_SKIPPED", "No records identified for batch summarization.", { parentTaskId }));
+            }
+            // --- End of New Batch Summarization ---
+
 
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective post-execution cycle.", { parentTaskId }));
             finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_START", "Attempting to summarize key findings for CWC update.", { parentTaskId }));
