@@ -13,6 +13,8 @@ const ResultsQueue = require('./core/ResultsQueue');
 const WebSearchTool = require('./tools/WebSearchTool');
 const ReadWebpageTool = require('./tools/ReadWebpageTool');
 const CalculatorTool = require('./tools/CalculatorTool');
+const Context7Client = require('./services/Context7Client'); // Added
+const Context7DocumentationTool = require('./tools/Context7DocumentationTool'); // Added
 
 // Импорт LLM сервиса
 // const geminiLLMService = require('./services/LLMService'); // Removed
@@ -42,6 +44,12 @@ const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // П�
 const readWebpageTool = new ReadWebpageTool();
 const calculatorTool = new CalculatorTool();
 
+// Initialize Context7 Client and Tool
+const context7ServerUrl = process.env.CONTEXT7_SERVER_URL || 'http://localhost:8080/mcp';
+const context7ClientInstance = new Context7Client(context7ServerUrl);
+// console.log(`Context7 Client initialized for server: ${context7ServerUrl}`); // For localization later
+const context7DocumentationTool = new Context7DocumentationTool(context7ClientInstance);
+
 // Инициализация AI сервисов с детальной конфигурацией моделей
 const openAIService = new OpenAIService(process.env.OPENAI_API_KEY, {
     defaultModel: 'gpt-3.5-turbo',
@@ -64,7 +72,8 @@ const geminiService = new GeminiService(process.env.GEMINI_API_KEY, {
 // Global agents that don't depend on per-request AI service selection
 const researchAgentTools = {
     "WebSearchTool": webSearchTool,
-    "ReadWebpageTool": readWebpageTool
+    "ReadWebpageTool": readWebpageTool,
+    "Context7DocumentationTool": context7DocumentationTool // Added
 };
 const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, researchAgentTools, agentApiKeysConfig);
 
@@ -166,9 +175,9 @@ app.get('/', (req, res) => {
 // Запуск сервера
 app.listen(PORT, () => {
     console.log(`Server is running on http://localhost:${PORT}`);
-    console.log("Ensure you have a .env file with GEMINI_API_KEY, SEARCH_API_KEY, and CSE_ID.");
+    console.log("Ensure you have .env file with GEMINI_API_KEY, OPENAI_API_KEY, SEARCH_API_KEY, CSE_ID, and optionally CONTEXT7_SERVER_URL.");
     console.log("Available agents: Orchestrator, Research, Utility.");
-    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool.");
+    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool, Context7DocumentationTool.");
     console.log("UtilityAgent tools: CalculatorTool.");
     console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
 });

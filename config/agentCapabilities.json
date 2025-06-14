@@ -1,10 +1,11 @@
 [
   {
     "role": "ResearchAgent",
-    "description": "Specialized in finding and retrieving information from the web. Can perform web searches and read content from specific URLs.",
+    "description": "Specialized in finding and retrieving information from the web. Can perform web searches, read content from specific URLs, and fetch up-to-date documentation for software libraries.",
     "tools": [
       { "name": "WebSearchTool", "description": "Performs a web search for a given query. Input format: { "query": "search terms" }" },
-      { "name": "ReadWebpageTool", "description": "Fetches fully rendered HTML from a given URL using Playwright. It then attempts to extract the main article content using Mozilla Readability (with JSDOM). If Readability fails, it falls back to Cheerio for general text extraction. Input format: { "url": "http://example.com" }" }
+      { "name": "ReadWebpageTool", "description": "Fetches fully rendered HTML from a given URL. It then attempts to extract the main article content. Input format: { "url": "http://example.com" }" },
+      { "name": "Context7DocumentationTool", "description": "Fetches up-to-date documentation for a specified software library, optionally focused on a topic. Useful for getting current API usage, code examples, and explanations. Input format: { "libraryName": "string (e.g., React, Next.js)", "topic": "string (optional, e.g., hooks, routing)", "maxTokens": "number (optional, default: 5000)" }" }
     ]
   },
   {

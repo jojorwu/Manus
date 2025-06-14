@@ -451,6 +451,11 @@ Example of a plan using FileSystemTool, stepId, and output referencing:
   ]
 ]
 \`\`\`
+
+IMPORTANT CONSIDERATIONS FOR CONTEXT LENGTH:
+- When using tools that can return large amounts of text, such as Context7DocumentationTool, be mindful of the overall context window of subsequent LLM calls that might use this text.
+- For 'Context7DocumentationTool', if you anticipate the fetched documentation will be used directly in another LLM prompt (e.g., with LLMStepExecutor), consider specifying a 'maxTokens' value in its 'sub_task_input' (e.g., 2000 or 3000) to request a more concise version of the documentation from Context7. This helps prevent exceeding token limits in subsequent steps.
+
 Produce ONLY the JSON array of stages. Do not include any other text before or after the JSON.`;
 
         let planningPrompt;
