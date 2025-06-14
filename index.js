@@ -15,7 +15,12 @@ const ReadWebpageTool = require('./tools/ReadWebpageTool');
 const CalculatorTool = require('./tools/CalculatorTool');
 
 // Импорт LLM сервиса
-const geminiLLMService = require('./services/LLMService');
+// const geminiLLMService = require('./services/LLMService'); // Removed
+const GeminiService = require('./services/ai/GeminiService');
+const OpenAIService = require('./services/ai/OpenAIService');
+const { initializeLocalization, t } = require('./utils/localization');
+
+initializeLocalization(); // Call localization setup
 
 // Инициализация очередей
 const subTaskQueue = new SubTaskQueue();
@@ -37,9 +42,26 @@ const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // П�
 const readWebpageTool = new ReadWebpageTool();
 const calculatorTool = new CalculatorTool();
 
-// Инициализация агентов
-const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, geminiLLMService, agentApiKeysConfig);
+// Инициализация AI сервисов с детальной конфигурацией моделей
+const openAIService = new OpenAIService(process.env.OPENAI_API_KEY, {
+    defaultModel: 'gpt-3.5-turbo',
+    planningModel: 'gpt-4',
+    cwcUpdateModel: 'gpt-3.5-turbo',
+    synthesisModel: 'gpt-4',
+    defaultLLMStepModel: 'gpt-3.5-turbo',
+    summarizationModel: 'gpt-3.5-turbo'
+});
 
+const geminiService = new GeminiService(process.env.GEMINI_API_KEY, {
+    defaultModel: 'gemini-pro',
+    planningModel: 'gemini-pro',
+    cwcUpdateModel: 'gemini-pro',
+    synthesisModel: 'gemini-pro',
+    defaultLLMStepModel: 'gemini-pro',
+    summarizationModel: 'gemini-pro'
+});
+
+// Global agents that don't depend on per-request AI service selection
 const researchAgentTools = {
     "WebSearchTool": webSearchTool,
     "ReadWebpageTool": readWebpageTool
@@ -63,7 +85,7 @@ app.use(express.json());
 
 // API эндпоинт для задач
 app.post('/api/generate-plan', async (req, res) => {
-    const { task, taskIdToLoad, mode } = req.body;
+    const { task, taskIdToLoad, mode, aiService: requestedService } = req.body; // Added aiService
 
     // Определяем режим по умолчанию, если не указан
     const effectiveMode = mode || "EXECUTE_FULL_PLAN";
@@ -95,7 +117,35 @@ app.post('/api/generate-plan', async (req, res) => {
 
     try {
         // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
-        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, generated parentTaskId: ${parentTaskId}`);
+        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, requested AI Service: ${requestedService || 'default'}, generated parentTaskId: ${parentTaskId}`);
+
+        // Выбор AI сервиса для текущего запроса
+        let activeAIService;
+        if (requestedService && typeof requestedService === 'string') {
+            if (requestedService.toLowerCase() === 'gemini') {
+                activeAIService = geminiService;
+            } else if (requestedService.toLowerCase() === 'openai') {
+                activeAIService = openAIService;
+            } else {
+                console.warn(`Invalid aiService '${requestedService}' requested. Falling back to default.`);
+                activeAIService = openAIService; // Default
+            }
+        } else {
+            activeAIService = openAIService; // Default if not specified
+        }
+
+        console.log(`Request ${parentTaskId}: Using AI Service: ${activeAIService.getServiceName()} for this task.`);
+
+        // Инициализация OrchestratorAgent внутри обработчика с выбранным AI сервисом
+        const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, activeAIService, agentApiKeysConfig);
+        // Если OrchestratorAgent требует FileSystemTool, он должен быть доступен здесь
+        // Предполагая, что fileSystemTool глобально инициализирован и может быть передан, если OrchestratorAgent.js был изменен для его приема.
+        // Если OrchestratorAgent сам инстанцирует FileSystemTool или он не нужен в конструкторе, этот вызов остается как есть.
+        // На данный момент, OrchestratorAgent.js не принимает fileSystemTool в конструкторе, а устанавливает его как свойство.
+        // Это можно сделать и здесь, если необходимо: orchestratorAgent.fileSystemTool = fileSystemTool; (fileSystemTool - глобальный)
+        // Однако, для чистоты, лучше если OrchestratorAgent управляет своими зависимостями или они передаются в конструктор.
+        // Для этого задания, предположим, что текущий конструктор OrchestratorAgent достаточен.
+
 
         // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
         // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.

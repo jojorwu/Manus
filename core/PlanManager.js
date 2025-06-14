@@ -3,8 +3,8 @@ const fs = require('fs');
 const path = require('path');
 
 class PlanManager {
-    constructor(llmService, agentCapabilities, planTemplatesPath) {
-        this.llmService = llmService;
+    constructor(aiService, agentCapabilities, planTemplatesPath) { // Changed llmService to aiService
+        this.aiService = aiService; // Changed llmService to aiService
         this.agentCapabilities = agentCapabilities; // Full capabilities object/array
         this.planTemplatesPath = planTemplatesPath; // Base path for templates, e.g., path.join(__dirname, '..', 'config', 'plan_templates')
         this.planTemplates = [];
@@ -160,12 +160,19 @@ class PlanManager {
 
                     // Validate assigned_agent_role and tool_name
                     if (subTask.assigned_agent_role === "Orchestrator") {
-                        const allowedOrchestratorTools = ["ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool"];
+                        const allowedOrchestratorTools = ["ExploreSearchResults", "LLMStepExecutor", "FileSystemTool", "FileDownloaderTool"]; // Renamed GeminiStepExecutor
                         if (!allowedOrchestratorTools.includes(subTask.tool_name)) {
                             return { success: false, message: `Invalid 'tool_name': ${subTask.tool_name} for Orchestrator role (stepId: ${subTask.stepId}). Allowed: ${allowedOrchestratorTools.join(", ")}.`, rawResponse: cleanedString, stages: [] };
                         }
 
-                        if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
+                        if (subTask.tool_name === "LLMStepExecutor") { // Validation for LLMStepExecutor
+                            if (!subTask.sub_task_input || (typeof subTask.sub_task_input.prompt !== 'string' && typeof subTask.sub_task_input.prompt_template !== 'string' && !Array.isArray(subTask.sub_task_input.messages))) {
+                                return { success: false, message: `'prompt' (string), 'prompt_template' (string), or 'messages' (array) is required in sub_task_input for LLMStepExecutor (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
+                            }
+                            if (subTask.sub_task_input.model !== undefined && typeof subTask.sub_task_input.model !== 'string') {
+                                return { success: false, message: `'model' in sub_task_input for LLMStepExecutor must be a string if provided (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
+                            }
+                        } else if (subTask.tool_name === "FileSystemTool" || subTask.tool_name === "FileDownloaderTool") {
                             if (!subTask.sub_task_input || typeof subTask.sub_task_input.operation !== 'string') {
                                 return { success: false, message: `'operation' is required in sub_task_input for Orchestrator tool ${subTask.tool_name} (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                             }
@@ -312,13 +319,17 @@ Orchestrator Special Actions:
    Functionality: The Orchestrator will take the results from the most recent WebSearchTool step in a preceding stage. It will select up to 'pagesToExplore' links. For each selected link, it will internally use 'ReadWebpageTool' to fetch its content. The collected content from all explored pages will then be aggregated.
    Output: An aggregated string containing the content from all explored pages.
    When to use: Use this if the user's task implies needing more than just search snippets and requires information from the content of the web pages found.
- - GeminiStepExecutor: This is a special action for the Orchestrator to directly use an LLM for a specific step that doesn't fit other tools, like complex reasoning, summarization of diverse inputs, or reformatting text.
+ - LLMStepExecutor: This is a special action for the Orchestrator to directly use the configured AI Service (e.g., Gemini, OpenAI) for a specific step that doesn't fit other tools, like complex reasoning, summarization of diverse inputs, or reformatting text.
    Input ('sub_task_input'):
      - 'prompt_template': (String) A template for the prompt. Use {{placeholder_name}} for dynamic values. Special param '{previous_step_output}' will be replaced by the output of the immediately preceding step if available.
      - 'prompt_params': (Optional, Object) Key-value pairs to fill in the prompt_template.
      - 'prompt': (String, Alternative to template/params) A direct prompt string if no templating is needed.
+     - 'messages': (Array, Alternative to prompt/template) An array of chat messages (e.g., [{role: 'user', content: '...'}, {role: 'assistant', content: '...'}]).
+     - 'model': (Optional, String) Specify a model name if you want this step to use a particular model (e.g., 'gpt-4', 'gemini-pro'). If omitted, a default model configured for the AI service will be used.
+     - 'temperature': (Optional, Number) Sampling temperature.
+     - 'maxTokens': (Optional, Number) Maximum number of tokens to generate.
      - 'isFinalAnswer': (Optional, Boolean, Default: false) If this step, when assigned to "Orchestrator", is intended to produce the final answer to the user's query, set this to true. Example: { "prompt": "Final summary of findings.", "isFinalAnswer": true }.
-   Output: The text generated by the LLM.
+   Output: The text generated by the LLM or the content from the assistant's message in chat.
    When to use: For general LLM-based tasks, summarizations, or when a step requires complex text generation based on context or previous step outputs, especially if it's meant to be the final user-facing response.
  - FileSystemTool: Allows Orchestrator to perform file system operations within a sandboxed task-specific workspace.
    Input ('sub_task_input'):
@@ -348,18 +359,18 @@ Sub-tasks within the same stage can be executed in parallel. Stages are executed
 Each sub_task object in an inner array must have the following keys:
 1. 'stepId': String (A unique, non-empty identifier for this step within the plan, e.g., "search_articles", "analyze_data_1"). This ID is used for referencing outputs.
 2. 'assigned_agent_role': String (must be one of [${knownAgentRoles.map(r => `"${r}"`).join(", ")}] OR "Orchestrator" for special actions).
-3. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults", "GeminiStepExecutor", "FileSystemTool", "FileDownloaderTool").
+3. 'tool_name': String (must be a tool available to the assigned agent OR a special action name like "ExploreSearchResults", "LLMStepExecutor", "FileSystemTool", "FileDownloaderTool").
 4. 'sub_task_input': Object (the input for the specified tool or action).
    - This input can reference outputs from PREVIOUSLY EXECUTED steps using the syntax \`@{outputs.SOURCE_STEP_ID.FIELD_NAME}\`.
    - \`SOURCE_STEP_ID\` must be the 'stepId' of a step that is guaranteed to have completed (e.g., from a previous stage, or an earlier step in the same stage if execution within a stage is sequential for Orchestrator steps).
    - \`FIELD_NAME\` can be 'result_data' (for the raw output of the source step) or 'processed_result_data' (for the summarized/processed output, if available; defaults to raw if not processed).
    - Example: \`{ "content": "Summary from previous step: @{outputs.summarize_step.processed_result_data}" }\`
-   - For "GeminiStepExecutor" by "Orchestrator", if it's the final answer, include 'isFinalAnswer: true'.
+   - For "LLMStepExecutor" by "Orchestrator", if it's the final answer, include 'isFinalAnswer: true'. It can also take an optional 'model' parameter.
    - For "FileSystemTool" or "FileDownloaderTool", this must include 'operation' and 'params'.
 5. 'narrative_step': String (a short, human-readable description of this step's purpose).
 
 For the 'ExploreSearchResults' action, set 'assigned_agent_role' to "Orchestrator" and 'tool_name' to "ExploreSearchResults". The 'sub_task_input' may include 'pagesToExplore' and 'relevanceCriteria'.
-For the 'GeminiStepExecutor' action by 'Orchestrator', if it's producing the final user answer, include 'isFinalAnswer: true' in 'sub_task_input'.
+For the 'LLMStepExecutor' action by 'Orchestrator', if it's producing the final user answer, include 'isFinalAnswer: true' in 'sub_task_input'.
 For 'FileSystemTool' and 'FileDownloaderTool' actions by 'Orchestrator', ensure 'sub_task_input' contains 'operation' and the correct 'params' for that operation.
 
 Example of a plan using FileSystemTool, stepId, and output referencing:
@@ -369,7 +380,7 @@ Example of a plan using FileSystemTool, stepId, and output referencing:
     {
       "stepId": "extract_info",
       "assigned_agent_role": "Orchestrator",
-      "tool_name": "GeminiStepExecutor",
+      "tool_name": "LLMStepExecutor",
       "sub_task_input": {
         "prompt": "Extract key information from the user query."
       },
@@ -397,7 +408,7 @@ Example of a plan using FileSystemTool, stepId, and output referencing:
     {
       "stepId": "final_confirmation",
       "assigned_agent_role": "Orchestrator",
-      "tool_name": "GeminiStepExecutor",
+      "tool_name": "LLMStepExecutor",
       "sub_task_input": {
         "prompt": "The PDF report 'reports/report_with_extracted_info.pdf' has been created. This is the final confirmation.",
         "isFinalAnswer": true
@@ -454,7 +465,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
                 } catch (e) { console.warn("PlanManager: Could not stringify executionContextSoFar for revision prompt."); }
             }
 
-            revisionContext += "Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using GeminiStepExecutor with isFinalAnswer: true.";
+            revisionContext += "Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using LLMStepExecutor with isFinalAnswer: true."; // Changed GeminiStepExecutor
 
             planningPrompt = `${revisionContext}\n\nAvailable agent capabilities:\n---\n${formattedAgentCapabilitiesString}\n---\n${orchestratorSpecialActionsDescription}\n---\n${planFormatInstructions}`;
 
@@ -471,10 +482,11 @@ ${planFormatInstructions}`;
 
         let planJsonString;
         try {
-            planJsonString = await this.llmService(planningPrompt);
+            // planJsonString = await this.llmService(planningPrompt); // OLD
+            planJsonString = await this.aiService.generateText(planningPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.planningModel) || 'gpt-4' }); // NEW
         } catch (llmError) {
-            console.error(`PlanManager: Error from LLM service during ${sourcePrefix} planning:`, llmError.message);
-            return { success: false, message: `Failed to generate plan due to LLM service error: ${llmError.message}`, source: `${sourcePrefix}_service_error`, rawResponse: null };
+            console.error(`PlanManager: Error from AI service during ${sourcePrefix} planning:`, llmError.message);
+            return { success: false, message: `Failed to generate plan due to AI service error: ${llmError.message}`, source: `${sourcePrefix}_service_error`, rawResponse: null };
         }
 
         const validationResult = await this.parseAndValidatePlan(planJsonString, knownAgentRoles, knownToolsByRole);

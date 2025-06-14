@@ -7,10 +7,10 @@ const PlanExecutor = require('../core/PlanExecutor');
 // It's used by PlanExecutor for sub-task IDs it generates.
 
 class OrchestratorAgent {
-  constructor(subTaskQueue, resultsQueue, llmService, agentApiKeysConfig) {
+  constructor(subTaskQueue, resultsQueue, aiService, agentApiKeysConfig) {
     this.subTaskQueue = subTaskQueue;
     this.resultsQueue = resultsQueue;
-    this.llmService = llmService;
+    this.aiService = aiService; // Changed from llmService
     this.agentApiKeysConfig = agentApiKeysConfig;
 
     const capabilitiesPath = path.join(__dirname, '..', 'config', 'agentCapabilities.json');
@@ -24,14 +24,14 @@ class OrchestratorAgent {
     }
 
     this.planManager = new PlanManager(
-        this.llmService,
+        this.aiService, // Changed from llmService
         this.workerAgentCapabilities,
         path.join(__dirname, '..', 'config', 'plan_templates')
     );
     this.planExecutor = new PlanExecutor(
         this.subTaskQueue,
         this.resultsQueue,
-        this.llmService,
+        this.aiService, // Changed from llmService
             { /* Tools can be passed here if PlanExecutor needs them directly */ },
             path.join(__dirname, '..', 'saved_tasks') // Pass baseSavedTasksPath
     );
@@ -93,7 +93,8 @@ class OrchestratorAgent {
             }
             // ... rest of SYNTHESIZE_ONLY logic including synthesis prompt with CWC ...
             const synthesisPrompt = `Original task: "${currentOriginalTask}". Execution context: ${JSON.stringify(loadedState.executionContext)}. Current Working Context: ${JSON.stringify(currentWorkingContext)}. Synthesize the final answer.`;
-            const finalAnswer = await this.llmService(synthesisPrompt);
+            // const finalAnswer = await this.llmService(synthesisPrompt); // OLD
+            const finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) || 'gpt-4' }); // NEW
             finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_COMPLETED", "Synthesis complete.", { parentTaskId }));
             // ... (save journal and return)
             await saveTaskJournal(parentTaskId, finalJournalEntries, path.join(__dirname, '..', 'saved_tasks'));
@@ -305,7 +306,8 @@ Return ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and
 Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "updatedNextObjective": "Synthesize findings considering errors." }`;
 
             try {
-                const cwcUpdateResponse = await this.llmService(cwcUpdatePrompt);
+                // const cwcUpdateResponse = await this.llmService(cwcUpdatePrompt); // OLD
+                const cwcUpdateResponse = await this.aiService.generateText(cwcUpdatePrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.cwcUpdateModel) || 'gpt-3.5-turbo' }); // NEW
                 const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
 
                 if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
@@ -363,7 +365,8 @@ ${JSON.stringify(currentWorkingContext, null, 2)}
 ---
 Based on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
                 try {
-                    finalAnswer = await this.llmService(synthesisPrompt);
+                    // finalAnswer = await this.llmService(synthesisPrompt); // OLD
+                    finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) || 'gpt-4' }); // NEW
                     responseMessage = "Task completed and final answer synthesized.";
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SUCCESS", responseMessage, { parentTaskId }));
                 } catch (synthError) {

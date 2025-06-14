@@ -8,10 +8,10 @@ const FileSystemTool = require('../tools/FileSystemTool'); // Added
 const FileDownloaderTool = require('../tools/FileDownloaderTool'); // Added
 
 class PlanExecutor {
-    constructor(subTaskQueue, resultsQueue, llmService, tools = {}, savedTasksBaseDir) {
+    constructor(subTaskQueue, resultsQueue, aiService, tools = {}, savedTasksBaseDir) { // Changed llmService to aiService
         this.subTaskQueue = subTaskQueue;
         this.resultsQueue = resultsQueue;
-        this.llmService = llmService;
+        this.aiService = aiService; // Changed llmService to aiService
         this.tools = tools;
         this.savedTasksBaseDir = savedTasksBaseDir; // Store this
         if (!this.savedTasksBaseDir) {
@@ -112,7 +112,8 @@ ${dataString.substring(0, MAX_DATA_LENGTH)}... (data truncated for this prompt i
 ---
 Please summarize this data concisely, keeping in mind its relevance to the original user task and the step description. The summary should be a string, suitable for inclusion as context for a final answer synthesis. Focus on extracting key information and outcomes. Provide only the summary text.`;
             try {
-                const summary = await this.llmService(summarizationPrompt);
+                // const summary = await this.llmService(summarizationPrompt); // OLD
+                const summary = await this.aiService.generateText(summarizationPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || 'gpt-3.5-turbo' }); // NEW
                 if (typeof summary === 'string' && summary.trim() !== "") {
                     console.log(`PlanExecutor._summarizeStepData: Summarization successful for step "${narrativeStep}" (SubTaskID: ${subTaskId}).`);
                     return summary;
@@ -230,38 +231,34 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         };
     }
 
-    // Signature updated to accept resolvedSubTaskInput
-    async _handleGeminiStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId) {
-        console.log(`PlanExecutor: Handling special step GeminiStepExecutor: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
+    // Signature updated to accept resolvedSubTaskInput, method renamed
+    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId) {
+        console.log(`PlanExecutor: Handling special step LLMStepExecutor: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
-        // Use resolvedSubTaskInput for logic, but subTaskDefinition.sub_task_input for returning in context
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
-        let promptInput = resolvedSubTaskInput?.prompt || "";
-        const promptTemplate = resolvedSubTaskInput?.prompt_template; // Note: templates themselves are not resolved by _resolveOutputReferences
-        const promptParams = resolvedSubTaskInput?.prompt_params || {}; // These param values *would* have been resolved
+        let promptInput = resolvedSubTaskInput?.prompt; // Can be string or array (for chat)
+        const promptTemplate = resolvedSubTaskInput?.prompt_template;
+        const promptParams = resolvedSubTaskInput?.prompt_params || {};
+        const messages = resolvedSubTaskInput?.messages; // For direct chat message input
 
-        if (promptTemplate) {
+        if (messages && Array.isArray(messages)) {
+            promptInput = messages; // Use messages array directly if provided
+        } else if (promptTemplate) {
             promptInput = promptTemplate;
-            // Params are already resolved if they were references.
-            // If prompt_params contains "{previous_step_output}", this specific string needs to be handled here.
-            // This is a deviation from pure @{outputs...} but might be a pre-existing convention.
             for (const key in promptParams) {
                 const placeholder = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
                 let valueToInject = promptParams[key];
-                if (valueToInject === "{previous_step_output}") { // Handle legacy placeholder
+                if (valueToInject === "{previous_step_output}") {
                     if (executionContext.length > 0) {
-                         // This implicitly takes output from the very last step in executionContext, not necessarily a specific stepId.
-                         // For more precise control, @{outputs.SOURCE_STEP_ID.FIELD} should be used in the template directly.
                         const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                         valueToInject = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
                     } else {
                         valueToInject = "No data from previous steps.";
                     }
                 }
-                promptInput = promptInput.replace(placeholder, String(valueToInject)); // Ensure valueToInject is a string
+                promptInput = promptInput.replace(placeholder, String(valueToInject));
             }
-             // Fallback for {{previous_step_output}} if not in prompt_params but directly in template
-            if (promptInput.includes("{{previous_step_output}}")) {
+            if (promptInput.includes("{{previous_step_output}}")) { // Fallback
                 if (executionContext.length > 0) {
                     const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput));
@@ -269,7 +266,12 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), "No data from previous steps.");
                 }
             }
-        } else if (!promptInput && resolvedSubTaskInput?.data_from_previous_step === true) { // Legacy support
+        } else if (typeof promptInput !== 'string' && !Array.isArray(promptInput)) { // if prompt was not set via template or messages
+             promptInput = ""; // Default to empty if not a string or array already
+        }
+
+        // Legacy support for data_from_previous_step if no other prompt/message source
+        if ((!promptInput || (typeof promptInput === 'string' && !promptInput.trim())) && !Array.isArray(promptInput) && resolvedSubTaskInput?.data_from_previous_step === true) {
              if (executionContext.length > 0) {
                 const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                 promptInput = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
@@ -277,16 +279,30 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 promptInput = "No data from previous steps to use as prompt.";
             }
         }
-        // If promptInput is still empty after all this (e.g. only `prompt` field was expected but was empty), it's an issue.
-        if (typeof promptInput !== 'string' || !promptInput.trim()) {
-             return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "FAILED", error_details: { message: "Prompt is empty or invalid for GeminiStepExecutor after resolving inputs." } };
+
+        if ((typeof promptInput === 'string' && !promptInput.trim()) || (Array.isArray(promptInput) && promptInput.length === 0)) {
+             return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "LLMStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "FAILED", error_details: { message: "Prompt or messages are empty or invalid for LLMStepExecutor after resolving inputs." } };
         }
 
         try {
-            const resultData = await this.llmService(promptInput);
-            return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "COMPLETED", result_data: resultData, error_details: null };
+            let resultData;
+            const stepModel = resolvedSubTaskInput?.model || (this.aiService.baseConfig && this.aiService.baseConfig.defaultLLMStepModel) || 'gpt-3.5-turbo';
+            const stepParams = { model: stepModel };
+            if (resolvedSubTaskInput?.temperature !== undefined) stepParams.temperature = resolvedSubTaskInput.temperature;
+            if (resolvedSubTaskInput?.maxTokens !== undefined) stepParams.maxTokens = resolvedSubTaskInput.maxTokens;
+
+            if (Array.isArray(promptInput)) {
+                const isValidMessages = promptInput.every(m => typeof m.role === 'string' && typeof m.content === 'string');
+                if (!isValidMessages) throw new Error("Invalid message structure for LLMStepExecutor with chat input. Each message must have role and content as strings.");
+                resultData = await this.aiService.completeChat(promptInput, stepParams);
+            } else if (typeof promptInput === 'string') {
+                resultData = await this.aiService.generateText(promptInput, stepParams);
+            } else {
+                throw new Error("Invalid promptInput type for LLMStepExecutor. Must be a string or an array of chat messages.");
+            }
+            return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "LLMStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "COMPLETED", result_data: resultData, error_details: null };
         } catch (e) {
-            return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "GeminiStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "FAILED", error_details: { message: e.message } };
+            return { sub_task_id: sub_task_id, stepId: subTaskDefinition.stepId, narrative_step: subTaskDefinition.narrative_step, tool_name: "LLMStepExecutor", assigned_agent_role: "Orchestrator", sub_task_input: originalSubTaskInput, status: "FAILED", error_details: { message: e.message } };
         }
     }
 
@@ -363,9 +379,9 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     if (subTaskDefinition.tool_name === "ExploreSearchResults") {
                         // Pass resolvedSubTaskInput and subTaskDefinition
                         stageSubTaskPromises.push(this._handleExploreSearchResults(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId));
-                    } else if (subTaskDefinition.tool_name === "GeminiStepExecutor") {
+                    } else if (subTaskDefinition.tool_name === "LLMStepExecutor") { // Changed from GeminiStepExecutor
                         // Pass resolvedSubTaskInput and subTaskDefinition
-                        stageSubTaskPromises.push(this._handleGeminiStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId));
+                        stageSubTaskPromises.push(this._handleLLMStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId)); // Renamed method
                     } else if (subTaskDefinition.tool_name === "FileSystemTool" || subTaskDefinition.tool_name === "FileDownloaderTool") {
                         const toolPromise = (async () => {
                             let tool;
@@ -675,7 +691,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             const lastStepContext = executionContext[executionContext.length - 1];
             if (lastStepContext.status === "COMPLETED" &&
                 lastStepContext.assigned_agent_role === "Orchestrator" &&
-                lastStepContext.tool_name === "GeminiStepExecutor" &&
+                lastStepContext.tool_name === "LLMStepExecutor" && // Changed from GeminiStepExecutor
                 lastStepContext.sub_task_input && // original sub_task_input
                 lastStepContext.sub_task_input.isFinalAnswer === true) { // Check on original input
 
