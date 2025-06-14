@@ -1,8 +1,8 @@
 const fs = require('fs'); // Keep for existing sync operations if any
 const fsp = require('fs').promises; // Added for async file operations
-const path = require('path');
-const crypto = require('crypto'); // Added for hashing search queries
-const { v4: uuidv4 } = require('uuid'); // For unique temporary file names
+const path = require('path'); // Ensure path is imported
+const crypto = require('crypto'); // Ensure crypto is imported (already added in a previous successful step)
+// const { v4: uuidv4 } = require('uuid'); // Already imported
 const { saveTaskState, loadTaskState, saveTaskJournal } = require('../utils/taskStateUtil');
 const PlanManager = require('../core/PlanManager');
 const PlanExecutor = require('../core/PlanExecutor');
@@ -53,146 +53,76 @@ class OrchestratorAgent {
     };
   }
 
-  _calculateHashForDeduplication(content) {
-    if (typeof content !== 'string' || content.length === 0) {
-        // console.warn("OrchestratorAgent._calculateHashForDeduplication: Content is not a non-empty string.");
-        return null;
-    }
-    return crypto.createHash('sha256').update(content).digest('hex');
-  }
-
-  async _getSummarizedKeyFindingsForPrompt(keyFindingsArray, parentTaskIdForJournal, finalJournalEntriesInput, taskDirPath) {
-    const MAX_KEY_FINDINGS_FOR_PROMPT = 5; // Max number of findings to try and include directly
-    const MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT = 4000; // Overall character limit for the findings text
-    const MAX_DETAILED_INCLUSIONS = 1; // Max number of raw content/on-the-fly summaries to include
-    const SHORT_RAW_CONTENT_THRESHOLD = 1500; // Character length to consider raw content "short" enough
-    const ON_THE_FLY_SUMMARY_MAX_TOKENS = 200; // Max tokens for on-the-fly summary
-    const ON_THE_FLY_SUMMARY_PROMPT_TEMPLATE = "Concisely summarize the following text, focusing on key information relevant to an ongoing task: {text_to_summarize}";
-
+  async _getSummarizedKeyFindingsForPrompt(parentTaskIdForJournal, finalJournalEntriesInput, taskDirPath, count = 5) {
+    const MAX_KEY_FINDINGS_TO_FETCH = count; // Max number of latest findings to fetch
+    const MAX_KEY_FINDINGS_FOR_DIRECT_INCLUSION = 5; // Max number of findings to try and include directly in the prompt (subset of fetched)
+    const MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT = 4000;
     const findingsSummarizationPromptTemplate = `The following text is a collection of key findings obtained while working on a task. Each finding might be a piece of data, an observation, or a result from a tool. Please synthesize these findings into a brief, coherent summary that captures the most important information relevant to the overall task progress. Focus on actionable insights or critical data points.\n\nCollection of Key Findings:\n---\n{text_to_summarize}\n---\nBrief Synthesized Summary:`;
 
-    if (!keyFindingsArray || keyFindingsArray.length === 0) {
-        return "No key findings.";
-    }
     if (!taskDirPath) {
-        console.warn("OrchestratorAgent._getSummarizedKeyFindingsForPrompt: taskDirPath not provided. Cannot fetch raw content details.");
-        // Fallback to old behavior if taskDirPath is missing
+        console.warn("OrchestratorAgent._getSummarizedKeyFindingsForPrompt: taskDirPath not provided.");
+        return "No key findings (taskDirPath missing).";
+    }
+
+    const actualKeyFindings = await this.memoryManager.getLatestKeyFindings(taskDirPath, MAX_KEY_FINDINGS_TO_FETCH);
+
+    if (!actualKeyFindings || actualKeyFindings.length === 0) {
+        return "No key findings.";
     }
 
     let findingsTextForPrompt = "";
     let currentLength = 0;
     let findingsToIncludeDirectly = [];
-    let detailedInclusionsCount = 0;
 
-    const reversedFindings = [...keyFindingsArray].reverse(); // Process most recent first
+    const reversedFindings = [...actualKeyFindings].reverse();
+    // Limit how many we attempt to directly include (e.g., up to 5 of the latest 'count' findings)
+    const iterationLimit = Math.min(reversedFindings.length, MAX_KEY_FINDINGS_FOR_DIRECT_INCLUSION);
 
-    for (let i = 0; i < reversedFindings.length && findingsToIncludeDirectly.length < MAX_KEY_FINDINGS_FOR_PROMPT; i++) {
+    for (let i = 0; i < iterationLimit; i++) {
         const finding = reversedFindings[i];
-        let findingRepresentationText = "";
-        let findingDataPreview = ""; // For fallback or if content is too long
+        // Simplified data representation for this refactoring step.
+        // The complex raw content handling logic from subtask 12 would be re-integrated here if needed.
+        const findingDataStr = typeof finding.data === 'string' ? finding.data : JSON.stringify(finding.data);
+        const findingRepresentation = `Finding (Tool: ${finding.sourceToolName}, Step: "${finding.sourceStepNarrative}"): ${findingDataStr.substring(0, 500) + (findingDataStr.length > 500 ? '...' : '')}\n`;
 
-        if (typeof finding.data === 'string') {
-            findingDataPreview = finding.data.substring(0, 500) + (finding.data.length > 500 ? '...' : '');
-            findingRepresentationText = findingDataPreview;
-        } else if (finding.data && finding.data.type === 'reference_to_raw_content') {
-            findingDataPreview = finding.data.preview || `Reference to raw content at ${finding.data.rawContentPath}`;
-            findingRepresentationText = findingDataPreview; // Default to preview
-
-            if (taskDirPath && detailedInclusionsCount < MAX_DETAILED_INCLUSIONS && (MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT - currentLength) > (findingDataPreview.length + 500)) { // Heuristic: 500 chars for potential summary
-                try {
-                    const rawContent = await this.memoryManager.loadMemory(taskDirPath, finding.data.rawContentPath, { defaultValue: null, isJson: false });
-                    if (rawContent) {
-                        if (rawContent.length < SHORT_RAW_CONTENT_THRESHOLD) {
-                            if ((currentLength + rawContent.length) <= MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT) {
-                                findingRepresentationText = rawContent;
-                                detailedInclusionsCount++;
-                                finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("RAW_CONTENT_INCLUDED_IN_PROMPT", "Included full short raw content in prompt context.", { parentTaskId: parentTaskIdForJournal, findingId: finding.id, path: finding.data.rawContentPath, length: rawContent.length }));
-                            }
-                        } else { // Raw content is long, try to summarize on-the-fly
-                            const summaryPrompt = ON_THE_FLY_SUMMARY_PROMPT_TEMPLATE.replace('{text_to_summarize}', rawContent);
-                            const onTheFlySummaryModel = (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || 'gpt-3.5-turbo'; // Use a configured or default model
-                            const generatedSummary = await this.aiService.generateText(summaryPrompt, { model: onTheFlySummaryModel, max_tokens: ON_THE_FLY_SUMMARY_MAX_TOKENS });
-
-                            if (generatedSummary && (currentLength + generatedSummary.length) <= MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT) {
-                                findingRepresentationText = `Summary of content from ${finding.data.rawContentPath}:\n${generatedSummary}`;
-                                detailedInclusionsCount++;
-                                finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("RAW_CONTENT_SUMMARIZED_FOR_PROMPT", "Included on-the-fly summary of raw content in prompt context.", { parentTaskId: parentTaskIdForJournal, findingId: finding.id, path: finding.data.rawContentPath }));
-                                // Optional: Cache this summary
-                                try {
-                                    const summaryCacheFileName = `prompt_summaries/${(finding.id || path.basename(finding.data.rawContentPath))}_summary.txt`;
-                                    await this.memoryManager.overwriteMemory(taskDirPath, summaryCacheFileName, generatedSummary);
-                                } catch (cacheError) {
-                                    console.warn(`OrchestratorAgent: Failed to cache on-the-fly summary for finding ${finding.id || finding.data.rawContentPath}: ${cacheError.message}`);
-                                }
-                            }
-                        }
-                    }
-                } catch (loadError) {
-                    console.warn(`OrchestratorAgent: Failed to load or summarize raw content for finding ${finding.id} (path: ${finding.data.rawContentPath}): ${loadError.message}`);
-                    finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("RAW_CONTENT_LOAD_FAILED_FOR_PROMPT", `Failed to load/summarize raw content from ${finding.data.rawContentPath}. Error: ${loadError.message}`, { parentTaskId: parentTaskIdForJournal, findingId: finding.id }));
-                    // Fallback to preview is already default
-                }
-            }
-        } else if (finding.data) { // Other types of data (e.g. JSON objects from tools)
-            findingDataPreview = JSON.stringify(finding.data);
-            if (findingDataPreview.length > 500) {
-                findingDataPreview = findingDataPreview.substring(0, 500) + '...';
-            }
-            findingRepresentationText = findingDataPreview;
-        } else { // No data or null data
-            findingRepresentationText = "No data available for this finding.";
+        if (currentLength + findingRepresentation.length > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && findingsToIncludeDirectly.length > 0) {
+            break;
         }
-
-        const fullFindingEntry = `Tool: ${finding.sourceToolName}, Step: "${finding.sourceStepNarrative}"\nData: ${findingRepresentationText}\n---\n`;
-
-        if (currentLength + fullFindingEntry.length > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && findingsToIncludeDirectly.length > 0) {
-            break; // Stop if adding this finding would exceed the total budget
-        }
-        findingsToIncludeDirectly.unshift({ ...finding, _representationForPrompt: fullFindingEntry }); // Store with its representation
-        currentLength += fullFindingEntry.length;
+        findingsToIncludeDirectly.unshift(findingRepresentation); // Add the string representation
+        currentLength += findingRepresentation.length;
     }
 
-    // Construct the final text for prompt
-    if (findingsToIncludeDirectly.length < keyFindingsArray.length && keyFindingsArray.length > MAX_KEY_FINDINGS_FOR_PROMPT) {
-         findingsTextForPrompt = `Summary of earlier findings is omitted due to length. Recent ${findingsToIncludeDirectly.length} findings are:\n`;
-    } else if (keyFindingsArray.length === 0) {
-         findingsTextForPrompt = "No key findings recorded yet.\n";
-    } else {
-         findingsTextForPrompt = "Key findings:\n";
-    }
-    findingsToIncludeDirectly.forEach(f => {
-        findingsTextForPrompt += f._representationForPrompt;
-    });
-
-    // If the constructed text is still too long (e.g. due to a single very large "short" raw content), summarize all collected findings
-    if (currentLength > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT) {
-        finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("KEY_FINDINGS_TRUNCATION_FOR_PROMPT", "Combined key findings text was too long, attempting to summarize all.", { parentTaskId: parentTaskIdForJournal, originalLength: currentLength, maxLength: MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT }));
+    // If not all (fetched) findings were included directly, or if the combined length is too great, summarize ALL fetched findings.
+    if (findingsToIncludeDirectly.length < actualKeyFindings.length || currentLength > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && actualKeyFindings.length > 0) {
         let allFindingsTextForSummarization = "";
-        keyFindingsArray.forEach(f => { // Use original full array for summarization context
-             const findingDataStr = (f.data && f.data.type === 'reference_to_raw_content') ? f.data.preview : (typeof f.data === 'string' ? f.data : JSON.stringify(f.data));
-             allFindingsTextForSummarization += `Tool: ${f.sourceToolName}, Step: "${f.sourceStepNarrative}"\nData: ${findingDataStr}\n---\n`;
+        actualKeyFindings.forEach(f => { // Use all 'actualKeyFindings' for the summarization context
+            const findingDataStr = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
+            allFindingsTextForSummarization += `Tool: ${f.sourceToolName}, Step: "${f.sourceStepNarrative}"\nData: ${findingDataStr}\n---\n`;
         });
+
+        if (finalJournalEntriesInput) finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("SUMMARIZING_KEY_FINDINGS_FOR_PROMPT_CONTEXT", `Summarizing ${actualKeyFindings.length} key findings due to length or count limits for prompt inclusion.`, { parentTaskId: parentTaskIdForJournal, count: actualKeyFindings.length }));
         try {
             const summary = await this.aiService.generateText(
                 findingsSummarizationPromptTemplate.replace('{text_to_summarize}', allFindingsTextForSummarization),
                 {
                     model: (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'),
                     temperature: 0.3,
-                    maxTokens: 800 // Allow more tokens for this overall summary
+                    maxTokens: 500
                 }
             );
-            return `Summary of Key Findings (due to length constraints):\n${summary}`;
+            return `Summary of Recent Key Findings:\n${summary}`;
         } catch (e) {
-            finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("KEY_FINDINGS_SUMMARIZATION_FAILED", `Summarization of all key findings failed. Error: ${e.message}`, { parentTaskId: parentTaskIdForJournal }));
-            return "Key findings were too extensive to include directly, and overall summarization failed. Refer to detailed execution context if needed.";
+            if (finalJournalEntriesInput) finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("KEY_FINDINGS_SUMMARIZATION_FAILED", `Summarization of key findings failed for prompt context. Error: ${e.message}`, { parentTaskId: parentTaskIdForJournal }));
+            return "Key findings were too extensive for direct inclusion, and summarization failed.";
         }
+    } else {
+        // All (latest N) findings fit directly
+        findingsTextForPrompt = "Key findings:\n" + findingsToIncludeDirectly.join('---\n');
+        return findingsTextForPrompt.trim();
     }
-
-    return findingsTextForPrompt.trim();
   }
 
   async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
-    });
 
     // Caller (handleUserTask) will be responsible for logging summarization start/success/failure
     try {
@@ -225,14 +155,14 @@ class OrchestratorAgent {
     let currentWorkingContext = {
         lastUpdatedAt: new Date().toISOString(),
         summaryOfProgress: "Task processing initiated.",
-        keyFindings: [],
+        // keyFindings: [], // Removed
         identifiedEntities: {},
         pendingQuestions: [],
         nextObjective: "Define execution plan or synthesize based on mode.",
         confidenceScore: 0.7,
-        errorsEncountered: []
+        // errorsEncountered: [] // Removed
     };
-    initialJournalEntries.push(this._createOrchestratorJournalEntry("CWC_INITIALIZED", "CurrentWorkingContext initialized.", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
+    initialJournalEntries.push(this._createOrchestratorJournalEntry("CWC_INITIALIZED", "CurrentWorkingContext initialized (keyFindings and errorsEncountered to be managed by MemoryManager).", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
 
     let finalJournalEntries = [...initialJournalEntries];
     let executionResult = { success: false, executionContext: [], journalEntries: [], updatesForWorkingContext: { keyFindings: [], errorsEncountered: [] } };
@@ -371,7 +301,7 @@ class OrchestratorAgent {
             if (!planResult.success) {
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { parentTaskId, error: planResult.message }));
                 currentWorkingContext.summaryOfProgress = `Planning failed: ${planResult.message}`;
-                currentWorkingContext.errorsEncountered.push({ errorId: `err-plan-${parentTaskId}`, sourceStepNarrative: "Planning", sourceToolName: "PlanManager", errorMessage: planResult.message, timestamp: new Date().toISOString()});
+                await this.memoryManager.addErrorEncountered(taskDirPath, { errorId: `err-plan-${parentTaskId}`, sourceStepNarrative: "Planning", sourceToolName: "PlanManager", errorMessage: planResult.message, timestamp: new Date().toISOString()});
                 currentWorkingContext.lastUpdatedAt = new Date().toISOString();
                 await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
                 const errorState = { taskId: parentTaskId, userTaskString: currentOriginalTask, status: "FAILED_PLANNING", plan: [], executionContext: [], finalAnswer: null, errorSummary: { reason: planResult.message }, rawLLMResponse: planResult.rawResponse, currentWorkingContext };
@@ -428,7 +358,7 @@ class OrchestratorAgent {
                 currentWorkingContext.summaryOfProgress = `${attemptMessage}. Current objective: ${currentWorkingContext.nextObjective || 'Execute plan and achieve task.'}`;
                 currentWorkingContext.lastUpdatedAt = new Date().toISOString();
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATED_PRE_ATTEMPT", currentWorkingContext.summaryOfProgress, { parentTaskId }));
-                // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+                await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
                 let currentExecutionResult = await this.planExecutor.executePlan(planForNextAttempt, parentTaskId, currentOriginalTask);
 
@@ -436,123 +366,19 @@ class OrchestratorAgent {
                     finalJournalEntries = finalJournalEntries.concat(currentExecutionResult.journalEntries);
                 }
 
-                // Process keyFindings for large content BEFORE updating CWC
-                if (currentExecutionResult.updatesForWorkingContext && currentExecutionResult.updatesForWorkingContext.keyFindings) {
-                    const processedKeyFindings = [];
-                    for (const finding of currentExecutionResult.updatesForWorkingContext.keyFindings) {
-                        let isLargeContent = false;
-                        if (finding.sourceToolName === 'ReadWebpageTool') {
-                            isLargeContent = true;
-                        } else if (typeof finding.data === 'string' && finding.data.length > 2000) {
-                            isLargeContent = true;
-                        }
-
-                        if (isLargeContent && typeof finding.data === 'string') {
-                            let sourceIdentifier = finding.metadata && finding.metadata.url ? finding.metadata.url :
-                                `${finding.sourceToolName}_${finding.sourceStepNarrative || finding.id || new Date().getTime()}`;
-
-                            // Sanitize sourceIdentifier to be a valid filename part (simple sanitization)
-                            sourceIdentifier = sourceIdentifier.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 200);
-
-                            try {
-                                const savedContentInfo = await this.memoryManager.saveRawContent(
-                                    taskDirPath, // taskDirPath is defined at the beginning of handleUserTask
-                                    finding.data,
-                                    sourceIdentifier,
-                                    {
-                                        originalTool: finding.sourceToolName,
-                                        originalStepNarrative: finding.sourceStepNarrative,
-                                        findingId: finding.id,
-                                        originalTimestamp: finding.timestamp
-                                    }
-                                );
-
-                                const originalData = finding.data; // Store temporarily
-                                finding.data = {
-                                    type: "reference_to_raw_content",
-                                    rawContentPath: savedContentInfo.contentPath,
-                                    metadataPath: savedContentInfo.metadataPath,
-                                    preview: originalData.substring(0, 200) + (originalData.length > 200 ? '...' : ''),
-                                    originalLength: originalData.length
-                                };
-                                finding.rawContentProcessed = true;
-                                finalJournalEntries.push(this._createOrchestratorJournalEntry("RAW_CONTENT_SAVED", `Large finding data saved to memory.`, { parentTaskId, findingId: finding.id, sourceIdentifier, paths: savedContentInfo }));
-                            } catch (saveError) {
-                                console.error(`OrchestratorAgent: Failed to save raw content for finding ${finding.id} (source: ${sourceIdentifier}): ${saveError.message}`);
-                                finalJournalEntries.push(this._createOrchestratorJournalEntry("RAW_CONTENT_SAVE_FAILED", `Failed to save large finding data. Error: ${saveError.message}`, { parentTaskId, findingId: finding.id, sourceIdentifier, error: saveError.message }));
-                                if (currentWorkingContext.errorsEncountered) { // Ensure errorsEncountered exists
-                                    currentWorkingContext.errorsEncountered.push({
-                                        errorId: `err-raw-save-${finding.id || new Date().getTime()}`,
-                                        source: "OrchestratorAgent.saveRawContentCall",
-                                        message: `Failed to save raw content for finding (source: ${sourceIdentifier}): ${saveError.message}`,
-                                        details: { findingId: finding.id, sourceIdentifier },
-                                        timestamp: new Date().toISOString()
-                                    });
-                                }
-                                // Original finding.data remains unchanged
-                            }
-                        }
-
-                        // WebSearchTool results deduplication
-                        // This should run AFTER large content processing.
-                        if (finding.sourceToolName === 'WebSearchTool') {
-                            const originalQuery = finding.metadata && finding.metadata.originalQuery;
-                            if (originalQuery && typeof originalQuery === 'string' && originalQuery.trim() !== '') {
-                                const queryHash = this._calculateHashForDeduplication(originalQuery);
-                                if (queryHash) {
-                                    const memoryCategorySubDir = 'websearch_results_archive';
-                                    const archiveFileName = path.join(memoryCategorySubDir, queryHash + '.json');
-
-                                    try {
-                                        // Ensure the subdirectory for websearch_results_archive exists
-                                        const memoryBankPath = this.memoryManager._getTaskMemoryBankPath(taskDirPath); // Private access, but necessary if MemoryManager doesn't expose it
-                                        const fullMemoryCategoryPath = path.join(memoryBankPath, memoryCategorySubDir);
-                                        await fsp.mkdir(fullMemoryCategoryPath, { recursive: true });
-
-                                        const existingData = await this.memoryManager.loadMemory(
-                                            taskDirPath,
-                                            archiveFileName,
-                                            { isJson: true, defaultValue: null }
-                                        );
-
-                                        if (existingData !== null) {
-                                            finding.isDuplicate = true;
-                                            finding.duplicateOf = archiveFileName;
-                                            finalJournalEntries.push(this._createOrchestratorJournalEntry("WEBSEARCH_DUPLICATE_DETECTED", `WebSearchTool result for query '${originalQuery.substring(0,50)}...' is a duplicate.`, { parentTaskId, findingId: finding.id, queryHash, archivePath: archiveFileName }));
-                                        } else {
-                                            // If finding.data is a raw_content_reference (from large content processing),
-                                            // we archive that reference object. Otherwise, archive the actual data.
-                                            const dataToArchive = finding.rawContentProcessed ? finding.data : finding.data;
-                                            await this.memoryManager.overwriteMemory(
-                                                taskDirPath,
-                                                archiveFileName,
-                                                dataToArchive,
-                                                { isJson: true } // WebSearchTool results (or our reference object) are JSON.
-                                            );
-                                            finding.isDuplicate = false;
-                                            finalJournalEntries.push(this._createOrchestratorJournalEntry("WEBSEARCH_RESULT_ARCHIVED", `WebSearchTool result for query '${originalQuery.substring(0,50)}...' archived.`, { parentTaskId, findingId: finding.id, queryHash, archivePath: archiveFileName }));
-                                        }
-                                    } catch (memError) {
-                                        console.warn(`OrchestratorAgent: Error during WebSearchTool deduplication for query '${originalQuery.substring(0,50)}...': ${memError.message}`);
-                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("WEBSEARCH_DEDUPLICATION_ERROR", `Error during WebSearchTool deduplication: ${memError.message}`, { parentTaskId, findingId: finding.id, query: originalQuery.substring(0,50)+'...', error: memError.message }));
-                                    }
-                                }
-                            } else {
-                                console.warn(`OrchestratorAgent: WebSearchTool finding (ID: ${finding.id}) missing originalQuery in metadata. Skipping deduplication.`);
-                                finalJournalEntries.push(this._createOrchestratorJournalEntry("WEBSEARCH_DEDUPLICATION_SKIPPED", "WebSearchTool finding missing originalQuery.", { parentTaskId, findingId: finding.id }));
-                            }
-                        }
-                        processedKeyFindings.push(finding);
-                    }
-                    // Replace the original keyFindings with the processed ones
-                    currentExecutionResult.updatesForWorkingContext.keyFindings = processedKeyFindings;
-                }
-
                 // Update CWC with findings and errors from this attempt
                 currentWorkingContext.lastUpdatedAt = new Date().toISOString();
                 if (currentExecutionResult.updatesForWorkingContext) {
-                    currentWorkingContext.keyFindings.push(...(currentExecutionResult.updatesForWorkingContext.keyFindings || []));
-                    currentWorkingContext.errorsEncountered.push(...(currentExecutionResult.updatesForWorkingContext.errorsEncountered || []));
+                    if (currentExecutionResult.updatesForWorkingContext.keyFindings) {
+                        for (const finding of currentExecutionResult.updatesForWorkingContext.keyFindings) {
+                            await this.memoryManager.addKeyFinding(taskDirPath, finding);
+                        }
+                    }
+                    if (currentExecutionResult.updatesForWorkingContext.errorsEncountered) {
+                        for (const error of currentExecutionResult.updatesForWorkingContext.errorsEncountered) {
+                            await this.memoryManager.addErrorEncountered(taskDirPath, error);
+                        }
+                    }
                 }
                 // Always store the latest execution context and result
                 lastExecutionContext = currentExecutionResult.executionContext || [];
@@ -561,7 +387,7 @@ class OrchestratorAgent {
                 if (currentExecutionResult.success) {
                     overallTaskSuccessFlag = true;
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("EXECUTION_ATTEMPT_SUCCESS", `Execution attempt ${currentAttempt + 1} succeeded.`, { parentTaskId, attemptNumber: currentAttempt + 1 }));
-                    currentWorkingContext.summaryOfProgress = `Execution attempt ${currentAttempt + 1} succeeded. ${currentWorkingContext.keyFindings.length} findings, ${currentWorkingContext.errorsEncountered.length} errors (from all attempts).`;
+                    currentWorkingContext.summaryOfProgress = `Execution attempt ${currentAttempt + 1} succeeded.`; // Counts removed
                     currentWorkingContext.nextObjective = "Proceed to final answer synthesis or task completion.";
                     await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
                     break; // Exit replanning loop
@@ -583,7 +409,7 @@ class OrchestratorAgent {
                         finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_STARTED", `Attempting replanning. Revision ${currentAttempt + 1}.`, { parentTaskId, revisionAttempt: currentAttempt + 1 }));
                         currentWorkingContext.nextObjective = `Replanning attempt ${currentAttempt + 1} due to execution failure.`;
                         currentWorkingContext.lastUpdatedAt = new Date().toISOString();
-                        // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+                        await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
                         const structuredFailedStepInfo = currentExecutionResult.failedStepDetails ? {
                             narrative_step: currentExecutionResult.failedStepDetails.narrative_step,
@@ -593,24 +419,29 @@ class OrchestratorAgent {
                             errorMessage: currentExecutionResult.failedStepDetails.error_details ? (currentExecutionResult.failedStepDetails.error_details.message || JSON.stringify(currentExecutionResult.failedStepDetails.error_details)) : "No error details provided"
                         } : null;
 
+                        const latestKeyFindingsForReplanning = await this.memoryManager.getLatestKeyFindings(taskDirPath, 5);
+                        const latestErrorsForReplanning = await this.memoryManager.getLatestErrorsEncountered(taskDirPath, 3);
+
                         const newPlanResult = await this.planManager.getPlan(
                             currentOriginalTask,
                             knownAgentRoles,
                             knownToolsByRole,
-                            memoryContextForPlanning, // 4th: memoryContext
-                            currentWorkingContext,    // 5th: currentCWC
+                            memoryContextForPlanning,
+                            currentWorkingContext,
                             lastExecutionContext,
                             structuredFailedStepInfo,
                             planForNextAttempt,
                             true,
-                            currentAttempt + 1        // 10th: revisionAttemptNumber
+                            currentAttempt + 1,
+                            latestKeyFindingsForReplanning, // New param
+                            latestErrorsForReplanning       // New param
                         );
 
                         if (newPlanResult.success && newPlanResult.plan && newPlanResult.plan.length > 0) {
                             planForNextAttempt = newPlanResult.plan;
                             planStages = newPlanResult.plan;
                             finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLANNING_SUCCESS", `Replanning successful. New plan generated by ${newPlanResult.source}.`, { parentTaskId, source: newPlanResult.source, newPlanStageCount: planForNextAttempt.length }));
-                            currentWorkingContext.summaryOfProgress = `Replanning attempt ${currentAttempt + 1} successful. New plan generated. Previous errors: ${currentWorkingContext.errorsEncountered.length}.`;
+                            currentWorkingContext.summaryOfProgress = `Replanning attempt ${currentAttempt + 1} successful. New plan generated.`; // Error count removed
                             currentWorkingContext.nextObjective = "Execute the revised plan.";
                             await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
                             await this.memoryManager.appendToMemory(taskDirPath, 'key_decisions_and_learnings.md', `## Replanning on ${new Date().toISOString()}\nOutcome: New plan generated by ${newPlanResult.source}.\n---\n`);
@@ -632,15 +463,15 @@ class OrchestratorAgent {
             finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "EXECUTION_CYCLE_COMPLETED_SUCCESS" : "EXECUTION_CYCLE_COMPLETED_FAILURE", `Execution/replanning cycle finished. Overall Success: ${overallSuccess}`, { parentTaskId, overallSuccess }));
             currentWorkingContext.lastUpdatedAt = new Date().toISOString();
             currentWorkingContext.nextObjective = overallSuccess ? "Synthesize final answer." : "Task failed after execution/replanning attempts.";
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_POST_EXECUTION_CYCLE", currentWorkingContext.summaryOfProgress, { parentTaskId, findingCount: currentWorkingContext.keyFindings.length, errorCount: currentWorkingContext.errorsEncountered.length }));
-            // REMOVED: await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
-            // This save is covered by the saves after each attempt, and the CWC object in memory is up-to-date for the following batch summarization.
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_POST_EXECUTION_CYCLE", currentWorkingContext.summaryOfProgress, { parentTaskId /* Counts removed */ }));
+            // CWC save here was already removed by previous subtask (CWC write optimization)
 
             // --- New Batch Summarization of Key Findings using getSummarizedRecords ---
+            // This block was from previous subtask, but it used currentWorkingContext.keyFindings.slice(-20)
+            // Now it will use getLatestKeyFindings
             finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_START", "Attempting to generate batch summary of key findings.", { parentTaskId }));
             const recordInputsForBatchSummary = [];
-            // Limit to most recent 20 findings to avoid excessive processing
-            const findingsToConsiderForBatchSummary = currentWorkingContext.keyFindings.slice(-20);
+            const findingsToConsiderForBatchSummary = await this.memoryManager.getLatestKeyFindings(taskDirPath, 20);
 
             for (const finding of findingsToConsiderForBatchSummary) {
                 if (finding.data && finding.data.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
@@ -668,7 +499,6 @@ class OrchestratorAgent {
                         type: 'content',
                         content: stringifiedData
                     });
-                    // REMOVED: Temporary file creation logic
                 }
             }
 
@@ -684,16 +514,15 @@ Comprehensive Task Status Summary:`,
                         model: (this.aiService.baseConfig && this.aiService.baseConfig.cwcUpdateModel) || 'gpt-3.5-turbo',
                         temperature: 0.5
                     },
-                    // ttlSeconds: 3600 // Example: Cache for 1 hour if desired
                 };
                 try {
                     const newBatchSummary = await this.memoryManager.getSummarizedRecords(
                         taskDirPath,
-                        recordInputsForBatchSummary, // Pass the structured inputs
+                        recordInputsForBatchSummary,
                         this.aiService,
                         batchSummarizationOptions
                     );
-                    currentWorkingContext.batchProgressSummary = newBatchSummary; // Store the new summary
+                    currentWorkingContext.batchProgressSummary = newBatchSummary;
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("BATCH_SUMMARY_RECORDS_SUCCESS", "Successfully generated batch summary of key findings.", { parentTaskId, summaryPreview: String(newBatchSummary).substring(0, 100) + "..." }));
                 } catch (batchSummaryError) {
                     console.error(`OrchestratorAgent: Failed to get summarized records for CWC update: ${batchSummaryError.message}`);
@@ -704,17 +533,19 @@ Comprehensive Task Status Summary:`,
             }
             // --- End of New Batch Summarization ---
 
-
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC summary and next objective post-execution cycle.", { parentTaskId }));
             finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_START", "Attempting to summarize key findings for CWC update.", { parentTaskId }));
-            const summarizedKeyFindingsTextForCwc = await this._getSummarizedKeyFindingsForPrompt(currentWorkingContext.keyFindings, parentTaskId, finalJournalEntries, taskDirPath);
-            if (summarizedKeyFindingsTextForCwc.startsWith("Key findings were too extensive") || summarizedKeyFindingsTextForCwc === "No key findings.") {
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SKIPPED_OR_FAILED", "Summarization of key findings skipped or failed for CWC update.", { parentTaskId, reason: summarizedKeyFindingsTextForCwc }));
-            } else if (currentWorkingContext.keyFindings && currentWorkingContext.keyFindings.length > 0) { // Only log success if there were findings to summarize
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SUCCESS", "Key findings summarized for CWC update.", { parentTaskId }));
+            const summarizedKeyFindingsTextForCwc = await this._getSummarizedKeyFindingsForPrompt(parentTaskId, finalJournalEntries, taskDirPath, 10); // Use count 10
+
+            // Check if findings were processed for logging, not by re-fetching
+            if (summarizedKeyFindingsTextForCwc && !summarizedKeyFindingsTextForCwc.startsWith("No key findings") && !summarizedKeyFindingsTextForCwc.includes("summarization failed")) {
+                 finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SUCCESS", "Key findings summarized for CWC update.", { parentTaskId }));
+            } else {
+                 finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_SUMMARIZATION_SKIPPED_OR_FAILED", "Summarization of key findings skipped or failed for CWC update.", { parentTaskId, reason: summarizedKeyFindingsTextForCwc }));
             }
 
-            const recentErrorsSummary = currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT).map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage}));
+            const recentErrorsForCwcUpdate = await this.memoryManager.getLatestErrorsEncountered(taskDirPath, MAX_ERRORS_FOR_CWC_PROMPT);
+            const recentErrorsSummary = recentErrorsForCwcUpdate.map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage }));
 
             const cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
 The previous summary of progress was: "${currentWorkingContext.summaryOfProgress}".
@@ -788,9 +619,9 @@ Current Working Context Summary:
 Progress: ${currentWorkingContext.summaryOfProgress}
 Next Objective: ${currentWorkingContext.nextObjective}
 Key Findings (Summarized):
-${await this._getSummarizedKeyFindingsForPrompt(currentWorkingContext.keyFindings, parentTaskId, finalJournalEntries, taskDirPath)}
+${summarizedKeyFindingsTextForCwc}
 Errors Encountered (Last ${MAX_ERRORS_FOR_CWC_PROMPT}):
-${JSON.stringify(currentWorkingContext.errorsEncountered.slice(-MAX_ERRORS_FOR_CWC_PROMPT),null,2)}
+${JSON.stringify(recentErrorsSummary,null,2)}
 ---
 Based on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
                 try {
@@ -898,7 +729,8 @@ Based on the original user task, execution history, and current working context,
         finalJournalEntries.push(this._createOrchestratorJournalEntry("TASK_PROCESSING_ERROR", `Critical unhandled error: ${error.message}`, { parentTaskId, errorStack: error.stack }));
         if (currentWorkingContext) {
             currentWorkingContext.summaryOfProgress = `Critical unhandled error: ${error.message}`;
-            currentWorkingContext.errorsEncountered.push({ errorId: `err-critical-${parentTaskId}`, sourceStepNarrative: "Orchestrator System", sourceToolName: "handleUserTask", errorMessage: error.message, timestamp: new Date().toISOString() });
+                    // currentWorkingContext.errorsEncountered.push(...); // Replaced by addErrorEncountered
+                    await this.memoryManager.addErrorEncountered(taskDirPath, { errorId: `err-critical-${parentTaskId}`, sourceStepNarrative: "Orchestrator System", sourceToolName: "handleUserTask", errorMessage: error.message, timestamp: new Date().toISOString() });
             currentWorkingContext.lastUpdatedAt = new Date().toISOString();
             if (taskDirPath) {
                  try { await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true }); }

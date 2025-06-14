@@ -280,7 +280,9 @@ class PlanManager {
         failedStepInfo = null,
         remainingPlanStages = null,
         isRevision = false,
-        revisionAttemptNumber = 0
+        revisionAttemptNumber = 0,
+        latestKeyFindings = [], // New parameter
+        latestErrors = []      // New parameter
     ) {
         let initialPromptSection = `User task: '${userTaskString}'.`;
         if (memoryContext && memoryContext.taskDefinition && memoryContext.taskDefinition !== userTaskString) {
@@ -465,16 +467,25 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
             let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`;
             revisionContext += `Original User Task: '${userTaskString}'\n\n`;
 
-            if (currentCWC) {
+            if (currentCWC) { // currentCWC no longer has keyFindings or errorsEncountered directly
                 revisionContext += "Current Working Context (CWC) Summary:\n";
                 revisionContext += `Overall Progress: ${currentCWC.summaryOfProgress || 'Not available.'}\n`;
-                if (currentCWC.keyFindings && currentCWC.keyFindings.length > 0) {
-                    revisionContext += `Recent Key Findings (last 3-5):\n${JSON.stringify(currentCWC.keyFindings.slice(-5), null, 2)}\n`;
-                }
-                if (currentCWC.errorsEncountered && currentCWC.errorsEncountered.length > 0) {
-                    revisionContext += `Recent Errors Encountered (last 3):\n${JSON.stringify(currentCWC.errorsEncountered.slice(-3), null, 2)}\n`;
-                }
+                // Removed direct access to currentCWC.keyFindings and currentCWC.errorsEncountered
                 revisionContext += "---\n";
+            }
+
+            // Add new parameters for latest findings and errors
+            if (latestKeyFindings && latestKeyFindings.length > 0) {
+                revisionContext += `Recent Key Findings (up to ${latestKeyFindings.length}):
+${JSON.stringify(latestKeyFindings, null, 2)}
+---
+`;
+            }
+            if (latestErrors && latestErrors.length > 0) {
+                revisionContext += `Recent Errors Encountered (up to ${latestErrors.length}):
+${JSON.stringify(latestErrors, null, 2)}
+---
+`;
             }
 
             if (failedStepInfo) {
