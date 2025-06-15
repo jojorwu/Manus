@@ -373,10 +373,10 @@ Orchestrator Special Actions:
        - create_file: { "filename": "string", "content": "string", "directory"?: "string" (optional subdirectory) }
        - read_file: { "filename": "string", "directory"?: "string" }
        - append_to_file: { "filename": "string", "content": "string", "directory"?: "string" } (content must be non-empty)
-       - list_files: { "directory"?: "string" } (lists contents of this subdirectory within the workspace, or root if empty)
+       - list_files: { "directory"?: "string" (optional subdirectory relative to workspace root), "recursive"?: boolean (optional, default: false, if true lists recursively), "maxDepth"?: number (optional, default: 3 if recursive, limits recursion depth) }
        - overwrite_file: (alias for create_file) { "filename": "string", "content": "string", "directory"?: "string" }
        - create_pdf_from_text: { "filename": "string_ending_with.pdf", "text_content": "string", "directory"?: "string", "fontSize"?: number, "fontName"?: "string", "customFontFileName"?: "string_ending_with.ttf_or_otf" (e.g., "DejaVuSans.ttf", from 'assets/fonts/') }
-   Output: Varies by operation (e.g., success message, file content, list of files/dirs).
+   Output: Varies by operation (e.g., success message, file content, or for list_files: Array<{path: string, type: 'file'|'directory'}> where paths are relative to task workspace root).
    When to use: For tasks requiring intermediate data storage, reading specific files, or organizing outputs within a dedicated workspace for the current task. All paths are relative to the task's workspace root.
  - FileDownloaderTool: Allows Orchestrator to download files from a URL into the task-specific workspace.
    Input ('sub_task_input'):

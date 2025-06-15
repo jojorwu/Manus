@@ -158,49 +158,101 @@ class FileSystemTool {
         return this.create_file(params);
     }
 
-    async list_files(params = {}) {
-        const directory = params.directory || '';
+    async _recursiveList(fullDirectoryPath, currentDepth, maxDepth, baseWorkspaceDir) {
+        const items = [];
         try {
-            const safeDirPath = await this._getSafePath(directory);
-            const stats = await fsp.stat(safeDirPath).catch(e => {
-                if (e.code === 'ENOENT') return null; // Will be handled by !stats check below
-                throw e; // Other stat errors
-            });
-            if (!stats) {
-                 const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
-                 console.warn(t('FS_LIST_FILES_DIR_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
-                 // Returned error is already Russian.
-                 return { result: null, error: `Директория не найдена: '${displayPath}'.` };
-            }
-            if (!stats.isDirectory()) {
-                const displayPath = path.relative(this.taskWorkspaceDir, safeDirPath);
-                // Returned error is already Russian.
-                return { result: null, error: `'${displayPath}' не является директорией.` };
-            }
-            const dirents = await fsp.readdir(safeDirPath, { withFileTypes: true });
-            const files = [];
-            const directories = [];
+            const dirents = await fsp.readdir(fullDirectoryPath, { withFileTypes: true });
             for (const dirent of dirents) {
-                if (dirent.isFile()) {
-                    files.push(dirent.name);
-                } else if (dirent.isDirectory()) {
-                    directories.push(dirent.name);
+                const entryName = dirent.name;
+                const entryFullPath = path.join(fullDirectoryPath, entryName);
+                // Calculate path relative to the taskWorkspaceDir for consistent output
+                const relativeToWorkspacePath = path.relative(baseWorkspaceDir, entryFullPath);
+
+                items.push({
+                    path: relativeToWorkspacePath.replace(/\\/g, '/'), // Ensure POSIX-style slashes
+                    type: dirent.isDirectory() ? 'directory' : 'file'
+                });
+
+                if (dirent.isDirectory() && currentDepth < maxDepth) {
+                    const subItems = await this._recursiveList(
+                        entryFullPath,
+                        currentDepth + 1,
+                        maxDepth,
+                        baseWorkspaceDir
+                    );
+                    items.push(...subItems);
                 }
             }
-            files.sort();
-            directories.sort();
-            return { result: { files, directories }, error: null };
         } catch (error) {
-            const displayPath = path.relative(this.taskWorkspaceDir, path.join(this.taskWorkspaceDir, directory) );
-            if (error.code === 'ENOENT') {
-                 console.warn(t('FS_LIST_FILES_DIR_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
-                 // Returned error is already Russian.
-                return { result: null, error: `Директория не найдена: '${displayPath}'.` };
+            // Log error but don't throw, to allow listing of accessible parts
+            console.error(t('FS_RECURSIVE_LIST_ERROR_LOG', { componentName: 'FileSystemTool', path: fullDirectoryPath, message: error.message }));
+            // Optionally, could add an error marker to items if needed:
+            // items.push({ path: path.relative(baseWorkspaceDir, fullDirectoryPath).replace(/\\/g, '/'), type: 'error', message: error.message });
+        }
+        return items;
+    }
+
+
+    async list_files(params = {}) {
+        const directory = params.directory || ''; // Relative to taskWorkspaceDir
+        const recursive = params.recursive === true; // Default to false
+        const maxDepth = params.maxDepth === undefined ? 3 : Number(params.maxDepth); // Default to 3 if recursive
+
+        if (isNaN(maxDepth) || maxDepth < 1) {
+            return { result: null, error: "Неверный ввод: 'maxDepth' должен быть положительным числом." };
+        }
+
+        let safeTargetDirPath; // This will be the absolute path to the target directory
+        try {
+            // _getSafePath ensures the path is within taskWorkspaceDir and creates it if necessary (though for list_files, it should exist)
+            // For list_files, we don't want to create the directory if it doesn't exist, so we add a check.
+            safeTargetDirPath = await this._getSafePath(directory);
+
+            try {
+                const stats = await fsp.stat(safeTargetDirPath);
+                if (!stats.isDirectory()) {
+                    const displayPath = path.relative(this.taskWorkspaceDir, safeTargetDirPath).replace(/\\/g, '/');
+                    return { result: null, error: `'${displayPath}' не является директорией.` };
+                }
+            } catch (statError) {
+                if (statError.code === 'ENOENT') {
+                    const displayPath = path.relative(this.taskWorkspaceDir, safeTargetDirPath).replace(/\\/g, '/');
+                    console.warn(t('FS_LIST_FILES_DIR_NOT_FOUND_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }));
+                    return { result: null, error: `Директория не найдена: '${displayPath}'.` };
+                }
+                throw statError; // Other stat errors
             }
+
+        } catch (error) { // Catch errors from _getSafePath (e.g., path traversal)
+            console.error(t('FS_LIST_FILES_ERROR_LOG', { componentName: 'FileSystemTool', displayPath: directory }), error);
+            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message };
+            return { result: null, error: `Ошибка при доступе к директории '${directory}': ${error.message}` };
+        }
+
+        try {
+            if (recursive) {
+                const items = await this._recursiveList(safeTargetDirPath, 1, maxDepth, this.taskWorkspaceDir);
+                items.sort((a, b) => a.path.localeCompare(b.path)); // Sort for consistent output
+                return { result: items, error: null };
+            } else {
+                // Non-recursive listing
+                const dirents = await fsp.readdir(safeTargetDirPath, { withFileTypes: true });
+                const items = [];
+                for (const dirent of dirents) {
+                    const relativeToWorkspacePath = path.relative(this.taskWorkspaceDir, path.join(safeTargetDirPath, dirent.name));
+                    items.push({
+                        path: relativeToWorkspacePath.replace(/\\/g, '/'), // Ensure POSIX-style slashes
+                        type: dirent.isDirectory() ? 'directory' : 'file'
+                    });
+                }
+                items.sort((a, b) => a.path.localeCompare(b.path)); // Sort for consistent output
+                return { result: items, error: null };
+            }
+        } catch (error) {
+            // Catch errors from readdir or recursive list (though _recursiveList also has a try-catch)
+            const displayPath = path.relative(this.taskWorkspaceDir, safeTargetDirPath).replace(/\\/g, '/');
             console.error(t('FS_LIST_FILES_ERROR_LOG', { componentName: 'FileSystemTool', displayPath: displayPath }), error);
-            if (error.message.startsWith("FileSystemTool:")) return { result: null, error: error.message }; // Already Russian
-            // Generic error message for other cases, keeping original error.message for details
-            return { result: null, error: `Ошибка при обработке директории '${displayPath}': ${error.message}` };
+            return { result: null, error: `Ошибка при чтении содержимого директории '${displayPath}': ${error.message}` };
         }
     }
 

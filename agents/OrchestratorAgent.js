@@ -140,7 +140,7 @@ class OrchestratorAgent {
     const DEFAULT_MEGA_CONTEXT_TTL = 3600; // 1 hour in seconds
 
     const initialJournalEntries = []; // Orchestrator-specific entries before execution
-    initialJournalEntries.push(this._createOrchestratorJournalEntry(
+    initialJournalEntries.push(this._createOrchestratorJournalEntry( // Ensure this is pushed early
         "TASK_RECEIVED",
         `Task received. Mode: ${executionMode}`,
         { parentTaskId, userTaskStringPreview: userTaskString ? userTaskString.substring(0, 200) + '...' : 'N/A', uploadedFileCount: uploadedFiles.length, taskIdToLoad, executionMode }
@@ -179,6 +179,31 @@ class OrchestratorAgent {
     try {
         await fsp.mkdir(taskDirPath, { recursive: true });
         await this.memoryManager.initializeTaskMemory(taskDirPath);
+
+        // Initialize tokenizerFn and maxTokenLimitForContextAssembly once, early in the process.
+        let tokenizerFn;
+        let maxTokenLimitForContextAssembly;
+
+        try {
+            if (this.aiService && typeof this.aiService.getTokenizer === 'function') {
+                tokenizerFn = this.aiService.getTokenizer();
+            } else {
+                console.warn("OrchestratorAgent: aiService.getTokenizer() is not available. Using placeholder tokenizer.");
+                tokenizerFn = (text) => text ? Math.ceil(text.length / 4) : 0;
+            }
+
+            if (this.aiService && typeof this.aiService.getMaxContextTokens === 'function') {
+                maxTokenLimitForContextAssembly = this.aiService.getMaxContextTokens();
+            } else {
+                console.warn("OrchestratorAgent: aiService.getMaxContextTokens() is not available. Using placeholder maxTokenLimit (e.g., 4096).");
+                maxTokenLimitForContextAssembly = 4096; // Default placeholder
+            }
+        } catch (serviceError) {
+            console.error(`OrchestratorAgent: Error obtaining tokenizer/maxTokens from aiService: ${serviceError.message}. Using placeholders.`);
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("AISERVICE_CONFIG_ERROR", `Error getting tokenizer/maxTokens: ${serviceError.message}`, { parentTaskId }));
+            tokenizerFn = (text) => text ? Math.ceil(text.length / 4) : 0;
+            maxTokenLimitForContextAssembly = 4096;
+        }
 
         const initialTaskDefinitionContent = userTaskString || (taskIdToLoad ? "Task definition will be loaded." : "No initial task string provided.");
         await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', initialTaskDefinitionContent);
@@ -279,30 +304,9 @@ class OrchestratorAgent {
             (this.workerAgentCapabilities || []).forEach(agent => { knownToolsByRole[agent.role] = agent.tools.map(t => t.name); });
 
             let memoryContextForPlanning = {};
-            let tokenizerFn;
-            let maxTokenLimit;
+            // Note: tokenizerFn and maxTokenLimitForContextAssembly are now initialized earlier.
 
             try {
-                // Get tokenizer and maxTokenLimit from aiService.
-                // TODO: Ensure aiService is always initialized before this point or handle potential errors.
-                if (this.aiService && typeof this.aiService.getTokenizer === 'function') {
-                    tokenizerFn = this.aiService.getTokenizer();
-                } else {
-                    // Fallback to a placeholder if the AI service or its tokenizer isn't available.
-                    console.warn("OrchestratorAgent: aiService.getTokenizer() is not available. Using placeholder tokenizer.");
-                    tokenizerFn = (text) => text ? Math.ceil(text.length / 4) : 0; // Simple approximation.
-                }
-
-                // TODO: Ensure aiService is always initialized before this point.
-                if (this.aiService && typeof this.aiService.getMaxContextTokens === 'function') {
-                    maxTokenLimit = this.aiService.getMaxContextTokens();
-                } else {
-                    // Fallback to a default placeholder if max tokens cannot be determined.
-                    console.warn("OrchestratorAgent: aiService.getMaxContextTokens() is not available. Using placeholder maxTokenLimit (4096).");
-                    maxTokenLimit = 4096;
-                }
-
-
                 const taskDefFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'task_definition.md', { defaultValue: currentOriginalTask });
                 memoryContextForPlanning.taskDefinition = taskDefFromMemory;
 
@@ -314,7 +318,7 @@ class OrchestratorAgent {
                     uploadedFilePaths: savedUploadedFilePaths,
                     maxLatestKeyFindings: 5,
                     chatHistory: [], // No chat history for initial planning.
-                    maxTokenLimit: maxTokenLimit,
+                    maxTokenLimit: maxTokenLimitForContextAssembly, // Use the globally fetched limit
                     customPreamble: "Контекст для первоначального планирования:",
                     enableMegaContextCache: true, // Enable caching for this planning context.
                     megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL, // Set cache TTL.
@@ -628,7 +632,7 @@ Comprehensive Task Status Summary:`,
                 maxLatestKeyFindings: 10,
                 includeRawContentForReferencedFindings: true,
                 chatHistory: [], // No chat history for this internal CWC update.
-                maxTokenLimit: maxTokenLimit || 4096, // Use fetched or default.
+                maxTokenLimit: maxTokenLimitForContextAssembly || 4096, // Use globally fetched or a default if somehow undefined
                 customPreamble: "Контекст для обновления CWC:",
                 // Key information for CWC update:
                 currentProgressSummary: currentWorkingContext.summaryOfProgress,
@@ -742,7 +746,7 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
                     maxLatestKeyFindings: 20, // Allow more findings for comprehensive synthesis.
                     includeRawContentForReferencedFindings: true, // Crucial for accurate synthesis.
                     chatHistory: [], // No separate chat history for this system-level synthesis.
-                    maxTokenLimit: maxTokenLimit || 8192, // Allow a larger context for synthesis.
+                    maxTokenLimit: maxTokenLimitForContextAssembly || 8192, // Use globally fetched, allow larger for synthesis if needed or fallback
                     customPreamble: "Контекст для финального ответа:",
                     // Key information for final synthesis:
                     originalUserTask: currentOriginalTask,
