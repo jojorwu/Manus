@@ -4,11 +4,14 @@ const { v4: uuidv4 } = require('uuid');
 const multer = require('multer');
 
 // Импорт классов агентов и очередей
+const path = require('path'); // Added for savedTasksBaseDir
+const path = require('path'); // Added for savedTasksBaseDir
 const OrchestratorAgent = require('./agents/OrchestratorAgent');
 const ResearchAgent = require('./agents/ResearchAgent');
 const UtilityAgent = require('./agents/UtilityAgent');
 const SubTaskQueue = require('./core/SubTaskQueue');
 const ResultsQueue = require('./core/ResultsQueue');
+const MemoryManager = require('./core/MemoryManager'); // Added for MemoryManager
 
 // Импорт классов инструментов
 const WebSearchTool = require('./tools/WebSearchTool');
@@ -167,7 +170,18 @@ app.post('/api/generate-plan', upload.array('files'), async (req, res) => { // A
         console.log(`Request ${parentTaskId}: Using AI Service: ${activeAIService.getServiceName()} for this task.`);
 
         // Инициализация OrchestratorAgent внутри обработчика с выбранным AI сервисом
-        const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, activeAIService, agentApiKeysConfig);
+        const savedTasksBaseDir = path.join(process.cwd(), 'tasks'); // Define savedTasksBaseDir
+        const memoryManager = new MemoryManager(savedTasksBaseDir); // Instantiate MemoryManager
+
+        const orchestratorAgent = new OrchestratorAgent(
+            activeAIService,    // 1. activeAIService
+            subTaskQueue,       // 2. taskQueue (subTaskQueue)
+            memoryManager,      // 3. memoryManager instance
+            null,               // 4. reportGenerator
+            agentApiKeysConfig, // 5. agentCapabilities
+            resultsQueue,       // 6. resultsQueue - Added
+            savedTasksBaseDir   // 7. savedTasksBaseDir - Added
+        );
 
         // userTaskString для handleUserTask будет либо `task` из запроса.
         // uploadedFileObjects is the new array of file objects.
