@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
 
 // Импорт классов агентов и очередей
 const OrchestratorAgent = require('./agents/OrchestratorAgent');
@@ -90,18 +91,35 @@ utilityAgent.startListening();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+app.use(express.json()); // For parsing application/json
+
+// Multer setup for file uploads
+const storage = multer.memoryStorage(); // Store files in memory
+const upload = multer({ storage: storage });
 
 // API эндпоинт для задач
-app.post('/api/generate-plan', async (req, res) => {
-    const { task, taskIdToLoad, mode, aiService: requestedService } = req.body; // Added aiService
+app.post('/api/generate-plan', upload.array('files'), async (req, res) => { // Added upload.array('files') middleware
+    // req.body will contain text fields, req.files will contain file data
+    const { task, taskIdToLoad, mode, aiService: requestedService, agentId } = req.body; // Added agentId, files will be in req.files
+
+    // Files uploaded by multer will be in req.files.
+    // OrchestratorAgent expects files in format: { name: string, content: string }
+    const uploadedFileObjects = (req.files || []).map(file => ({
+        name: file.originalname,
+        content: file.buffer.toString() // Assuming files are text-based
+    }));
 
     // Определяем режим по умолчанию, если не указан
     const effectiveMode = mode || "EXECUTE_FULL_PLAN";
 
-    if (effectiveMode === "EXECUTE_FULL_PLAN") {
+    // Task validation needs to consider that 'task' might not be present if files are the primary input for some tasks.
+    // However, current modes (EXECUTE_FULL_PLAN, PLAN_ONLY) require a task string.
+    if (effectiveMode === "EXECUTE_FULL_PLAN" || effectiveMode === "PLAN_ONLY") {
         if (!task || typeof task !== 'string' || task.trim() === "") {
-            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for EXECUTE_FULL_PLAN mode." });
+            // If files are provided, maybe the task string isn't strictly necessary?
+            // For now, keeping the validation as per existing logic.
+            // Consider if a task can be solely defined by its files in the future.
+            return res.status(400).json({ success: false, message: `Invalid request: 'task' must be a non-empty string for ${effectiveMode} mode.` });
         }
     } else if (effectiveMode === "SYNTHESIZE_ONLY") {
         if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
@@ -125,18 +143,21 @@ app.post('/api/generate-plan', async (req, res) => {
     const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой сессии обработки
 
     try {
-        // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
-        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, requested AI Service: ${requestedService || 'default'}, generated parentTaskId: ${parentTaskId}`);
+        // Логируем полученные параметры
+        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, requested AI Service by agentId: ${agentId || 'default'}, generated parentTaskId: ${parentTaskId}, files: ${uploadedFileObjects.length}`);
 
-        // Выбор AI сервиса для текущего запроса
+        // Выбор AI сервиса для текущего запроса based on agentId (which maps to requestedService)
+        // This logic assumes agentId from frontend corresponds to an AI service type (e.g., 'openai', 'gemini')
         let activeAIService;
-        if (requestedService && typeof requestedService === 'string') {
-            if (requestedService.toLowerCase() === 'gemini') {
+        const serviceIdentifier = agentId || requestedService; // Prioritize agentId if provided
+
+        if (serviceIdentifier && typeof serviceIdentifier === 'string') {
+            if (serviceIdentifier.toLowerCase() === 'gemini') {
                 activeAIService = geminiService;
-            } else if (requestedService.toLowerCase() === 'openai') {
+            } else if (serviceIdentifier.toLowerCase() === 'openai') {
                 activeAIService = openAIService;
             } else {
-                console.warn(`Invalid aiService '${requestedService}' requested. Falling back to default.`);
+                console.warn(`Invalid aiService/agentId '${serviceIdentifier}' requested. Falling back to default (OpenAI).`);
                 activeAIService = openAIService; // Default
             }
         } else {
@@ -147,24 +168,32 @@ app.post('/api/generate-plan', async (req, res) => {
 
         // Инициализация OrchestratorAgent внутри обработчика с выбранным AI сервисом
         const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, activeAIService, agentApiKeysConfig);
-        // Если OrchestratorAgent требует FileSystemTool, он должен быть доступен здесь
-        // Предполагая, что fileSystemTool глобально инициализирован и может быть передан, если OrchestratorAgent.js был изменен для его приема.
-        // Если OrchestratorAgent сам инстанцирует FileSystemTool или он не нужен в конструкторе, этот вызов остается как есть.
-        // На данный момент, OrchestratorAgent.js не принимает fileSystemTool в конструкторе, а устанавливает его как свойство.
-        // Это можно сделать и здесь, если необходимо: orchestratorAgent.fileSystemTool = fileSystemTool; (fileSystemTool - глобальный)
-        // Однако, для чистоты, лучше если OrchestratorAgent управляет своими зависимостями или они передаются в конструктор.
-        // Для этого задания, предположим, что текущий конструктор OrchestratorAgent достаточен.
 
-
-        // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
-        // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.
-        const result = await orchestratorAgent.handleUserTask(task, parentTaskId, taskIdToLoad, effectiveMode);
+        // userTaskString для handleUserTask будет либо `task` из запроса.
+        // uploadedFileObjects is the new array of file objects.
+        const result = await orchestratorAgent.handleUserTask(task, uploadedFileObjects, parentTaskId, taskIdToLoad, effectiveMode);
         console.log("Orchestrator result:", result); // Consider logging less for very large results
         res.json(result);
     } catch (error) {
         console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error);
-        res.status(500).json({ success: false, message: "Internal server error", error: error.message, parentTaskId: parentTaskId });
+        // Ensure error details are not too verbose or sensitive for client response
+        let clientErrorMessage = "Internal server error";
+        if (error.message) {
+            clientErrorMessage += `: ${error.message.substring(0, 100)}`; // Limit error message length
+        }
+        res.status(500).json({ success: false, message: clientErrorMessage, error: error.message, parentTaskId: parentTaskId });
     }
+});
+
+// API endpoint to list available "agents" (which are actually AI services for the Orchestrator)
+app.get('/api/agent-instances', (req, res) => {
+    // This list should ideally be dynamically generated or from a config
+    // For now, it reflects the available AI services for the OrchestratorAgent
+    const availableAgents = [
+        { id: 'openai', name: 'OpenAI Powered Agent' , description: 'Uses OpenAI models for orchestration.'},
+        { id: 'gemini', name: 'Gemini Powered Agent', description: 'Uses Gemini models for orchestration.' }
+    ];
+    res.json(availableAgents);
 });
 
 // Простое сообщение о состоянии для корневого пути
