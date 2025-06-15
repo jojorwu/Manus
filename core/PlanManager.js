@@ -608,9 +608,65 @@ ${planFormatInstructions}`;
         }
 
         let planJsonString;
+        let llmCallPrompt = planningPrompt; // Start with the fully constructed prompt
+
+        // Determine the model for the LLM call, defaulting appropriately for Gemini or other services.
+        let defaultModelForService = 'gpt-4'; // General default
+        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService') {
+            defaultModelForService = 'gemini-1.5-pro-latest'; // Gemini specific default
+        }
+        const llmCallParams = {
+            model: (this.aiService.baseConfig && this.aiService.baseConfig.planningModel) || defaultModelForService
+        };
+
+        // Check if running with GeminiService and if OrchestratorAgent has prepared a CachedContent.
+        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService' &&
+            memoryContext && memoryContext.isMegaContextCachedByGemini === true &&
+            memoryContext.geminiCachedContentName) {
+
+            console.log(`PlanManager: Gemini CachedContent (Name: ${memoryContext.geminiCachedContentName}) found. Using short prompt for planning.`);
+
+            if (isRevision) {
+                // For revisions, the prompt needs to instruct the LLM to use the cached context
+                // while also considering the revision-specific details (failure, CWC, etc.).
+                // The 'revisionContext' variable already contains much of this, excluding the full megaContext.
+                // We assume 'userTaskString' is the most direct representation of the overall goal.
+                llmCallPrompt = `Original User Task: '${userTaskString}'.
+This is a replanning attempt (Attempt #${revisionAttemptNumber}).
+Detailed context including previous attempt's failure, execution history, CWC, key findings, and errors has been provided in the cached content.
+Instruction: Based on ALL available information (original task, cached context, and the specific details of the previous failure), generate a revised plan.
+${PRINCIPLES_OF_GOOD_PLANNING}
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}`;
+            } else {
+                // For initial planning with cached content.
+                llmCallPrompt = `User Task: '${userTaskString}'.
+The necessary context (task definition, uploaded files, key findings, chat history) has been provided and is cached.
+${PRINCIPLES_OF_GOOD_PLANNING}
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}
+Based on the cached context and the user task, generate a plan.`;
+            }
+
+            llmCallParams.cachedContentName = memoryContext.geminiCachedContentName;
+            // sourcePrefix might already include "_with_megacontext" from earlier logic if megaContext string was present.
+            // This is acceptable as it indicates rich context was available, now via cache.
+        }
+        // If not using Gemini cache, llmCallPrompt remains the original long planningPrompt,
+        // and llmCallParams does not include cachedContentName.
+
         try {
-            // planJsonString = await this.llmService(planningPrompt); // OLD
-            planJsonString = await this.aiService.generateText(planningPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.planningModel) || 'gpt-4' }); // NEW
+            planJsonString = await this.aiService.generateText(llmCallPrompt, llmCallParams);
         } catch (llmError) {
             console.error(`PlanManager: Error from AI service during ${sourcePrefix} planning:`, llmError.message);
             return { success: false, message: `Failed to generate plan due to AI service error: ${llmError.message}`, source: `${sourcePrefix}_service_error`, rawResponse: null };

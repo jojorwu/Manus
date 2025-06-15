@@ -273,7 +273,7 @@ class MemoryManager {
             uploadedFilePaths = [],
             maxLatestKeyFindings = 0,
             includeRawContentForReferencedFindings = true,
-            chatHistory = [],
+            chatHistory = [], // Expected to be an array of {role, content} objects
             maxTokenLimit,
             priorityOrder = ['systemPrompt', 'chatHistory', 'uploadedFilePaths', 'taskDefinition', 'keyFindings'],
             customPreamble = "Use the following information to answer the subsequent question or complete the task:\n--- BEGIN CONTEXT ---",
@@ -295,27 +295,35 @@ class MemoryManager {
 
         let cacheKey, cacheDir, cacheFilePath;
 
+        // Caching logic: Check if enabled and try to retrieve from cache.
         if (enableMegaContextCache) {
             // --- Cache Key Generation ---
+            // This object captures all inputs that affect the final context string.
             const cacheKeyData = {
                 version: MEGA_CONTEXT_CACHE_VERSION,
-                spec: {
+                spec: { // Relevant parts of contextSpecification
                     systemPrompt, includeTaskDefinition, maxLatestKeyFindings, includeRawContentForReferencedFindings,
                     maxTokenLimit, priorityOrder, customPreamble, customPostamble, recordSeparator, findingSeparator,
                     currentProgressSummary, currentNextObjective, summarizedKeyFindingsText, overallExecutionSuccess,
                     originalUserTask
                 },
-                fileHashes: {}, keyFindingHashes: [], chatHistoryHashes: [], executionContextHash: null
+                fileHashes: {}, // Hashes of content from uploadedFilePaths and taskDefinition
+                keyFindingHashes: [], // Hashes derived from key findings data
+                chatHistoryHashes: [], // Hashes of individual chat messages
+                executionContextHash: null // Hash of executionContext if provided
             };
 
+            // Hash task definition if included
             if (includeTaskDefinition) {
                 const tdPath = this.getMemoryFilePath(taskStateDirPath, 'task_definition.md');
                 cacheKeyData.fileHashes['task_definition.md'] = await this._getFileContentHash(tdPath);
             }
+            // Hash uploaded files
             for (const relPath of uploadedFilePaths) {
                 const fullPath = this.getMemoryFilePath(taskStateDirPath, relPath);
                 cacheKeyData.fileHashes[relPath] = await this._getFileContentHash(fullPath);
             }
+            // Hash key findings (simplified approach)
             if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') {
                 const findings = await this.getLatestKeyFindings(taskStateDirPath, maxLatestKeyFindings);
                 for (const finding of findings) {
@@ -328,9 +336,11 @@ class MemoryManager {
                     cacheKeyData.keyFindingHashes.push(crypto.createHash('sha256').update(findingDataToHash).digest('hex'));
                 }
             }
+            // Hash chat history messages
             if (chatHistory?.length > 0) {
                 chatHistory.forEach(msg => cacheKeyData.chatHistoryHashes.push(this._calculateObjectHash(msg)));
             }
+            // Hash execution context if provided
             if (executionContext && Array.isArray(executionContext)) {
                 cacheKeyData.executionContextHash = this._calculateObjectHash(executionContext);
             }
@@ -343,18 +353,21 @@ class MemoryManager {
             try {
                 const cachedData = JSON.parse(await fsp.readFile(cacheFilePath, 'utf8'));
                 if (cachedData.contextString && typeof cachedData.tokenCount === 'number' && cachedData.timestamp) {
+                    // TTL Check
                     if (megaContextCacheTTLSeconds && (new Date().getTime() - new Date(cachedData.timestamp).getTime()) / 1000 > megaContextCacheTTLSeconds) {
                         console.log(`MemoryManager.assembleMegaContext: Cache expired for key ${cacheKey}. Regenerating.`);
                     } else {
+                        // Cache hit and valid (either no TTL or TTL not expired)
                         console.log(`MemoryManager.assembleMegaContext: Cache hit for key ${cacheKey}. Returning cached data.`);
                         return { success: true, contextString: cachedData.contextString, tokenCount: cachedData.tokenCount, fromCache: true };
                     }
                 }
-            } catch (error) {
+            } catch (error) { // Errors during cache read (e.g., file not found, JSON parse error)
                 if (error.code !== 'ENOENT') console.warn(`MemoryManager.assembleMegaContext: Error reading cache file ${cacheFilePath}. Regenerating. Error: ${error.message}`);
             }
         } else {
-            console.log("MemoryManager.assembleMegaContext: Caching is disabled. Assembling fresh context.");
+            // Log if caching is explicitly disabled for this call
+            console.log("MemoryManager.assembleMegaContext: Caching is disabled for this call via contextSpecification.enableMegaContextCache=false.");
         }
 
         const contextParts = [];
@@ -378,14 +391,16 @@ class MemoryManager {
             let remainingTokenBudget = maxTokenLimit - countTokens(preambleText) - countTokens(postambleText);
             if (remainingTokenBudget < 0) return { success: false, error: "maxTokenLimit too small for pre/postamble."};
 
+            // Iterate through the specified priorityOrder to build the context string
             for (const contentType of priorityOrder) {
-                if (remainingTokenBudget <= 0) break;
+                if (remainingTokenBudget <= 0) break; // Stop if token budget is exhausted
+                // Determine separator: Add if not the very first content part after system prompt (if any).
                 const getSeparator = () => (contextParts.length > 0 || (systemPrompt && contentType !== 'systemPrompt')) ? recordSeparator : "";
 
                 switch (contentType) {
                     case 'systemPrompt': if (systemPrompt) addPartToContext(systemPrompt + "\n", true); break;
                     case 'chatHistory':
-                        if (chatHistory?.length) for (let i = chatHistory.length - 1; i >= 0; i--) {
+                        if (chatHistory?.length) for (let i = chatHistory.length - 1; i >= 0; i--) { // Newest first
                             if (remainingTokenBudget <= 0) break;
                             if (!addPartToContext(getSeparator() + `${chatHistory[i].role}: ${chatHistory[i].content}`)) break;
                         } break;
@@ -402,6 +417,7 @@ class MemoryManager {
                             if (content) addPartToContext(getSeparator() + `Task Definition:\n${content}`);
                         } catch (e) { console.warn(`Failed to load task_definition.md: ${e.message}`);}
                         break;
+                    // Handle other specific context parts from contextSpecification
                     case 'originalUserTask': if (originalUserTask && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Original User Task:\n${originalUserTask}`); break;
                     case 'currentProgressSummary': if (currentProgressSummary && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Current Progress Summary:\n${currentProgressSummary}`); break;
                     case 'currentNextObjective': if (currentNextObjective && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Current Next Objective:\n${currentNextObjective}`); break;
@@ -409,10 +425,11 @@ class MemoryManager {
                     case 'recentErrorsSummary': if (recentErrorsSummary?.length && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Recent Errors Encountered:\n${JSON.stringify(recentErrorsSummary, null, 2)}`); break;
                     case 'overallExecutionSuccess': if (typeof overallExecutionSuccess === 'boolean' && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Overall Execution Success of Last Attempt: ${overallExecutionSuccess}`); break;
                     case 'executionContext': if (executionContext?.length && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Execution Context (History):\n${JSON.stringify(executionContext, null, 2)}`); break;
-                    case 'keyFindings':
+                    case 'keyFindings': // For complex findings objects
                         if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') {
                             const findings = await this.getLatestKeyFindings(taskStateDirPath, maxLatestKeyFindings);
-                            for (const finding of findings.reverse()) { if (remainingTokenBudget <= 0) break;
+                            for (const finding of findings.reverse()) { // Process newest first
+                                if (remainingTokenBudget <= 0) break;
                                 let findingContentText = "";
                                 if (includeRawContentForReferencedFindings && finding.data?.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
                                     try { findingContentText = await this.loadMemory(taskStateDirPath, finding.data.rawContentPath, {defaultValue:null}) || finding.data.preview || JSON.stringify(finding.data); }
@@ -424,14 +441,17 @@ class MemoryManager {
                 }
             }
 
+            // Construct the final context string with preamble and postamble
             let finalContextString = preambleText + contextParts.join("") + postambleText;
             const finalTokenCount = countTokens(finalContextString);
 
+            // Final check against token limit
             if (finalTokenCount > maxTokenLimit) {
                 console.warn(`MemoryManager.assembleMegaContext: Final context (tokens: ${finalTokenCount}) exceeds limit (${maxTokenLimit}).`);
                 return { success: false, error: "Assembled context exceeds token limit.", tokenCount: finalTokenCount };
             }
 
+            // --- Cache Write (only if caching was enabled for this call and all data was processed) ---
             if (enableMegaContextCache && cacheKey && cacheDir && cacheFilePath) {
                 try {
                     await fsp.mkdir(cacheDir, { recursive: true });
@@ -466,6 +486,7 @@ class MemoryManager {
 
         let history = await this.loadMemory(taskStateDirPath, CHAT_HISTORY_FILENAME, { isJson: true, defaultValue: [] });
 
+        // Validate that loaded history is an array; if not (e.g., corrupted file), reset.
         if (!Array.isArray(history)) {
             console.warn(`MemoryManager.addChatMessage: Chat history file for task ${taskStateDirPath} was corrupted or not an array. Resetting to empty history.`);
             history = [];
@@ -490,6 +511,7 @@ class MemoryManager {
     async getChatHistory(taskStateDirPath, limit = undefined) {
         let history = await this.loadMemory(taskStateDirPath, CHAT_HISTORY_FILENAME, { isJson: true, defaultValue: [] });
 
+        // Validate that loaded history is an array.
         if (!Array.isArray(history)) {
             console.warn(`MemoryManager.getChatHistory: Chat history file for task ${taskStateDirPath} was corrupted or not an array. Returning empty history.`);
             history = [];
