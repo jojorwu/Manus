@@ -138,6 +138,7 @@ class OrchestratorAgent {
   async handleUserTask(userTaskString, uploadedFiles = [], parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
     const MAX_ERRORS_FOR_CWC_PROMPT = 3;
     const DEFAULT_MEGA_CONTEXT_TTL = 3600; // 1 hour in seconds
+    const CHAT_HISTORY_LIMIT = 20; // Define the maximum number of chat history messages to retrieve for context.
 
     const initialJournalEntries = []; // Orchestrator-specific entries before execution
     initialJournalEntries.push(this._createOrchestratorJournalEntry( // Ensure this is pushed early
@@ -179,6 +180,20 @@ class OrchestratorAgent {
     try {
         await fsp.mkdir(taskDirPath, { recursive: true });
         await this.memoryManager.initializeTaskMemory(taskDirPath);
+
+        // Log initial user query to chat history
+        if (userTaskString && userTaskString.trim() !== '') {
+            try {
+                await this.memoryManager.addChatMessage(taskDirPath, {
+                    role: 'user',
+                    content: userTaskString
+                });
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOGGED", "Initial user task string logged to chat history.", { parentTaskId, role: 'user' }));
+            } catch (logError) {
+                console.warn(`OrchestratorAgent: Failed to log initial user message to chat history for task ${parentTaskId}: ${logError.message}`);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOG_FAILED", `Failed to log initial user message: ${logError.message}`, { parentTaskId, role: 'user' }));
+            }
+        }
 
         // Initialize tokenizerFn and maxTokenLimitForContextAssembly once, early in the process.
         let tokenizerFn;
@@ -311,13 +326,23 @@ class OrchestratorAgent {
                 memoryContextForPlanning.taskDefinition = taskDefFromMemory;
 
                 // Assemble context for initial planning.
-                // This includes the task definition, uploaded files, and a few recent key findings.
+                // This includes the task definition, uploaded files, recent chat history, and a few recent key findings.
+                let chatHistoryForPlanning = [];
+                try {
+                    // Fetch recent chat history for planning context
+                    chatHistoryForPlanning = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForPlanning.length} messages for planning context.`, { parentTaskId }));
+                } catch (err) {
+                    console.warn(`OrchestratorAgent: Failed to fetch chat history for planning: ${err.message}`);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Failed to fetch chat history for planning: ${err.message}`, { parentTaskId }));
+                }
+
                 const contextSpecificationForPlanning = {
                     systemPrompt: "You are an AI assistant responsible for planning complex tasks. Use the provided context to create a comprehensive plan.",
                     includeTaskDefinition: true,
                     uploadedFilePaths: savedUploadedFilePaths,
                     maxLatestKeyFindings: 5,
-                    chatHistory: [], // No chat history for initial planning.
+                    chatHistory: chatHistoryForPlanning, // Add fetched history
                     maxTokenLimit: maxTokenLimitForContextAssembly, // Use the globally fetched limit
                     customPreamble: "Контекст для первоначального планирования:",
                     enableMegaContextCache: true, // Enable caching for this planning context.
@@ -631,7 +656,19 @@ Comprehensive Task Status Summary:`,
                 uploadedFilePaths: savedUploadedFilePaths,
                 maxLatestKeyFindings: 10,
                 includeRawContentForReferencedFindings: true,
-                chatHistory: [], // No chat history for this internal CWC update.
+                // Fetch and include chat history for CWC update
+                chatHistory: await (async () => {
+                    // Fetch recent chat history for CWC update context
+                    try {
+                        const history = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${history.length} messages for CWC update context.`, { parentTaskId }));
+                        return history;
+                    } catch (err) {
+                        console.warn(`OrchestratorAgent: Failed to fetch chat history for CWC update: ${err.message}`);
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Failed to fetch chat history for CWC update: ${err.message}`, { parentTaskId }));
+                        return []; // Default to empty array on error
+                    }
+                })(),
                 maxTokenLimit: maxTokenLimitForContextAssembly || 4096, // Use globally fetched or a default if somehow undefined
                 customPreamble: "Контекст для обновления CWC:",
                 // Key information for CWC update:
@@ -745,7 +782,20 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
                     uploadedFilePaths: savedUploadedFilePaths,
                     maxLatestKeyFindings: 20, // Allow more findings for comprehensive synthesis.
                     includeRawContentForReferencedFindings: true, // Crucial for accurate synthesis.
-                    chatHistory: [], // No separate chat history for this system-level synthesis.
+                    // Fetch and include chat history for final synthesis
+                    chatHistory: await (async () => {
+                        // Fetch recent chat history for final synthesis context
+                        // Potentially use a larger limit for synthesis if desired, e.g., CHAT_HISTORY_LIMIT_SYNTHESIS = 50
+                        try {
+                            const history = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
+                            finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${history.length} messages for synthesis context.`, { parentTaskId }));
+                            return history;
+                        } catch (err) {
+                            console.warn(`OrchestratorAgent: Failed to fetch chat history for synthesis: ${err.message}`);
+                            finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Failed to fetch chat history for synthesis: ${err.message}`, { parentTaskId }));
+                            return []; // Default to empty array on error
+                        }
+                    })(),
                     maxTokenLimit: maxTokenLimitForContextAssembly || 8192, // Use globally fetched, allow larger for synthesis if needed or fallback
                     customPreamble: "Контекст для финального ответа:",
                     // Key information for final synthesis:
@@ -874,6 +924,22 @@ Based on the original user task, execution history, and current working context,
         if(currentWorkingContext) {
              currentWorkingContext.lastUpdatedAt = new Date().toISOString();
              await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
+        }
+
+        // Log agent's final answer to chat history
+        if (finalAnswer && (typeof finalAnswer === 'string' && finalAnswer.trim() !== '')) {
+            // Log if finalAnswer is present and non-empty.
+            // Consider additional conditions like `overallSuccess` if needed.
+            try {
+                await this.memoryManager.addChatMessage(taskDirPath, {
+                    role: 'assistant',
+                    content: finalAnswer
+                });
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOGGED", "Agent's final answer logged to chat history.", { parentTaskId, role: 'assistant' }));
+            } catch (logError) {
+                console.warn(`OrchestratorAgent: Failed to log agent's final answer to chat history for task ${parentTaskId}: ${logError.message}`);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOG_FAILED", `Failed to log agent's final answer: ${logError.message}`, { parentTaskId, role: 'assistant' }));
+            }
         }
 
         await saveTaskState(stateFilePath, taskStateToSave); // Use new path
