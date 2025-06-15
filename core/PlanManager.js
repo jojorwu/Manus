@@ -463,7 +463,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
         let planningPrompt;
         let sourcePrefix = isRevision ? "llm_revision" : "llm";
 
-const PRINCIPLES_OF_GOOD_PLANNING = `
+        const PRINCIPLES_OF_GOOD_PLANNING = `
 ---
 Принципы Качественного Планирования:
 Прежде чем генерировать JSON-план, продумай следующие аспекты:
@@ -544,7 +544,22 @@ ${JSON.stringify(latestErrors, null, 2)}
 г) Если предыдущие шаги (из 'Recent execution context') дали полезные результаты, старайся их использовать в новом плане, чтобы не делать лишнюю работу.
 д) Если задача действительно невыполнима даже после нескольких попыток, четко объясни это в финальном шаге через \`LLMStepExecutor\` с \`isFinalAnswer: true\`. Не зацикливайся на создании неработающих планов.`;
 
-            planningPrompt = `${revisionContext}${memoryContextPromptSection}
+            // New approach for revision:
+            let fullRevisionPromptBase;
+            // If megaContext is available, use it as the primary source of information for replanning.
+            // It contains a comprehensive snapshot of the task state (task def, uploaded files, findings, etc.).
+            // The existing revisionContext (failed step details, recent CWC, etc.) is appended to it.
+            if (memoryContext && memoryContext.megaContext && typeof memoryContext.megaContext === 'string' && memoryContext.megaContext.trim() !== '') {
+                fullRevisionPromptBase = `${memoryContext.megaContext}
+
+${revisionContext}`; // Append specific revision details to the general megaContext.
+                sourcePrefix += "_with_megacontext"; // Indicate megaContext was used for logging/tracking.
+            } else {
+                // Fallback: If megaContext is not available, use the older method of combining
+                // revisionContext with memoryContextPromptSection (summarized decisions, CWC snapshot).
+                fullRevisionPromptBase = `${revisionContext}${memoryContextPromptSection}`;
+            }
+            planningPrompt = `${fullRevisionPromptBase}
 ${PRINCIPLES_OF_GOOD_PLANNING}
 
 Available agent capabilities:
@@ -556,7 +571,15 @@ ${orchestratorSpecialActionsDescription}
 ${planFormatInstructions}`;
 
         } else {
-            planningPrompt = `${initialPromptSection}${memoryContextPromptSection}
+            // Logic for initial planning
+            // Check if a pre-assembled megaContext is provided in memoryContext.
+            if (memoryContext && memoryContext.megaContext && typeof memoryContext.megaContext === 'string' && memoryContext.megaContext.trim() !== '') {
+                // If megaContext exists, it becomes the primary informational base for the planning prompt.
+                // It should already contain task definition, uploaded files, key findings, etc.
+                // We then append the userTaskString explicitly for emphasis, followed by standard planning instructions.
+                planningPrompt = `${memoryContext.megaContext}
+
+User Task (ensure this is addressed by the plan): '${userTaskString}'
 ${PRINCIPLES_OF_GOOD_PLANNING}
 
 Available agent capabilities:
@@ -566,6 +589,22 @@ ${formattedAgentCapabilitiesString}
 ${orchestratorSpecialActionsDescription}
 ---
 ${planFormatInstructions}`;
+                sourcePrefix += "_with_megacontext"; // Update source prefix for tracking.
+            } else {
+                // Fallback to the original logic if megaContext is not available.
+                // This constructs the prompt from individual pieces like initialPromptSection (user task)
+                // and memoryContextPromptSection (summarized decisions, CWC snapshot).
+                planningPrompt = `${initialPromptSection}${memoryContextPromptSection}
+${PRINCIPLES_OF_GOOD_PLANNING}
+
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}`;
+            }
         }
 
         let planJsonString;
