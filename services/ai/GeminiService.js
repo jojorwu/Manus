@@ -206,6 +206,72 @@ class GeminiService extends BaseAIService {
             throw new Error(`Gemini API Chat Error: ${detail}`);
         }
     }
+
+    /**
+     * Returns a tokenizer function for Gemini models.
+     * Note: Gemini tokenization is typically handled server-side via the Google AI SDK (`countTokens`),
+     * which is asynchronous. This method provides a synchronous, approximate tokenizer inherited
+     * from `BaseAIService` for immediate context assembly estimations.
+     * For precise counts, especially before an API call, using the SDK's `countTokens` is recommended if feasible.
+     * @returns {Function} An approximate tokenizer function.
+     */
+    getTokenizer() {
+        // Gemini tokenization is typically handled server-side by the Google AI SDK.
+        // The SDK's `countTokens` method is asynchronous and involves an API call.
+        // For a synchronous tokenizer function needed by Orchestrator/MemoryManager for immediate context assembly,
+        // a precise client-side equivalent isn't readily available without deeper SDK integration or a separate library.
+        // Therefore, we rely on the base class's approximation.
+        console.warn("GeminiService.getTokenizer: Using approximate tokenizer from BaseAIService. For precise counts for API calls, use the Google AI SDK's countTokens method if available and necessary before making the call.");
+        return super.getTokenizer(); // Fallback to BaseAIService's placeholder
+    }
+
+    /**
+     * Returns the maximum number of context tokens for the configured default Gemini model.
+     * It uses a predefined map of known Gemini models and their context window sizes.
+     * For Gemini 1.5 models, it may apply a practical effective limit for context assembly
+     * (e.g., 128k tokens) even if the model supports a larger theoretical maximum (e.g., 1M tokens),
+     * unless overridden by `baseConfig.maxTokensForContext`.
+     * @returns {number} The maximum number of context tokens.
+     */
+    getMaxContextTokens() {
+        const model = this.defaultModel || (this.baseConfig && this.baseConfig.defaultModel) || 'gemini-pro';
+        // Source: https://ai.google.dev/models/gemini (Context windows updated April 2024)
+        // These values represent the input token limits. Output limits are often separate.
+        const modelContextWindows = {
+            // Gemini 1.5 Series (Large context window, but often used with a smaller practical input limit for requests by default)
+            'gemini-1.5-pro-latest': 1048576, // Model supports up to 1M tokens
+            'gemini-1.5-pro': 1048576,
+            'gemini-1.5-flash-latest': 1048576,
+            'gemini-1.5-flash': 1048576,
+
+            // Gemini 1.0 Series
+            'gemini-1.0-pro': 30720,        // Standard 32k limit (30720 text + 2048 for output generation typically)
+            'gemini-pro': 30720,            // Alias for 1.0 pro
+            'gemini-1.0-pro-vision-latest': 12288, // Vision model, context includes image data
+            'gemini-1.0-pro-001': 30720,    // Specific version
+
+            // Older or variant models if any, ensure these are correct as per docs
+            // 'gemini-ultra': some_value, // If Ultra models become available via this SDK
+
+            'default': 30720 // Default to gemini-pro's standard limit
+        };
+
+        let effectiveLimit = modelContextWindows[model] || modelContextWindows['default'];
+
+        if (model.startsWith('gemini-1.5')) {
+            // For Gemini 1.5 models, while the theoretical limit is 1M tokens,
+            // practical usage for context assembly before a call might be best capped lower
+            // unless the specific call is designed to leverage the full 1M.
+            // The `baseConfig.maxTokensForContext` could override this if set.
+            effectiveLimit = this.baseConfig?.maxTokensForContext || 131072; // e.g. 128k as a large but practical default for 1.5 models
+            console.log(`GeminiService.getMaxContextTokens: Model ${model} is a Gemini 1.5 series. Using effective limit of ${effectiveLimit} for context assembly. Max supported: ${modelContextWindows[model]}.`);
+        }
+
+        if (!modelContextWindows[model]) {
+            console.warn(`GeminiService.getMaxContextTokens: Model ${model} not found in known list. Using default ${effectiveLimit} tokens.`);
+        }
+        return effectiveLimit;
+    }
 }
 
 module.exports = GeminiService;

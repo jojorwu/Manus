@@ -122,35 +122,30 @@ class OrchestratorAgent {
     }
   }
 
-  async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
-
-    // Caller (handleUserTask) will be responsible for logging summarization start/success/failure
-    try {
-        const summary = await this.aiService.generateText(
-            findingsSummarizationPromptTemplate.replace('{text_to_summarize}', allFindingsText),
-            {
-                model: (this.aiService.baseConfig && this.aiService.baseConfig.summarizationModel) || (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'),
-                temperature: 0.3,
-                maxTokens: 500
-            }
-        );
-        return `Summary of Key Findings:\n${summary}`;
-    } catch (e) {
-        // console.error("OrchestratorAgent: Failed to summarize key findings for prompt:", e.message); // For future t()
-        return "Key findings were too extensive to include directly, and summarization failed. Refer to detailed execution context if needed.";
-    }
-  }
-
-  async handleUserTask(userTaskString, parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
+  /**
+   * Handles a user task, orchestrating planning, execution, and synthesis.
+   * @param {string} userTaskString - The user's task description.
+   * @param {Array<Object>=} uploadedFiles - Array of uploaded file objects, e.g., { name: string, content: string }. Defaults to an empty array.
+   * @param {string} parentTaskId - The unique ID for this task.
+   * @param {string|null} [taskIdToLoad=null] - Optional ID of a previous task state to load.
+   * @param {string} [executionMode="EXECUTE_FULL_PLAN"] - Defines the execution behavior:
+   *   - "EXECUTE_FULL_PLAN": Standard full cycle: plan -> execute -> synthesize.
+   *   - "PLAN_ONLY": Generates a plan and saves it, then stops.
+   *   - "EXECUTE_PLANNED_TASK": Loads a task state (must include a plan) and executes it.
+   *   - "SYNTHESIZE_ONLY": Loads a task state (must include execution context) and synthesizes a final answer.
+   * @returns {Promise<Object>} Result object containing success status, messages, and task outputs.
+   */
+  async handleUserTask(userTaskString, uploadedFiles = [], parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
     const MAX_ERRORS_FOR_CWC_PROMPT = 3;
+    const DEFAULT_MEGA_CONTEXT_TTL = 3600; // 1 hour in seconds
 
     const initialJournalEntries = []; // Orchestrator-specific entries before execution
     initialJournalEntries.push(this._createOrchestratorJournalEntry(
         "TASK_RECEIVED",
         `Task received. Mode: ${executionMode}`,
-        { parentTaskId, userTaskStringPreview: userTaskString ? userTaskString.substring(0, 200) + '...' : 'N/A', taskIdToLoad, executionMode }
+        { parentTaskId, userTaskStringPreview: userTaskString ? userTaskString.substring(0, 200) + '...' : 'N/A', uploadedFileCount: uploadedFiles.length, taskIdToLoad, executionMode }
     ));
-    console.log(`OrchestratorAgent: Received task: '${userTaskString ? userTaskString.substring(0,100)+'...' : 'N/A'}', parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
+    console.log(`OrchestratorAgent: Received task: '${userTaskString ? userTaskString.substring(0,100)+'...' : 'N/A'}', uploadedFiles: ${uploadedFiles.length}, parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
 
     let currentWorkingContext = {
         lastUpdatedAt: new Date().toISOString(),
@@ -187,6 +182,29 @@ class OrchestratorAgent {
 
         const initialTaskDefinitionContent = userTaskString || (taskIdToLoad ? "Task definition will be loaded." : "No initial task string provided.");
         await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', initialTaskDefinitionContent);
+
+        // Save any user-uploaded files to the task's memory bank for later context assembly.
+        const savedUploadedFilePaths = [];
+        if (uploadedFiles && uploadedFiles.length > 0) {
+            const uploadedFilesDir = path.join('uploaded_files'); // Store in a dedicated subdirectory within the task's memory bank.
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", `Attempting to save ${uploadedFiles.length} uploaded files.`, { parentTaskId, count: uploadedFiles.length }));
+            for (const file of uploadedFiles) {
+                try {
+                    // Basic sanitization of filename to prevent path traversal issues.
+                    const safeFileName = path.basename(file.name);
+                    const relativeFilePath = path.join(uploadedFilesDir, safeFileName);
+                    // Overwrite memory with the file content. MemoryManager handles directory creation.
+                    await this.memoryManager.overwriteMemory(taskDirPath, relativeFilePath, file.content);
+                    savedUploadedFilePaths.push(relativeFilePath); // Store the relative path for context assembly.
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", `Successfully saved uploaded file: ${relativeFilePath}`, { parentTaskId, fileName: file.name, relativePath: relativeFilePath }));
+                } catch (uploadError) {
+                    console.error(`OrchestratorAgent: Error saving uploaded file '${file.name}': ${uploadError.message}`);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_ERROR", `Error saving uploaded file '${file.name}': ${uploadError.message}`, { parentTaskId, fileName: file.name, error: uploadError.message }));
+                    // Consider if a single file save error should halt the task. For now, it logs and continues.
+                }
+            }
+        }
+
         await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
         if (executionMode === "SYNTHESIZE_ONLY") {
@@ -261,9 +279,60 @@ class OrchestratorAgent {
             (this.workerAgentCapabilities || []).forEach(agent => { knownToolsByRole[agent.role] = agent.tools.map(t => t.name); });
 
             let memoryContextForPlanning = {};
+            let tokenizerFn;
+            let maxTokenLimit;
+
             try {
+                // Get tokenizer and maxTokenLimit from aiService.
+                // TODO: Ensure aiService is always initialized before this point or handle potential errors.
+                if (this.aiService && typeof this.aiService.getTokenizer === 'function') {
+                    tokenizerFn = this.aiService.getTokenizer();
+                } else {
+                    // Fallback to a placeholder if the AI service or its tokenizer isn't available.
+                    console.warn("OrchestratorAgent: aiService.getTokenizer() is not available. Using placeholder tokenizer.");
+                    tokenizerFn = (text) => text ? Math.ceil(text.length / 4) : 0; // Simple approximation.
+                }
+
+                // TODO: Ensure aiService is always initialized before this point.
+                if (this.aiService && typeof this.aiService.getMaxContextTokens === 'function') {
+                    maxTokenLimit = this.aiService.getMaxContextTokens();
+                } else {
+                    // Fallback to a default placeholder if max tokens cannot be determined.
+                    console.warn("OrchestratorAgent: aiService.getMaxContextTokens() is not available. Using placeholder maxTokenLimit (4096).");
+                    maxTokenLimit = 4096;
+                }
+
+
                 const taskDefFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'task_definition.md', { defaultValue: currentOriginalTask });
                 memoryContextForPlanning.taskDefinition = taskDefFromMemory;
+
+                // Assemble context for initial planning.
+                // This includes the task definition, uploaded files, and a few recent key findings.
+                const contextSpecificationForPlanning = {
+                    systemPrompt: "You are an AI assistant responsible for planning complex tasks. Use the provided context to create a comprehensive plan.",
+                    includeTaskDefinition: true,
+                    uploadedFilePaths: savedUploadedFilePaths,
+                    maxLatestKeyFindings: 5,
+                    chatHistory: [], // No chat history for initial planning.
+                    maxTokenLimit: maxTokenLimit,
+                    customPreamble: "Контекст для первоначального планирования:",
+                    enableMegaContextCache: true, // Enable caching for this planning context.
+                    megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL, // Set cache TTL.
+                    // Optional: Add other relevant fields if needed for planning, e.g., specific constraints.
+                };
+
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_START", "Assembling mega context for initial planning.", { parentTaskId, spec: contextSpecificationForPlanning }));
+                const megaContextResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForPlanning, tokenizerFn);
+
+                if (megaContextResult.success) {
+                    memoryContextForPlanning.megaContext = megaContextResult.contextString;
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", "Mega context assembled successfully for planning.", { parentTaskId, contextLength: megaContextResult.contextString.length, tokenCount: megaContextResult.tokenCount }));
+                } else {
+                    console.error(`OrchestratorAgent: Failed to assemble mega context for initial planning for task ${parentTaskId}: ${megaContextResult.error}`);
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Failed to assemble mega context for planning: ${megaContextResult.error}`, { parentTaskId, error: megaContextResult.error }));
+                    // Fallback: memoryContextForPlanning will not have .megaContext, PlanManager will use older context construction.
+                }
+
 
                 const decisionsPromptTemplate = `The following text contains a log of key decisions, learnings, and events related to solving a complex task. Please provide a concise summary, highlighting:\n- The most impactful decisions made.\n- Key problems encountered and how they were (or were not) resolved.\n- Significant learnings or insights gained.\nThe summary should help in quickly understanding the critical junctures and takeaways from this log.\n\nLog content:\n---\n{text_to_summarize}\n---\nConcise Summary:`;
                 const summarizationLlmParams = {
@@ -292,10 +361,11 @@ class OrchestratorAgent {
                     if (cwcSnapshotFromMemory) memoryContextForPlanning.retrievedCwcSnapshot = cwcSnapshotFromMemory;
                 }
             } catch (memError) {
-                console.warn(`OrchestratorAgent: Error loading memory for planning for task ${parentTaskId}: ${memError.message}`);
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_LOAD_ERROR", `Failed to load memory for planning: ${memError.message}`, { parentTaskId }));
+                console.warn(`OrchestratorAgent: Error loading memory or assembling mega context for planning for task ${parentTaskId}: ${memError.message}`);
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_CONTEXT_ERROR", `Failed to load memory or assemble mega context for planning: ${memError.message}`, { parentTaskId }));
             }
 
+            // memoryContextForPlanning now potentially includes .megaContext
             planResult = await this.planManager.getPlan(currentOriginalTask, knownAgentRoles, knownToolsByRole, memoryContextForPlanning, currentWorkingContext);
 
             if (!planResult.success) {
@@ -547,7 +617,53 @@ Comprehensive Task Status Summary:`,
             const recentErrorsForCwcUpdate = await this.memoryManager.getLatestErrorsEncountered(taskDirPath, MAX_ERRORS_FOR_CWC_PROMPT);
             const recentErrorsSummary = recentErrorsForCwcUpdate.map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage }));
 
-            const cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
+            let cwcUpdatePrompt;
+            // Assemble context for updating the Current Working Context (CWC).
+            // This includes task definition, uploaded files, more key findings, current CWC state,
+            // recent errors, and a summary of findings from the last execution cycle.
+            const contextSpecificationForCwcUpdate = {
+                systemPrompt: "You are an expert system analyzing task progress. Your goal is to update the Current Working Context (CWC) based on the latest information. Provide a concise summary of progress and the immediate next objective.",
+                includeTaskDefinition: true,
+                uploadedFilePaths: savedUploadedFilePaths,
+                maxLatestKeyFindings: 10,
+                includeRawContentForReferencedFindings: true,
+                chatHistory: [], // No chat history for this internal CWC update.
+                maxTokenLimit: maxTokenLimit || 4096, // Use fetched or default.
+                customPreamble: "Контекст для обновления CWC:",
+                // Key information for CWC update:
+                currentProgressSummary: currentWorkingContext.summaryOfProgress,
+                currentNextObjective: currentWorkingContext.nextObjective,
+                recentErrorsSummary: recentErrorsSummary,
+                summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc, // Summary from _getSummarizedKeyFindingsForPrompt
+                overallExecutionSuccess: overallSuccess,
+                enableMegaContextCache: true, // Enable caching for CWC update context.
+                megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL, // Set cache TTL.
+                priorityOrder: [ // Example priority for CWC context
+                    'systemPrompt',
+                    'taskDefinition', // Remind LLM of original goal
+                    'currentProgressSummary', 'currentNextObjective', // Current state
+                    'overallExecutionSuccess', // Result of last attempt
+                    'summarizedKeyFindingsText', // What was found
+                    'recentErrorsSummary', // What went wrong
+                    'uploadedFilePaths', // Any static files for reference
+                    // chatHistory is empty here, so not critical in order
+                ]
+            };
+
+            finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_START", "Assembling mega context for CWC update.", { parentTaskId, spec: contextSpecificationForCwcUpdate }));
+            const megaContextCwcResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForCwcUpdate, tokenizerFn);
+
+            if (megaContextCwcResult.success) {
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", "Mega context assembled successfully for CWC update.", { parentTaskId, contextLength: megaContextCwcResult.contextString.length, tokenCount: megaContextCwcResult.tokenCount }));
+                cwcUpdatePrompt = `${megaContextCwcResult.contextString}
+
+Based on all the provided context, provide an updated summary of progress and the immediate next objective for the overall task.
+Return ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).
+Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "updatedNextObjective": "Synthesize findings considering errors." }`;
+            } else {
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Failed to assemble mega context for CWC update: ${megaContextCwcResult.error}. Falling back to simpler prompt.`, { parentTaskId, error: megaContextCwcResult.error }));
+                // Fallback to existing, simpler cwcUpdatePrompt construction
+                cwcUpdatePrompt = `The overall user task is: "${currentOriginalTask}".
 The previous summary of progress was: "${currentWorkingContext.summaryOfProgress}".
 The previous next objective was: "${currentWorkingContext.nextObjective}".
 Recent plan execution overall success: ${overallSuccess}.
@@ -559,10 +675,13 @@ ${JSON.stringify(recentErrorsSummary, null, 2)}
 Based on this, provide an updated summary of progress and the immediate next objective for the overall task.
 Return ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).
 Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "updatedNextObjective": "Synthesize findings considering errors." }`;
+            }
 
             try {
-                // const cwcUpdateResponse = await this.llmService(cwcUpdatePrompt); // OLD
-                const cwcUpdateResponse = await this.aiService.generateText(cwcUpdatePrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.cwcUpdateModel) || 'gpt-3.5-turbo' }); // NEW
+                const cwcUpdateModel = (this.aiService.baseConfig && this.aiService.baseConfig.cwcUpdateModel) ||
+                                     (this.aiService.getServiceName && (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'));
+
+                const cwcUpdateResponse = await this.aiService.generateText(cwcUpdatePrompt, { model: cwcUpdateModel });
                 const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
 
                 if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
@@ -612,7 +731,49 @@ Example: { "updatedSummaryOfProgress": "Data gathered, some errors occurred.", "
                 responseMessage = "Execution completed, but no specific data was gathered from the final successful attempt to form an answer.";
                 finalAnswer = "No specific information was generated from the execution to form a final answer.";
             } else {
-                const synthesisPrompt = `The original user task was: "${currentOriginalTask}".
+                let synthesisPrompt;
+                // Assemble context for the final answer synthesis.
+                // This includes the original task, full execution history of the last attempt,
+                // CWC summary, key findings, errors, and uploaded files.
+                const contextSpecificationForSynthesis = {
+                    systemPrompt: "You are an expert system synthesizing the final answer for a task. Use all available context to provide a comprehensive and accurate response to the original user query.",
+                    includeTaskDefinition: true, // To ensure the LLM remembers the core goal.
+                    uploadedFilePaths: savedUploadedFilePaths,
+                    maxLatestKeyFindings: 20, // Allow more findings for comprehensive synthesis.
+                    includeRawContentForReferencedFindings: true, // Crucial for accurate synthesis.
+                    chatHistory: [], // No separate chat history for this system-level synthesis.
+                    maxTokenLimit: maxTokenLimit || 8192, // Allow a larger context for synthesis.
+                    customPreamble: "Контекст для финального ответа:",
+                    // Key information for final synthesis:
+                    originalUserTask: currentOriginalTask,
+                    executionContext: lastExecutionContext,
+                    currentWorkingContextSummary: currentWorkingContext.summaryOfProgress,
+                    summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc, // Or a more comprehensive one if needed.
+                    recentErrorsSummary: recentErrorsSummary,
+                    priorityOrder: [ // Example priority for synthesis
+                        'systemPrompt',
+                        'originalUserTask', // Most important: what was the goal?
+                        'executionContext', // What was done?
+                        'summarizedKeyFindingsText', // What was found?
+                        'recentErrorsSummary', // What were the problems?
+                        'currentWorkingContextSummary', // What's the current high-level status?
+                        'taskDefinition', // Full original task definition, if different from userTaskString
+                        'uploadedFilePaths' // Supporting documents.
+                    ]
+                };
+
+                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_START", "Assembling mega context for final synthesis.", { parentTaskId, spec: contextSpecificationForSynthesis }));
+                const megaContextSynthesisResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForSynthesis, tokenizerFn);
+
+                if (megaContextSynthesisResult.success) {
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", "Mega context assembled successfully for final synthesis.", { parentTaskId, contextLength: megaContextSynthesisResult.contextString.length, tokenCount: megaContextSynthesisResult.tokenCount }));
+                    synthesisPrompt = `${megaContextSynthesisResult.contextString}
+
+Based on all the provided context, synthesize a comprehensive answer for the original user task: "${currentOriginalTask}".`;
+                } else {
+                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Failed to assemble mega context for final synthesis: ${megaContextSynthesisResult.error}. Falling back to simpler prompt.`, { parentTaskId, error: megaContextSynthesisResult.error }));
+                    // Fallback to existing synthesisPrompt construction
+                    synthesisPrompt = `The original user task was: "${currentOriginalTask}".
 Execution History (JSON Array):
 ${synthesisContextString}
 Current Working Context Summary:
@@ -624,8 +785,13 @@ Errors Encountered (Last ${MAX_ERRORS_FOR_CWC_PROMPT}):
 ${JSON.stringify(recentErrorsSummary,null,2)}
 ---
 Based on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
+                }
+
                 try {
-                    finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) || 'gpt-4' });
+                    const synthesisModel = (this.aiService.baseConfig && this.aiService.baseConfig.synthesisModel) ||
+                                         (this.aiService.getServiceName && (this.aiService.getServiceName() === 'OpenAI' ? 'gpt-4' : 'gemini-1.5-pro-latest')); // Use a powerful model for synthesis
+
+                    finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: synthesisModel });
                     responseMessage = "Task completed and final answer synthesized.";
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SUCCESS", responseMessage, { parentTaskId }));
                 } catch (synthError) {

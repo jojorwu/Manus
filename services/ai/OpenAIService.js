@@ -1,12 +1,31 @@
 // File: services/ai/OpenAIService.js
 const BaseAIService = require('./BaseAIService');
 const OpenAI = require('openai'); // Official OpenAI library
+let get_encoding_lib; // To handle potential dynamic import
+try {
+    get_encoding_lib = require('tiktoken');
+} catch (e) {
+    console.warn("OpenAIService: tiktoken library not found or failed to load. `getTokenizer` will fall back to base. Error: " + e.message);
+    get_encoding_lib = null;
+}
+
 
 class OpenAIService extends BaseAIService {
     constructor(apiKey, baseConfig = {}) {
         super(apiKey, baseConfig);
         this.defaultModel = baseConfig.defaultModel || 'gpt-3.5-turbo';
         this.openai = null; // Initialize to null
+        this.tokenizerName = this.baseConfig.tokenizerName || 'cl100k_base';
+        this.enc = null;
+
+        if (get_encoding_lib) {
+            try {
+                this.enc = get_encoding_lib.get_encoding(this.tokenizerName);
+            } catch (e) {
+                console.warn(`OpenAIService: Failed to load tiktoken encoder '${this.tokenizerName}'. Falling back to base tokenizer. Error: ${e.message}`);
+                this.enc = null;
+            }
+        }
 
         if (!this.apiKey && !process.env.OPENAI_API_KEY) {
             console.warn("OpenAIService: API key is not provided at construction and OPENAI_API_KEY env var is not set. Service will likely fail on execution.");
@@ -132,6 +151,67 @@ class OpenAIService extends BaseAIService {
 
         return this.completeChat(messages, chatParams);
     }
+
+    /**
+     * Returns a tokenizer function for OpenAI models using the `tiktoken` library.
+     * If `tiktoken` is unavailable or the specified encoder fails to load,
+     * it falls back to the base class's approximate tokenizer.
+     * @returns {Function} A function that takes a string and returns the number of tokens.
+     */
+    getTokenizer() {
+        if (this.enc) {
+            return (text) => text ? this.enc.encode(text).length : 0;
+        }
+        // Fallback to BaseAIService's placeholder if tiktoken loading failed
+        console.warn("OpenAIService.getTokenizer: tiktoken encoder not available, falling back to base approximate tokenizer.");
+        return super.getTokenizer();
+    }
+
+    /**
+     * Returns the maximum number of context tokens for the configured default OpenAI model.
+     * It uses a predefined map of known OpenAI models and their context window sizes.
+     * @returns {number} The maximum number of context tokens.
+     */
+    getMaxContextTokens() {
+        const model = this.defaultModel || (this.baseConfig && this.baseConfig.defaultModel) || 'gpt-3.5-turbo';
+        // Source: https://platform.openai.com/docs/models
+        // Refreshed April 2024
+        const modelContextWindows = {
+            // GPT-4 Turbo (includes vision) - all these point to models with 128k context
+            'gpt-4-turbo': 128000,
+            'gpt-4-turbo-2024-04-09': 128000,
+            'gpt-4-turbo-preview': 128000,
+            'gpt-4-0125-preview': 128000,
+            'gpt-4-1106-preview': 128000,
+            'gpt-4-vision-preview': 128000, // Vision model, but context window is for tokens
+
+            // GPT-4
+            'gpt-4': 8192,
+            'gpt-4-0613': 8192,
+            'gpt-4-32k': 32768,
+            'gpt-4-32k-0613': 32768,
+
+            // GPT-3.5 Turbo
+            'gpt-3.5-turbo-0125': 16385,
+            'gpt-3.5-turbo': 16385, // Default alias often points to 16k model
+            'gpt-3.5-turbo-1106': 16385, // Also 16k
+            'gpt-3.5-turbo-instruct': 4096,
+            'gpt-3.5-turbo-16k': 16385, // Explicit 16k model
+            'gpt-3.5-turbo-0613': 4096, // Older 4k model
+
+            // Default if model not listed
+            'default': 4096
+        };
+
+        const contextSize = modelContextWindows[model] || modelContextWindows['default'];
+        if (!modelContextWindows[model]) {
+            console.warn(`OpenAIService.getMaxContextTokens: Model ${model} not found in known list. Using default ${contextSize} tokens.`);
+        }
+        return contextSize;
+    }
+
+    // Optional: cleanup encoder when no longer needed
+    // close() { if (this.enc) this.enc.free(); } // Tiktoken docs say free is not usually needed in JS
 }
 
 module.exports = OpenAIService;
