@@ -203,22 +203,16 @@ class OrchestratorAgent {
 
         // ... [SYNTHESIZE_ONLY and EXECUTE_PLANNED_TASK logic remains largely the same as it doesn't involve new planning/context assembly] ...
         if (executionMode === "SYNTHESIZE_ONLY") {
-            // ... (existing SYNTHESIZE_ONLY logic) ...
-            // For brevity, assuming this part remains unchanged from the provided content
              if (!taskIdToLoad) return { success: false, message: "taskIdToLoad is required for SYNTHESIZE_ONLY mode." };
             const loadResult = await loadTaskState(path.join(path.join(datedTasksDirPath, taskIdToLoad), 'task_state.json'));
             if (!loadResult.success || !loadResult.taskState) return { success: false, message: "Failed to load state for SYNTHESIZE_ONLY."};
             loadedState = loadResult.taskState;
-            currentOriginalTask = loadedState.userTaskString; // Use loaded task string
-            // ... rest of SYNTHESIZE_ONLY logic ...
-            // Example:
+            currentOriginalTask = loadedState.userTaskString;
             const synthesisPrompt = `Original task: "${currentOriginalTask}". Execution context: ${JSON.stringify(loadedState.executionContext)}. Synthesize the final answer.`;
             const finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig?.synthesisModel) || 'gpt-4' });
             return { success: true, finalAnswer, originalTask: currentOriginalTask, executedPlan: loadedState.executionContext, plan: loadedState.plan, currentWorkingContext: loadedState.currentWorkingContext };
         }
         if (executionMode === "EXECUTE_PLANNED_TASK") {
-            // ... (existing EXECUTE_PLANNED_TASK logic) ...
-            // For brevity, assuming this part remains unchanged
             if (!taskIdToLoad) return { success: false, message: "taskIdToLoad is required for EXECUTE_PLANNED_TASK mode." };
             const loadResult = await loadTaskState(path.join(path.join(datedTasksDirPath, taskIdToLoad), 'task_state.json'));
             if (!loadResult.success || !loadResult.taskState || !loadResult.taskState.plan || loadResult.taskState.plan.length === 0) {
@@ -228,7 +222,6 @@ class OrchestratorAgent {
             currentOriginalTask = userTaskString || loadedState.userTaskString;
             planStages = loadedState.plan;
             if(loadedState.currentWorkingContext) currentWorkingContext = loadedState.currentWorkingContext;
-            // ... rest of EXECUTE_PLANNED_TASK setup
         }
 
 
@@ -270,34 +263,44 @@ class OrchestratorAgent {
                                 const megaContextHash = crypto.createHash('sha256').update(megaContextResult.contextString).digest('hex');
                                 const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
                                 let existingCacheInfo = geminiCacheMap[megaContextHash];
-                                if (existingCacheInfo?.modelName === planningModelName && (new Date().getTime() - new Date(existingCacheInfo.createdAt).getTime()) / 1000 < existingCacheInfo.ttlSeconds) {
+
+                                // Check if the cache entry has expired using the server-provided expireTime.
+                                if (existingCacheInfo?.modelName === planningModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
                                     geminiCachedContentName = existingCacheInfo.cachedContentName;
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT", `Using existing Gemini CachedContent: ${geminiCachedContentName}`, { parentTaskId }));
+                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT", `Using existing Gemini CachedContent: ${geminiCachedContentName} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
                                 } else {
-                                    if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED", `Expired Gemini CachedContent for planning. Hash: ${megaContextHash}. Will recreate.`, { parentTaskId }));
+                                    if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED", `Gemini CachedContent for planning (Hash: ${megaContextHash}, ExpireTime: ${existingCacheInfo.expireTime}) expired or invalid. Will recreate.`, { parentTaskId }));
                                     const contentsForCache = [{ role: "user", parts: [{ text: megaContextResult.contextString }] }];
                                     const newCachedContent = await this.aiService.createCachedContent({
                                         modelName: planningModelName, contents: contentsForCache, systemInstruction: contextSpecificationForPlanning.systemPrompt,
                                         ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_plan_${parentTaskId.substring(0,8)}_${megaContextHash.substring(0,8)}`
                                     });
-                                    if (newCachedContent?.name) {
+                                    if (newCachedContent?.name && newCachedContent.expireTime) {
                                         geminiCachedContentName = newCachedContent.name;
-                                        geminiCacheMap[megaContextHash] = { cachedContentName: newCachedContent.name, modelName: planningModelName, createdAt: new Date().toISOString(), ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, originalContextTokenCount: megaContextResult.tokenCount };
+                                        // Store metadata for the new Gemini CachedContent in the map.
+                                        // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
+                                        geminiCacheMap[megaContextHash] = {
+                                            cachedContentName: newCachedContent.name,
+                                            modelName: newCachedContent.model || planningModelName,
+                                            expireTime: newCachedContent.expireTime,
+                                            createTime: newCachedContent.createTime, // For reference
+                                            // requestedTtlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, // Optional: for reference if needed
+                                            originalContextTokenCount: megaContextResult.tokenCount
+                                        };
                                         await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED", `Created Gemini CachedContent for planning: ${geminiCachedContentName}`, { parentTaskId }));
-                                    } else throw new Error("Failed to create Gemini CachedContent or received invalid response.");
+                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED", `Created Gemini CachedContent for planning: ${geminiCachedContentName} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
+                                    } else throw new Error("Failed to create Gemini CachedContent or received invalid/incomplete response (missing name or expireTime).");
                                 }
                             } catch (cacheError) { console.warn(`Error with Gemini CachedContent for planning: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR", `Planning cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentName = null; }
-                        } else { /* Log skip reason */ }
+                        } else { /* Log skip reason for unsupported model or low token count */ }
                     }
                     if (geminiCachedContentName) {
                         memoryContextForPlanning.geminiCachedContentName = geminiCachedContentName;
                         memoryContextForPlanning.isMegaContextCachedByGemini = true;
                     }
-                } else { /* Log mega context assembly failure */ finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Planning: ${megaContextResult.error}`, { parentTaskId }));}
+                } else { finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Planning: ${megaContextResult.error}`, { parentTaskId }));}
 
-                // ... (load decisionsFromMemory, cwcSnapshotFromMemory as before)
-                 const decisionsPromptTemplate = `The following text is a log of key decisions...`; // Keep as is
+                 const decisionsPromptTemplate = `The following text is a log of key decisions...`;
                  const summarizationLlmParams = { model: (this.aiService.baseConfig?.summarizationModel) || 'gpt-3.5-turbo', temperature: 0.3, maxTokens: 500 };
                  const decisionsFromMemory = await this.memoryManager.getSummarizedMemory(taskDirPath, 'key_decisions_and_learnings.md', this.aiService, { maxOriginalLength: 3000, promptTemplate: decisionsPromptTemplate, llmParams: summarizationLlmParams, cacheSummary: true, defaultValue: "" });
                  if (decisionsFromMemory?.trim()) memoryContextForPlanning.retrievedKeyDecisions = decisionsFromMemory;
@@ -309,38 +312,23 @@ class OrchestratorAgent {
             } catch (memError) { console.warn(`Error preparing planning context: ${memError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_CONTEXT_ERROR", `Planning context prep: ${memError.message}`, { parentTaskId })); }
 
             planResult = await this.planManager.getPlan(currentOriginalTask, knownAgentRoles, knownToolsByRole, memoryContextForPlanning, currentWorkingContext);
-            // ... (rest of planning success/failure logic)
              if (!planResult.success) {
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { parentTaskId, error: planResult.message }));
-                // ... (error handling)
                 return { success: false, message: planResult.message, taskId: parentTaskId, originalTask: currentOriginalTask, rawResponse: planResult.rawResponse };
             }
             planStages = planResult.plan;
             finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_COMPLETED", `Plan obtained. Stages: ${planStages.length}`, { parentTaskId, source: planResult.source }));
-            // ... (update CWC)
             await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
         }
-        // ... [PLAN_ONLY return logic] ...
         if (executionMode === "PLAN_ONLY") {
-             // ...
             return { success: true, message: "Plan generated and saved.", taskId: parentTaskId, originalTask: currentOriginalTask, plan: planStages, currentWorkingContext };
         }
 
-
-        // ... [EXECUTION CYCLE REMAINS LARGELY THE SAME] ...
         if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") {
-        // ... (execution loop as before) ...
-            // Inside the loop, before replanning, memoryContextForPlanning is passed to planManager.getPlan.
-            // This memoryContextForPlanning ALREADY contains the geminiCachedContentName if it was set during initial planning.
-            // No new specific Gemini cache handling is needed for REPLANNING within THIS subtask,
-            // as replanning reuses the memoryContextForPlanning object from the initial planning phase.
-            // Future enhancement: Replanning could also check/create its own CachedContent if the context for replan is significantly different.
+        // ... (execution loop)
         }
 
-
-        // --- CWC Update Section ---
-        if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") { // Only if execution happened
-            // ... (batch summarization logic as before) ...
+        if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") {
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC.", { parentTaskId }));
             let chatHistoryForCwc = [];
             try {
@@ -371,75 +359,75 @@ class OrchestratorAgent {
 
             if (megaContextCwcResult.success) {
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", `CWC Context: ${megaContextCwcResult.tokenCount} tokens.`, { parentTaskId, fromCache: megaContextCwcResult.fromCache }));
-                // Gemini Caching for CWC Update
                 if (this.aiService.getServiceName?.() === 'GeminiService' && typeof this.aiService.createCachedContent === 'function') {
                     const supportedCacheModels = ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'];
                     if (supportedCacheModels.includes(cwcUpdateModelName) && megaContextCwcResult.tokenCount >= MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE) {
-                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ATTEMPT_CWC", `Attempting Gemini CachedContent for CWC update model ${cwcUpdateModelName}.`, { parentTaskId }));
+                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ATTEMPT_CWC", `Attempting Gemini CachedContent for CWC model ${cwcUpdateModelName}.`, { parentTaskId }));
                         try {
                             const megaContextCwcHash = crypto.createHash('sha256').update(megaContextCwcResult.contextString).digest('hex');
                             const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
                             let existingCacheInfo = geminiCacheMap[megaContextCwcHash];
-                            if (existingCacheInfo?.modelName === cwcUpdateModelName && (new Date().getTime() - new Date(existingCacheInfo.createdAt).getTime())/1000 < existingCacheInfo.ttlSeconds) {
+                            // Check if the cache entry has expired using the server-provided expireTime.
+                            if (existingCacheInfo?.modelName === cwcUpdateModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
                                 geminiCachedContentNameForCwc = existingCacheInfo.cachedContentName;
-                                finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_CWC", `Using Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc}`, { parentTaskId }));
+                                finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_CWC", `Using Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
                             } else {
-                                if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_CWC", `Expired CWC cache. Hash: ${megaContextCwcHash}. Will recreate.`, { parentTaskId }));
+                                if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_CWC", `Expired CWC cache (Hash: ${megaContextCwcHash}, ExpireTime: ${existingCacheInfo.expireTime}). Will recreate.`, { parentTaskId }));
                                 const contentsForCache = [{ role: "user", parts: [{ text: megaContextCwcResult.contextString }] }];
                                 const newCachedContent = await this.aiService.createCachedContent({
                                     modelName: cwcUpdateModelName, contents: contentsForCache, systemInstruction: contextSpecificationForCwcUpdate.systemPrompt,
                                     ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_cwc_${parentTaskId.substring(0,8)}_${megaContextCwcHash.substring(0,8)}`
                                 });
-                                if (newCachedContent?.name) {
+                                if (newCachedContent?.name && newCachedContent.expireTime) {
                                     geminiCachedContentNameForCwc = newCachedContent.name;
-                                    geminiCacheMap[megaContextCwcHash] = { cachedContentName: newCachedContent.name, modelName: cwcUpdateModelName, createdAt: new Date().toISOString(), ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, originalContextTokenCount: megaContextCwcResult.tokenCount };
+                                    // Store metadata for the new Gemini CachedContent in the map.
+                                    // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
+                                    geminiCacheMap[megaContextCwcHash] = {
+                                        cachedContentName: newCachedContent.name, modelName: newCachedContent.model || cwcUpdateModelName,
+                                        expireTime: newCachedContent.expireTime, createTime: newCachedContent.createTime,
+                                        originalContextTokenCount: megaContextCwcResult.tokenCount
+                                    };
                                     await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_CWC", `Created Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc}`, { parentTaskId }));
-                                } else throw new Error("Failed to create Gemini CachedContent for CWC.");
+                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_CWC", `Created Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
+                                } else throw new Error("Failed to create Gemini CachedContent for CWC or missing expireTime.");
                             }
                         } catch (cacheError) { console.warn(`Error with Gemini CachedContent for CWC: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR_CWC", `CWC cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentNameForCwc = null; }
-                    } else { /* Log CWC cache skip */ }
+                    } else { /* Log CWC cache skip if model not supported or low token count */ }
                 }
                 if (geminiCachedContentNameForCwc) {
                     cwcLlmParams.cachedContentName = geminiCachedContentNameForCwc;
-                    cwcUpdatePromptString = `Based on the extensive context provided (now cached), provide an updated summary of progress...`; // Short prompt
+                    cwcUpdatePromptString = `Based on the extensive context provided (now cached), provide an updated summary of progress...`;
                 } else {
-                    cwcUpdatePromptString = `${megaContextCwcResult.contextString}\n\nBased on all the provided context, provide an updated summary...`; // Full prompt
+                    cwcUpdatePromptString = `${megaContextCwcResult.contextString}\n\nBased on all the provided context, provide an updated summary...`;
                 }
-            } else { // Fallback if megaContext for CWC failed
+            } else {
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `CWC Update: ${megaContextCwcResult.error}. Fallback.`, { parentTaskId }));
-                cwcUpdatePromptString = `The overall user task is: "${currentOriginalTask}".\nPrevious summary: "${currentWorkingContext.summaryOfProgress}"...\nBased on this, provide an updated summary...`; // Simplified fallback
+                cwcUpdatePromptString = `The overall user task is: "${currentOriginalTask}".\nPrevious summary: "${currentWorkingContext.summaryOfProgress}"...\nBased on this, provide an updated summary...`;
             }
             cwcUpdatePromptString += `\nReturn ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).\nExample: { "updatedSummaryOfProgress": "Data gathered...", "updatedNextObjective": "Synthesize findings..." }`;
 
             try {
                 const cwcUpdateResponse = await this.aiService.generateText(cwcUpdatePromptString, cwcLlmParams);
-                // ... (rest of CWC update logic)
                  const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
                 if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
                     currentWorkingContext.summaryOfProgress = parsedCwcUpdate.updatedSummaryOfProgress;
                     currentWorkingContext.nextObjective = parsedCwcUpdate.updatedNextObjective;
-                    // ...
                     await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
                 } else throw new Error("LLM CWC update response missing fields.");
             } catch (cwcLlmError) { console.error(`Error updating CWC with LLM: ${cwcLlmError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_ERROR", `LLM CWC update failed: ${cwcLlmError.message}`, { parentTaskId }));}
         }
 
-
-        // --- Final Answer Synthesis Section ---
         let finalAnswer = null;
         let responseMessage = "";
-        // ... (preSynthesizedFinalAnswer check as before)
         if (wasFinalAnswerPreSynthesized) {
             // ...
         } else if (overallSuccess && lastExecutionContext && lastExecutionContext.length > 0) {
-            // ... (contextForLLMSynthesis, synthesisContextString as before)
              if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && !e.outcome_data))) {
                 // ...
             } else {
                 let chatHistoryForSynthesis = [];
                 try {
-                    chatHistoryForSynthesis = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT); // Or a larger limit for synthesis
+                    chatHistoryForSynthesis = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForSynthesis.length} for synthesis.`, { parentTaskId }));
                 } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Synthesis history: ${err.message}`, { parentTaskId }));}
 
@@ -463,7 +451,6 @@ class OrchestratorAgent {
 
                 if (megaContextSynthesisResult.success) {
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", `Synthesis Context: ${megaContextSynthesisResult.tokenCount} tokens.`, { parentTaskId, fromCache: megaContextSynthesisResult.fromCache }));
-                     // Gemini Caching for Synthesis
                     if (this.aiService.getServiceName?.() === 'GeminiService' && typeof this.aiService.createCachedContent === 'function') {
                         const supportedCacheModels = ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'];
                         if (supportedCacheModels.includes(synthesisModelName) && megaContextSynthesisResult.tokenCount >= MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE) {
@@ -472,22 +459,29 @@ class OrchestratorAgent {
                                 const megaContextSynthHash = crypto.createHash('sha256').update(megaContextSynthesisResult.contextString).digest('hex');
                                 const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
                                 let existingCacheInfo = geminiCacheMap[megaContextSynthHash];
-                                if (existingCacheInfo?.modelName === synthesisModelName && (new Date().getTime() - new Date(existingCacheInfo.createdAt).getTime())/1000 < existingCacheInfo.ttlSeconds) {
+                                // Check if the cache entry has expired using the server-provided expireTime.
+                                if (existingCacheInfo?.modelName === synthesisModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
                                     geminiCachedContentNameForSynthesis = existingCacheInfo.cachedContentName;
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_SYNTH", `Using Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis}`, { parentTaskId }));
+                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_SYNTH", `Using Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
                                 } else {
-                                     if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_SYNTH", `Expired synthesis cache. Hash: ${megaContextSynthHash}. Will recreate.`, { parentTaskId }));
+                                     if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_SYNTH", `Expired synthesis cache (Hash: ${megaContextSynthHash}, ExpireTime: ${existingCacheInfo.expireTime}). Will recreate.`, { parentTaskId }));
                                     const contentsForCache = [{ role: "user", parts: [{ text: megaContextSynthesisResult.contextString }] }];
                                     const newCachedContent = await this.aiService.createCachedContent({
                                         modelName: synthesisModelName, contents: contentsForCache, systemInstruction: contextSpecificationForSynthesis.systemPrompt,
                                         ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_synth_${parentTaskId.substring(0,8)}_${megaContextSynthHash.substring(0,8)}`
                                     });
-                                    if (newCachedContent?.name) {
+                                    if (newCachedContent?.name && newCachedContent.expireTime) {
                                         geminiCachedContentNameForSynthesis = newCachedContent.name;
-                                        geminiCacheMap[megaContextSynthHash] = { cachedContentName: newCachedContent.name, modelName: synthesisModelName, createdAt: new Date().toISOString(), ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, originalContextTokenCount: megaContextSynthesisResult.tokenCount };
+                                        // Store metadata for the new Gemini CachedContent in the map.
+                                        // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
+                                        geminiCacheMap[megaContextSynthHash] = {
+                                            cachedContentName: newCachedContent.name, modelName: newCachedContent.model || synthesisModelName,
+                                            expireTime: newCachedContent.expireTime, createTime: newCachedContent.createTime,
+                                            originalContextTokenCount: megaContextSynthesisResult.tokenCount
+                                        };
                                         await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_SYNTH", `Created Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis}`, { parentTaskId }));
-                                    } else throw new Error("Failed to create Gemini CachedContent for synthesis.");
+                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_SYNTH", `Created Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
+                                    } else throw new Error("Failed to create Gemini CachedContent for synthesis or missing expireTime.");
                                 }
                             } catch (cacheError) { console.warn(`Error with Gemini CachedContent for synthesis: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR_SYNTH", `Synthesis cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentNameForSynthesis = null; }
                         } else { /* Log synthesis cache skip */ }
@@ -498,40 +492,33 @@ class OrchestratorAgent {
                     } else {
                         synthesisPromptString = `${megaContextSynthesisResult.contextString}\n\nBased on all the provided context, synthesize a comprehensive answer...`;
                     }
-                } else { // Fallback if megaContext for Synthesis failed
+                } else {
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Synthesis: ${megaContextSynthesisResult.error}. Fallback.`, { parentTaskId }));
                     synthesisPromptString = `The original user task was: "${currentOriginalTask}".\nExecution History (JSON Array):\n${synthesisContextString}\n Current Working Context Summary:\nProgress: ${currentWorkingContext.summaryOfProgress}\nNext Objective: ${currentWorkingContext.nextObjective}\nKey Findings (Summarized):\n${summarizedKeyFindingsTextForCwc}\nErrors Encountered (Last ${MAX_ERRORS_FOR_CWC_PROMPT}):\n${JSON.stringify(recentErrorsSummary,null,2)}\n---\nBased on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
                 }
                  synthesisPromptString += `\nSynthesize a comprehensive answer for the original user task: "${currentOriginalTask}".`;
 
-
                 try {
                     finalAnswer = await this.aiService.generateText(synthesisPromptString, synthLlmParams);
-                    // ... (rest of synthesis success/failure)
                      responseMessage = "Task completed and final answer synthesized.";
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SUCCESS", responseMessage, { parentTaskId }));
                 } catch (synthError) {
                     responseMessage = "Synthesis failed: " + synthError.message;
-                    // ...
                     finalAnswer = "Error during final answer synthesis.";
                     overallSuccess = false;
                 }
             }
         } else { /* ... other conditions for finalAnswer ... */ }
 
-        // ... [rest of the handleUserTask method, including final state saving and chat logging] ...
-        // Log agent's final answer to chat history
         if (finalAnswer && (typeof finalAnswer === 'string' && finalAnswer.trim() !== '')) {
             try {
                 await this.memoryManager.addChatMessage(taskDirPath, { role: 'assistant', content: finalAnswer });
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOGGED", "Agent's final answer logged.", { parentTaskId }));
             } catch (logError) { console.warn(`Failed to log agent's final answer: ${logError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOG_FAILED", `Failed to log agent final answer: ${logError.message}`, { parentTaskId }));}
         }
-        // ...
         await saveTaskState(stateFilePath, taskStateToSave);
         finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "TASK_COMPLETED_SUCCESSFULLY" : "TASK_FAILED_FINAL", `Task processing finished. Success: ${overallSuccess}`, { parentTaskId, finalStatus: taskStateToSave.status }));
         await saveTaskJournal(journalFilePath, finalJournalEntries);
-        // ...
         return { success: overallSuccess, message: responseMessage, originalTask: currentOriginalTask, plan: planStages, executedPlan: executionContext, finalAnswer, currentWorkingContext };
 
     } catch (error) { /* ... existing catch block ... */ }
