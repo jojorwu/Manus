@@ -5,11 +5,84 @@ const path = require('path');
 const crypto = require('crypto'); // Added for hashing
 
 const MEMORY_BANK_DIR_NAME = 'memory_bank';
+const MEGA_CONTEXT_CACHE_DIR_NAME = 'mega_context_cache'; // For caching assembleMegaContext results
+const MEGA_CONTEXT_CACHE_VERSION = 'mcc-v1'; // Cache version, increment to invalidate all old caches
 
 class MemoryManager {
     constructor() {
         // Constructor might be used for configuration in the future
     }
+
+    /**
+     * Calculates a stable SHA256 hash for a JavaScript object.
+     * Keys are sorted before stringification to ensure hash consistency.
+     * @param {object} obj - The object to hash.
+     * @returns {string} The hexadecimal SHA256 hash of the object.
+     * @private
+     */
+    _calculateObjectHash(obj) {
+        const orderedObj = {};
+        Object.keys(obj).sort().forEach(key => {
+            // Handle nested objects by recursively calling or ensuring stable stringification
+            if (typeof obj[key] === 'object' && obj[key] !== null && !Array.isArray(obj[key])) {
+                 // For simple, non-nested objects, or ensure a deeper stable stringify for nested.
+                 // For this example, direct assignment is used, assuming JSON.stringify handles nesting consistently enough for this use case.
+                 // For more complex/unpredictable structures, a recursive sort might be needed.
+                orderedObj[key] = obj[key]; // Or recursively call a similar function if deep sort needed
+            } else {
+                orderedObj[key] = obj[key];
+            }
+        });
+        const str = JSON.stringify(orderedObj);
+        return crypto.createHash('sha256').update(str).digest('hex');
+    }
+
+    /**
+     * Calculates the SHA256 hash of a file's content.
+     * Returns a special string if the file is not found or if there's a read error,
+     * ensuring these states contribute uniquely to any cache key derived from this hash.
+     * @param {string} filePath - The full path to the file.
+     * @returns {Promise<string>} The hexadecimal SHA256 hash or an error/status string.
+     * @private
+     */
+    async _getFileContentHash(filePath) {
+        try {
+            const content = await fsp.readFile(filePath, 'utf8');
+            return crypto.createHash('sha256').update(content).digest('hex');
+        } catch (error) {
+            if (error.code === 'ENOENT') {
+                return `FILE_NOT_FOUND:${path.basename(filePath)}`; // Use basename to keep key shorter
+            }
+            console.warn(`MemoryManager: Error reading file ${filePath} for hashing: ${error.message}`);
+            return `ERROR_READING_FILE:${path.basename(filePath)}`;
+        }
+    }
+
+    /**
+     * Gets the path to the mega_context_cache directory for a given task.
+     * @param {string} taskStateDirPath - The full path to the task's state directory.
+     * @returns {string} The path to the mega_context_cache directory.
+     * @private
+     */
+    _getMegaContextCachePath(taskStateDirPath) {
+        const memoryBankPath = this._getTaskMemoryBankPath(taskStateDirPath);
+        return path.join(memoryBankPath, MEGA_CONTEXT_CACHE_DIR_NAME);
+    }
+
+    /**
+     * Constructs the full file path for a cache entry.
+     * @param {string} cacheDir - The directory where caches are stored.
+     * @param {string} cacheKey - The unique key for the cache entry (typically a hash).
+     * @returns {string} The full path to the cache file.
+     * @private
+     */
+    _getCacheFilePath(cacheDir, cacheKey) {
+        // Use only a portion of the hash for the filename to keep it reasonably short,
+        // though collisions are highly unlikely with SHA256.
+        // Filename cannot contain certain characters, so hex digest is safe.
+        return path.join(cacheDir, `${cacheKey.substring(0, 32)}.json`); // e.g., first 32 chars of hash
+    }
+
 
     _getTaskMemoryBankPath(taskStateDirPath) {
         if (!taskStateDirPath || typeof taskStateDirPath !== 'string' || taskStateDirPath.trim() === '') {
@@ -209,7 +282,9 @@ class MemoryManager {
 
     /**
      * Assembles a comprehensive context string from various sources within a specified token budget.
-     * The context is built by adding parts in a defined priority order until the token limit is approached.
+     * This method incorporates caching: it first attempts to read from a cache using a key derived
+     * from the context specification and content hashes. If a valid cache entry is found, it's returned.
+     * Otherwise, the context is assembled fresh and, if caching is enabled for the call, written to the cache.
      *
      * @param {string} taskStateDirPath - The full path to the task's state directory.
      * @param {object} contextSpecification - Object detailing what to include in the context.
@@ -232,10 +307,12 @@ class MemoryManager {
      * @param {boolean} [contextSpecification.overallExecutionSuccess] - (Optional) For CWC updates, the overall success status of the last execution.
      * @param {object[]} [contextSpecification.executionContext] - (Optional) For final synthesis, the execution context (history of steps).
      * @param {string} [contextSpecification.originalUserTask] - (Optional) For final synthesis, the original user task string.
+     * @param {boolean} [contextSpecification.enableMegaContextCache=true] - If false, caching for this specific call is skipped (both read and write). Defaults to true.
+     * @param {number|null} [contextSpecification.megaContextCacheTTLSeconds=null] - Time-to-live for the cache entry in seconds. If null or not provided, cache does not expire based on time.
      * @param {Function} tokenizerCompatibleWithLLM - A function that takes a string and returns the number of tokens it represents, compatible with the target LLM.
-     * @returns {Promise<object>} An object: `{ success: Boolean, contextString?: String, tokenCount?: Number, error?: String }`.
+     * @returns {Promise<object>} An object: `{ success: Boolean, contextString?: String, tokenCount?: Number, error?: String, fromCache?: boolean }`.
      *                           `contextString` is the assembled context. `tokenCount` is its token length.
-     *                           `error` is present if `success` is false.
+     *                           `error` is present if `success` is false. `fromCache` indicates if the result was from cache.
      */
     async assembleMegaContext(taskStateDirPath, contextSpecification, tokenizerCompatibleWithLLM) {
         const {
@@ -253,7 +330,9 @@ class MemoryManager {
             findingSeparator = "\n---\n",
             // Fields for CWC update / Synthesis (will be ignored if not in priorityOrder or handled specifically)
             currentProgressSummary, currentNextObjective, recentErrorsSummary, summarizedKeyFindingsText, overallExecutionSuccess,
-            executionContext, originalUserTask
+            executionContext, originalUserTask,
+            enableMegaContextCache = true, // Default to true if not specified
+            megaContextCacheTTLSeconds = null
         } = contextSpecification || {};
 
         if (typeof maxTokenLimit !== 'number' || maxTokenLimit <= 0) {
@@ -261,6 +340,115 @@ class MemoryManager {
         }
         if (typeof tokenizerCompatibleWithLLM !== 'function') {
             return { success: false, error: "tokenizerCompatibleWithLLM must be a function.", tokenCount: 0 };
+        }
+
+        let cacheKey, cacheDir, cacheFilePath; // Declared here to be accessible for cache write if needed
+
+        // Check if caching is enabled for this specific call
+        if (enableMegaContextCache) {
+            // --- Cache Key Generation ---
+            // Assemble all data points that define the uniqueness of this context request.
+            const cacheKeyData = {
+                version: MEGA_CONTEXT_CACHE_VERSION, // Cache version for global invalidation if structure changes.
+                // Specification parameters that affect the generated context string:
+            spec: {
+                systemPrompt,
+                includeTaskDefinition,
+                // uploadedFilePaths are handled by hashing their content below
+                maxLatestKeyFindings,
+                includeRawContentForReferencedFindings,
+                // chatHistory is handled by hashing below
+                maxTokenLimit, // Tokenizer changes would implicitly change output
+                priorityOrder,
+                customPreamble,
+                customPostamble,
+                recordSeparator,
+                findingSeparator,
+                // Add other spec fields that influence context string if they exist
+                currentProgressSummary, currentNextObjective, summarizedKeyFindingsText, overallExecutionSuccess,
+                originalUserTask
+                // executionContext is handled by hashing below (if included)
+            },
+            fileHashes: {},
+            keyFindingHashes: [],
+            chatHistoryHashes: [],
+            executionContextHash: null
+        };
+
+        if (includeTaskDefinition) {
+            const tdPath = this.getMemoryFilePath(taskStateDirPath, 'task_definition.md');
+            cacheKeyData.fileHashes['task_definition.md'] = await this._getFileContentHash(tdPath);
+        }
+
+        for (const relPath of uploadedFilePaths) {
+            const fullPath = this.getMemoryFilePath(taskStateDirPath, relPath);
+            cacheKeyData.fileHashes[relPath] = await this._getFileContentHash(fullPath);
+        }
+
+        if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') {
+            const findings = await this.getLatestKeyFindings(taskStateDirPath, maxLatestKeyFindings);
+            for (const finding of findings) {
+                let findingDataToHash = finding.id || ''; // Start with ID
+                if (typeof finding.data === 'string') {
+                    findingDataToHash += `_str:${finding.data.substring(0,1000)}`; // Limit string data to prevent huge keys
+                } else if (finding.data && finding.data.type === 'reference_to_raw_content' && finding.data.rawContentPath && includeRawContentForReferencedFindings) {
+                    const rawContentPath = this.getMemoryFilePath(taskStateDirPath, finding.data.rawContentPath);
+                    findingDataToHash += `_ref:${await this._getFileContentHash(rawContentPath)}`;
+                } else {
+                    findingDataToHash += `_json:${JSON.stringify(finding.data)}`;
+                }
+                cacheKeyData.keyFindingHashes.push(crypto.createHash('sha256').update(findingDataToHash).digest('hex'));
+            }
+        }
+
+        if (chatHistory && chatHistory.length > 0) {
+            chatHistory.forEach(msg => {
+                cacheKeyData.chatHistoryHashes.push(this._calculateObjectHash(msg));
+            });
+        }
+
+        if (executionContext && Array.isArray(executionContext)) { // Used in synthesis
+            cacheKeyData.executionContextHash = this._calculateObjectHash(executionContext);
+        }
+
+
+            cacheKey = this._calculateObjectHash(cacheKeyData); // Generate a unique key from all influencing factors.
+            cacheDir = this._getMegaContextCachePath(taskStateDirPath);
+            cacheFilePath = this._getCacheFilePath(cacheDir, cacheKey);
+
+            // --- Cache Read Attempt ---
+            try {
+                const cachedDataString = await fsp.readFile(cacheFilePath, 'utf8');
+                const cachedData = JSON.parse(cachedDataString);
+                // Validate cached data structure
+                if (cachedData.contextString && typeof cachedData.tokenCount === 'number' && cachedData.timestamp) {
+                    // Optional: Check Time-To-Live (TTL)
+                    if (megaContextCacheTTLSeconds && typeof megaContextCacheTTLSeconds === 'number' && megaContextCacheTTLSeconds > 0) {
+                        const cacheAgeSeconds = (new Date().getTime() - new Date(cachedData.timestamp).getTime()) / 1000;
+                        if (cacheAgeSeconds > megaContextCacheTTLSeconds) {
+                            console.log(`MemoryManager.assembleMegaContext: Cache expired for key ${cacheKey}. Age: ${cacheAgeSeconds}s, TTL: ${megaContextCacheTTLSeconds}s. Regenerating.`);
+                            // Cache expired, proceed to regenerate.
+                        } else {
+                            // Cache is valid and within TTL.
+                            console.log(`MemoryManager.assembleMegaContext: Cache hit (TTL valid) for key ${cacheKey}. Returning cached data.`);
+                            return { success: true, contextString: cachedData.contextString, tokenCount: cachedData.tokenCount, fromCache: true };
+                        }
+                    } else {
+                        // No TTL specified or TTL is invalid, so cache is considered valid if it exists.
+                        console.log(`MemoryManager.assembleMegaContext: Cache hit (no TTL check) for key ${cacheKey}. Returning cached data.`);
+                        return { success: true, contextString: cachedData.contextString, tokenCount: cachedData.tokenCount, fromCache: true };
+                    }
+                }
+            } catch (error) {
+                // Handle errors during cache read (e.g., file not found, JSON parse error)
+                if (error.code !== 'ENOENT') { // ENOENT (file not found) is expected for a cache miss.
+                    console.warn(`MemoryManager.assembleMegaContext: Error reading cache file ${cacheFilePath}. Regenerating. Error: ${error.message}`);
+                }
+                // If any error occurs (ENOENT or otherwise), proceed to generate context fresh.
+            }
+        } else {
+            // Caching is explicitly disabled for this call.
+            console.log("MemoryManager.assembleMegaContext: Caching is disabled by contextSpecification.enableMegaContextCache=false. Assembling fresh context.");
         }
 
         const contextParts = [];
@@ -466,12 +654,28 @@ class MemoryManager {
 
             if (finalTokenCount > maxTokenLimit) {
                 console.warn(`MemoryManager.assembleMegaContext: Final context string (tokens: ${finalTokenCount}) slightly exceeds maxTokenLimit (${maxTokenLimit}) despite budgeting. This may be due to separator logic or tokenization nuances. Consider a small buffer in maxTokenLimit if this is problematic.`);
-                // Decide on handling: error out, or truncate (truncation is complex here as it might cut mid-record)
-                // For now, let's return an error if it strictly exceeds.
                 return { success: false, error: "Assembled context exceeds token limit after final construction. Budgeting might be too tight or separators miscounted.", tokenCount: finalTokenCount, details: { maxTokenLimit } };
             }
 
-            return { success: true, contextString: finalContextString, tokenCount: finalTokenCount };
+            // --- Cache Write (only if caching was enabled for this call) ---
+            if (enableMegaContextCache && cacheKey && cacheDir && cacheFilePath) {
+                try {
+                    await fsp.mkdir(cacheDir, { recursive: true }); // Ensure cache directory exists.
+                    const dataToCache = {
+                        contextString: finalContextString,
+                        tokenCount: finalTokenCount,
+                        timestamp: new Date().toISOString(), // Timestamp for potential TTL.
+                        // sourceCacheKeyData: cacheKeyData // Optional: include for debugging cache generation.
+                    };
+                    await fsp.writeFile(cacheFilePath, JSON.stringify(dataToCache, null, 2), 'utf8');
+                    console.log(`MemoryManager.assembleMegaContext: Context assembled and saved to cache. Key: ${cacheKey}, Path: ${cacheFilePath}`);
+                } catch (cacheWriteError) {
+                    // Errors during cache write should not fail the main operation.
+                    console.warn(`MemoryManager.assembleMegaContext: Error writing to cache file ${cacheFilePath}. Proceeding without saving to cache. Error: ${cacheWriteError.message}`);
+                }
+            }
+
+            return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
 
         } catch (error) {
             console.error("MemoryManager.assembleMegaContext: Critical error during context assembly.", error);

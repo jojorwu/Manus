@@ -137,6 +137,7 @@ class OrchestratorAgent {
    */
   async handleUserTask(userTaskString, uploadedFiles = [], parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
     const MAX_ERRORS_FOR_CWC_PROMPT = 3;
+    const DEFAULT_MEGA_CONTEXT_TTL = 3600; // 1 hour in seconds
 
     const initialJournalEntries = []; // Orchestrator-specific entries before execution
     initialJournalEntries.push(this._createOrchestratorJournalEntry(
@@ -315,6 +316,8 @@ class OrchestratorAgent {
                     chatHistory: [], // No chat history for initial planning.
                     maxTokenLimit: maxTokenLimit,
                     customPreamble: "Контекст для первоначального планирования:",
+                    enableMegaContextCache: true, // Enable caching for this planning context.
+                    megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL, // Set cache TTL.
                     // Optional: Add other relevant fields if needed for planning, e.g., specific constraints.
                 };
 
@@ -633,6 +636,8 @@ Comprehensive Task Status Summary:`,
                 recentErrorsSummary: recentErrorsSummary,
                 summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc, // Summary from _getSummarizedKeyFindingsForPrompt
                 overallExecutionSuccess: overallSuccess,
+                enableMegaContextCache: true, // Enable caching for CWC update context.
+                megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL, // Set cache TTL.
                 priorityOrder: [ // Example priority for CWC context
                     'systemPrompt',
                     'taskDefinition', // Remind LLM of original goal
