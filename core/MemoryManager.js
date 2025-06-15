@@ -43,70 +43,6 @@ class MemoryManager {
         }
     }
 
-    async saveRawContent(taskStateDirPath, content, sourceIdentifier, customMetadata = {}) {
-        if (!taskStateDirPath || typeof taskStateDirPath !== 'string' || taskStateDirPath.trim() === '') {
-            throw new Error("MemoryManager.saveRawContent: taskStateDirPath must be a non-empty string.");
-        }
-        if (typeof content !== 'string') { // Assuming content should be a string
-            throw new Error("MemoryManager.saveRawContent: content must be a string.");
-        }
-        if (!sourceIdentifier || typeof sourceIdentifier !== 'string' || sourceIdentifier.trim() === '') {
-            throw new Error("MemoryManager.saveRawContent: sourceIdentifier must be a non-empty string.");
-        }
-
-        try {
-            const memoryBankPath = this._getTaskMemoryBankPath(taskStateDirPath);
-            const rawContentDir = path.join(memoryBankPath, 'raw_content');
-            await fsp.mkdir(rawContentDir, { recursive: true });
-
-            const sourceIdentifierHash = this._calculateHash(sourceIdentifier);
-            if (!sourceIdentifierHash) {
-                 throw new Error("MemoryManager.saveRawContent: Could not calculate hash for sourceIdentifier.");
-            }
-
-            const contentFileName = `raw_${sourceIdentifierHash}.dat`;
-            const metadataFileName = `raw_${sourceIdentifierHash}.meta.json`;
-
-            // Relative paths for the return value and metadata storage
-            const relativeContentPath = path.join('raw_content', contentFileName);
-            const relativeMetadataPath = path.join('raw_content', metadataFileName);
-
-            // Absolute paths for file operations
-            const absoluteContentPath = path.join(rawContentDir, contentFileName);
-            const absoluteMetadataPath = path.join(rawContentDir, metadataFileName);
-
-            // Save the raw content
-            // Using fsp.writeFile directly as overwriteMemory expects a memoryCategoryFileName relative to memoryBankPath
-            await fsp.writeFile(absoluteContentPath, content, 'utf8');
-
-            // Create and save metadata
-            const contentHash = this._calculateHash(content);
-            if (!contentHash) {
-                throw new Error("MemoryManager.saveRawContent: Could not calculate hash for content.");
-            }
-
-            const metadata = {
-                sourceIdentifier,
-                savedTimestamp: new Date().toISOString(),
-                contentHash,
-                customMetadata,
-                contentFilePath: relativeContentPath
-            };
-
-            // Use fsp.writeFile for metadata as well, ensuring JSON stringification
-            await fsp.writeFile(absoluteMetadataPath, JSON.stringify(metadata, null, 2), 'utf8');
-
-            return {
-                contentPath: relativeContentPath,
-                metadataPath: relativeMetadataPath
-            };
-
-        } catch (error) {
-            console.error(`MemoryManager.saveRawContent: Error saving raw content for source '${sourceIdentifier}':`, error);
-            throw error; // Re-throw the error after logging
-        }
-    }
-
     async loadMemory(taskStateDirPath, memoryCategoryFileName, options = {}) {
         const { isJson = false, defaultValue = null } = options;
         let filePath;
@@ -165,96 +101,6 @@ class MemoryManager {
         }
     }
 
-    async getCachedOrFetch(taskStateDirPath, cacheCategory, cacheKey, fetchFunction, options = {}) {
-        if (!taskStateDirPath || typeof taskStateDirPath !== 'string' || taskStateDirPath.trim() === '') {
-            throw new Error("MemoryManager.getCachedOrFetch: taskStateDirPath must be a non-empty string.");
-        }
-        if (!cacheCategory || typeof cacheCategory !== 'string' || cacheCategory.trim() === '') {
-            throw new Error("MemoryManager.getCachedOrFetch: cacheCategory must be a non-empty string.");
-        }
-        if (!cacheKey || typeof cacheKey !== 'string' || cacheKey.trim() === '') {
-            throw new Error("MemoryManager.getCachedOrFetch: cacheKey must be a non-empty string.");
-        }
-        if (typeof fetchFunction !== 'function') {
-            throw new Error("MemoryManager.getCachedOrFetch: fetchFunction must be a function.");
-        }
-
-        const {
-            isJson = true,
-            ttlSeconds = null,
-            cacheSubDir = 'cache'
-        } = options;
-
-        const memoryBankPath = this._getTaskMemoryBankPath(taskStateDirPath);
-        const cacheDirPath = path.join(memoryBankPath, cacheSubDir, cacheCategory);
-
-        const sanitizedCacheKey = cacheKey.replace(/[^a-zA-Z0-9_.-]/g, '_');
-
-        const dataFileName = sanitizedCacheKey + (isJson ? '.json' : '.dat');
-        const metadataFileName = dataFileName + '.meta.json';
-
-        const dataFilePath = path.join(cacheDirPath, dataFileName);
-        const metadataFilePath = path.join(cacheDirPath, metadataFileName);
-
-        let metadata;
-        try {
-            const metadataContent = await fsp.readFile(metadataFilePath, 'utf8');
-            metadata = JSON.parse(metadataContent);
-
-            if (ttlSeconds !== null && typeof metadata.timestamp === 'string') {
-                const cacheTimestamp = new Date(metadata.timestamp).getTime();
-                const now = Date.now();
-                if (now > cacheTimestamp + (ttlSeconds * 1000)) {
-                    console.log(`MemoryManager.getCachedOrFetch: Cache expired for ${cacheCategory}/${cacheKey}.`);
-                    metadata = null;
-                }
-            } else if (ttlSeconds !== null && typeof metadata.timestamp !== 'string') {
-                // Invalid timestamp in metadata, treat as miss for TTL'd entries
-                console.warn(`MemoryManager.getCachedOrFetch: Invalid timestamp in metadata for ${cacheCategory}/${cacheKey}. Treating as cache miss.`);
-                metadata = null;
-            }
-        } catch (error) {
-            if (error.code !== 'ENOENT') {
-                console.warn(`MemoryManager.getCachedOrFetch: Error reading metadata for ${cacheCategory}/${cacheKey}. Will fetch fresh. Error: ${error.message}`);
-            }
-            metadata = null;
-        }
-
-        if (metadata) {
-            try {
-                const cachedDataContent = await fsp.readFile(dataFilePath, 'utf8');
-                console.log(`MemoryManager.getCachedOrFetch: Cache hit for ${cacheCategory}/${cacheKey}.`);
-                return isJson ? JSON.parse(cachedDataContent) : cachedDataContent;
-            } catch (error) {
-                console.warn(`MemoryManager.getCachedOrFetch: Error reading cached data for ${cacheCategory}/${cacheKey} despite valid metadata. Will fetch fresh. Error: ${error.message}`);
-            }
-        }
-
-        console.log(`MemoryManager.getCachedOrFetch: Cache miss or invalid for ${cacheCategory}/${cacheKey}. Fetching fresh data.`);
-        const freshData = await fetchFunction();
-
-        try {
-            await fsp.mkdir(cacheDirPath, { recursive: true });
-            const contentToCache = isJson ? JSON.stringify(freshData, null, 2) : String(freshData);
-            await fsp.writeFile(dataFilePath, contentToCache, 'utf8');
-
-            const newMetadata = {
-                timestamp: new Date().toISOString(),
-                cacheKey: cacheKey, // Store the original, non-sanitized cacheKey
-                category: cacheCategory,
-                ttlSeconds: ttlSeconds,
-                isJson: isJson,
-                dataFileName: dataFileName // For reference
-            };
-            await fsp.writeFile(metadataFilePath, JSON.stringify(newMetadata, null, 2), 'utf8');
-            console.log(`MemoryManager.getCachedOrFetch: Cached fresh data for ${cacheCategory}/${cacheKey}.`);
-        } catch (error) {
-            console.error(`MemoryManager.getCachedOrFetch: Failed to write cache for ${cacheCategory}/${cacheKey}. Error: ${error.message}`);
-        }
-
-        return freshData;
-    }
-
     _calculateHash(content) {
         if (typeof content !== 'string') {
             // console.warn("MemoryManager:_calculateHash: Content is not a string, cannot calculate hash."); // use t()
@@ -273,8 +119,7 @@ class MemoryManager {
     async getSummarizedMemory(taskStateDirPath, memoryCategoryFileName, aiService, summarizationOptions = {}) {
         const {
             maxOriginalLength = 3000,
-            customPromptTemplate, // Added customPromptTemplate
-            promptTemplate: defaultPromptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}", // Renamed to avoid conflict
+            promptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}",
             llmParams = {},
             cacheSummary = true,
             forceSummarize = false,
@@ -327,12 +172,7 @@ class MemoryManager {
             throw new Error("aiService is required for summarization and must have a generateText method.");
         }
 
-        // Determine the prompt template to use
-        const chosenPromptTemplate = (customPromptTemplate && typeof customPromptTemplate === 'string' && customPromptTemplate.trim() !== '')
-            ? customPromptTemplate
-            : defaultPromptTemplate;
-
-        const prompt = chosenPromptTemplate.replace('{text_to_summarize}', originalContent);
+        const prompt = promptTemplate.replace('{text_to_summarize}', originalContent);
 
         const effectiveLlmParams = {
             model: (llmParams && llmParams.model) || (aiService.baseConfig && aiService.baseConfig.summarizationModel) || 'gpt-3.5-turbo',
@@ -365,6 +205,205 @@ class MemoryManager {
 
     _getSummaryMetaFilePath(summaryFilePath) { // Added helper method
         return `${summaryFilePath}.meta.json`;
+    }
+
+    async assembleMegaContext(taskStateDirPath, contextSpecification, tokenizerCompatibleWithLLM) {
+        const {
+            systemPrompt = null,
+            includeTaskDefinition = false,
+            uploadedFilePaths = [],
+            maxLatestKeyFindings = 0,
+            includeRawContentForReferencedFindings = true,
+            chatHistory = [],
+            maxTokenLimit,
+            priorityOrder = ['systemPrompt', 'chatHistory', 'uploadedFilePaths', 'taskDefinition', 'keyFindings'],
+            customPreamble = "Use the following information to answer the subsequent question or complete the task:\n--- BEGIN CONTEXT ---",
+            customPostamble = "--- END CONTEXT ---",
+            recordSeparator = "\n\n--- Next Record ---\n", // Separator between distinct items like files or findings
+            findingSeparator = "\n---\n" // Separator for fields within a single complex finding
+        } = contextSpecification || {};
+
+        if (typeof maxTokenLimit !== 'number' || maxTokenLimit <= 0) {
+            return { success: false, error: "maxTokenLimit must be a positive number.", tokenCount: 0 };
+        }
+        if (typeof tokenizerCompatibleWithLLM !== 'function') {
+            return { success: false, error: "tokenizerCompatibleWithLLM must be a function.", tokenCount: 0 };
+        }
+
+        const contextParts = [];
+        let currentTokenCount = 0;
+
+        const countTokens = (text) => {
+            try {
+                return tokenizerCompatibleWithLLM(text);
+            } catch (e) {
+                console.error("MemoryManager.assembleMegaContext: Tokenizer function failed.", e);
+                throw new Error("Tokenizer function failed during context assembly."); // Propagate to be caught by main try-catch
+            }
+        };
+
+        try {
+            // Account for preamble and postamble tokens first
+            const preambleTokens = countTokens(customPreamble + "\n\n"); // Add newlines for separation
+            const postambleTokens = countTokens("\n\n" + customPostamble); // Add newlines for separation
+            let remainingTokenBudget = maxTokenLimit - (preambleTokens + postambleTokens);
+
+            if (remainingTokenBudget < 0) {
+                return { success: false, error: "maxTokenLimit is too small for preamble and postamble.", tokenCount: preambleTokens + postambleTokens, details: { preambleTokens, postambleTokens } };
+            }
+
+            for (const contentType of priorityOrder) {
+                if (remainingTokenBudget <= 0) break;
+
+                switch (contentType) {
+                    case 'systemPrompt':
+                        if (systemPrompt && typeof systemPrompt === 'string') {
+                            const partTokens = countTokens(systemPrompt + "\n"); // Assume it needs a newline after
+                            if (partTokens <= remainingTokenBudget) {
+                                contextParts.push(systemPrompt);
+                                currentTokenCount += partTokens;
+                                remainingTokenBudget -= partTokens;
+                            } else {
+                                console.warn("MemoryManager.assembleMegaContext: System prompt too large for remaining budget. Skipping.");
+                            }
+                        }
+                        break;
+
+                    case 'chatHistory':
+                        if (chatHistory && chatHistory.length > 0) {
+                            // Assuming newest messages are more relevant if truncation happens. Process from newest to oldest.
+                            for (let i = chatHistory.length - 1; i >= 0; i--) {
+                                const message = chatHistory[i];
+                                const formattedMessage = `${message.role}: ${message.content}`;
+                                const partSeparator = (contextParts.length > 0 || systemPrompt) ? recordSeparator : ""; // Add separator if not the first actual content
+                                const partTokens = countTokens(partSeparator + formattedMessage);
+
+                                if (partTokens <= remainingTokenBudget) {
+                                    contextParts.push(partSeparator + formattedMessage);
+                                    currentTokenCount += partTokens;
+                                    remainingTokenBudget -= partTokens;
+                                } else {
+                                    break; // Stop adding chat history if budget exceeded
+                                }
+                            }
+                        }
+                        break;
+
+                    case 'uploadedFilePaths':
+                        if (uploadedFilePaths && uploadedFilePaths.length > 0) {
+                            for (const filePath of uploadedFilePaths) {
+                                if (remainingTokenBudget <= 0) break;
+                                try {
+                                    const content = await this.loadMemory(taskStateDirPath, filePath, { isJson: false, defaultValue: null });
+                                    if (content) {
+                                        const fileName = path.basename(filePath);
+                                        const header = `Document: ${fileName}\nContent:\n`;
+                                        const fullText = header + content;
+                                        const partSeparator = (contextParts.length > 0 || systemPrompt) ? recordSeparator : "";
+                                        const partTokens = countTokens(partSeparator + fullText);
+
+                                        if (partTokens <= remainingTokenBudget) {
+                                            contextParts.push(partSeparator + fullText);
+                                            currentTokenCount += partTokens;
+                                            remainingTokenBudget -= partTokens;
+                                        } else {
+                                             console.warn(`MemoryManager.assembleMegaContext: Document ${fileName} (tokens: ${partTokens}) too large for remaining budget (${remainingTokenBudget}). Skipping.`);
+                                        }
+                                    }
+                                } catch (e) {
+                                    console.warn(`MemoryManager.assembleMegaContext: Failed to load uploaded file ${filePath}. Error: ${e.message}. Skipping.`);
+                                }
+                            }
+                        }
+                        break;
+
+                    case 'taskDefinition':
+                        if (includeTaskDefinition) {
+                            if (remainingTokenBudget <= 0) break;
+                            try {
+                                const content = await this.loadMemory(taskStateDirPath, 'task_definition.md', { isJson: false, defaultValue: null });
+                                if (content) {
+                                    const header = "Task Definition:\n";
+                                    const fullText = header + content;
+                                    const partSeparator = (contextParts.length > 0 || systemPrompt) ? recordSeparator : "";
+                                    const partTokens = countTokens(partSeparator + fullText);
+                                    if (partTokens <= remainingTokenBudget) {
+                                        contextParts.push(partSeparator + fullText);
+                                        currentTokenCount += partTokens;
+                                        remainingTokenBudget -= partTokens;
+                                    } else {
+                                        console.warn(`MemoryManager.assembleMegaContext: Task definition too large for remaining budget. Skipping.`);
+                                    }
+                                }
+                            } catch (e) {
+                                console.warn(`MemoryManager.assembleMegaContext: Failed to load task_definition.md. Error: ${e.message}. Skipping.`);
+                            }
+                        }
+                        break;
+
+                    case 'keyFindings':
+                        if (maxLatestKeyFindings > 0) {
+                             // Assuming getLatestKeyFindings is implemented from a previous subtask
+                            if (typeof this.getLatestKeyFindings !== 'function') {
+                                console.warn("MemoryManager.assembleMegaContext: this.getLatestKeyFindings is not a function. Skipping key findings.");
+                                break;
+                            }
+                            const findings = await this.getLatestKeyFindings(taskStateDirPath, maxLatestKeyFindings);
+                            for (const finding of findings.reverse()) { // Process newest first
+                                if (remainingTokenBudget <= 0) break;
+                                let findingContent = "";
+                                if (includeRawContentForReferencedFindings && finding.data && finding.data.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
+                                    try {
+                                        const rawC = await this.loadMemory(taskStateDirPath, finding.data.rawContentPath, { isJson: false, defaultValue: null });
+                                        findingContent = rawC || finding.data.preview || JSON.stringify(finding.data);
+                                    } catch (e) {
+                                        console.warn(`MemoryManager.assembleMegaContext: Failed to load raw content for finding ${finding.id || finding.data.rawContentPath}. Error: ${e.message}. Using preview.`);
+                                        findingContent = finding.data.preview || JSON.stringify(finding.data);
+                                    }
+                                } else if (typeof finding.data === 'string') {
+                                    findingContent = finding.data;
+                                } else if (finding.data && finding.data.preview) {
+                                    findingContent = finding.data.preview;
+                                } else {
+                                    findingContent = JSON.stringify(finding.data);
+                                }
+
+                                const formattedFinding = `Key Finding (ID: ${finding.id || 'N/A'}, Tool: ${finding.sourceToolName || 'N/A'}):${findingSeparator}${findingContent}`;
+                                const partSeparator = (contextParts.length > 0 || systemPrompt) ? recordSeparator : "";
+                                const partTokens = countTokens(partSeparator + formattedFinding);
+
+                                if (partTokens <= remainingTokenBudget) {
+                                    contextParts.push(partSeparator + formattedFinding);
+                                    currentTokenCount += partTokens;
+                                    remainingTokenBudget -= partTokens;
+                                } else {
+                                     console.warn(`MemoryManager.assembleMegaContext: Finding ID ${finding.id || 'N/A'} too large for budget. Skipping subsequent findings.`);
+                                    break;
+                                }
+                            }
+                        }
+                        break;
+                }
+            }
+
+            let finalContextString = contextParts.join("\n\n"); // Join major parts with double newline
+            finalContextString = customPreamble + "\n\n" + finalContextString + "\n\n" + customPostamble;
+
+            const finalTokenCount = countTokens(finalContextString);
+
+            if (finalTokenCount > maxTokenLimit) {
+                // This should ideally not happen if budgeting is correct, but as a safeguard:
+                console.warn(`MemoryManager.assembleMegaContext: Final context string (tokens: ${finalTokenCount}) exceeds maxTokenLimit (${maxTokenLimit}) even after checks. This might indicate an issue with separator/preamble token accounting or very tight limits.`);
+                // For now, returning an error. Could implement more sophisticated truncation here.
+                return { success: false, error: "Assembled context exceeds token limit after final construction.", tokenCount: finalTokenCount, details: { maxTokenLimit } };
+            }
+
+            return { success: true, contextString: finalContextString, tokenCount: finalTokenCount };
+
+        } catch (error) {
+            console.error("MemoryManager.assembleMegaContext: Critical error during context assembly.", error);
+            return { success: false, error: error.message, tokenCount: currentTokenCount };
+        }
     }
 }
 
