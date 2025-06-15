@@ -113,12 +113,26 @@ class OrchestratorAgent {
     }
   }
 
+  /**
+   * Handles a user task, orchestrating planning, execution, and synthesis.
+   * @param {string} userTaskString - The user's task description.
+   * @param {Array<Object>=} uploadedFiles - Array of uploaded file objects, e.g., { name: string, content: string }. Defaults to an empty array.
+   * @param {string} parentTaskId - The unique ID for this task.
+   * @param {string|null} [taskIdToLoad=null] - Optional ID of a previous task state to load.
+   * @param {string} [executionMode="EXECUTE_FULL_PLAN"] - Defines the execution behavior.
+   *   - "EXECUTE_FULL_PLAN": Standard full cycle: plan -> execute -> synthesize.
+   *   - "PLAN_ONLY": Generates a plan and saves it, then stops.
+   *   - "EXECUTE_PLANNED_TASK": Loads a task state (must include a plan) and executes it.
+   *   - "SYNTHESIZE_ONLY": Loads a task state (must include execution context) and synthesizes a final answer.
+   * @returns {Promise<Object>} Result object containing success status, messages, and task outputs.
+   */
   async handleUserTask(userTaskString, uploadedFiles = [], parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
     const MAX_ERRORS_FOR_CWC_PROMPT = 3;
     const DEFAULT_MEGA_CONTEXT_TTL = 3600;
+    // Define the maximum number of recent chat history messages to retrieve for context assembly.
     const CHAT_HISTORY_LIMIT = 20;
     const DEFAULT_GEMINI_CACHED_CONTENT_TTL = 3600;
-    const MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE = 1024; // Min tokens in megaContext to attempt Gemini caching
+    const MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE = 1024;
 
     const initialJournalEntries = [];
     initialJournalEntries.push(this._createOrchestratorJournalEntry(
@@ -154,6 +168,7 @@ class OrchestratorAgent {
         await fsp.mkdir(taskDirPath, { recursive: true });
         await this.memoryManager.initializeTaskMemory(taskDirPath);
 
+        // Log initial user query to chat history, if provided.
         if (userTaskString && userTaskString.trim() !== '') {
             try {
                 await this.memoryManager.addChatMessage(taskDirPath, { role: 'user', content: userTaskString });
@@ -201,7 +216,6 @@ class OrchestratorAgent {
         }
         await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
-        // ... [SYNTHESIZE_ONLY and EXECUTE_PLANNED_TASK logic remains largely the same as it doesn't involve new planning/context assembly] ...
         if (executionMode === "SYNTHESIZE_ONLY") {
              if (!taskIdToLoad) return { success: false, message: "taskIdToLoad is required for SYNTHESIZE_ONLY mode." };
             const loadResult = await loadTaskState(path.join(path.join(datedTasksDirPath, taskIdToLoad), 'task_state.json'));
@@ -224,7 +238,6 @@ class OrchestratorAgent {
             if(loadedState.currentWorkingContext) currentWorkingContext = loadedState.currentWorkingContext;
         }
 
-
         if (executionMode === "EXECUTE_FULL_PLAN" || (executionMode === "PLAN_ONLY" )) {
             finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_STARTED", "Attempting to get a plan.", { parentTaskId, executionMode }));
             const knownAgentRoles = (this.workerAgentCapabilities || []).map(agent => agent.role);
@@ -236,6 +249,7 @@ class OrchestratorAgent {
                 memoryContextForPlanning.taskDefinition = await this.memoryManager.loadMemory(taskDirPath, 'task_definition.md', { defaultValue: currentOriginalTask });
                 let chatHistoryForPlanning = [];
                 try {
+                    // Fetch recent chat history for planning context.
                     chatHistoryForPlanning = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForPlanning.length} for planning.`, { parentTaskId }));
                 } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Failed for planning: ${err.message}`, { parentTaskId })); }
@@ -243,6 +257,7 @@ class OrchestratorAgent {
                 const contextSpecificationForPlanning = {
                     systemPrompt: "You are an AI assistant responsible for planning complex tasks...",
                     includeTaskDefinition: true, uploadedFilePaths: savedUploadedFilePaths, maxLatestKeyFindings: 5,
+                    keyFindingsRelevanceQuery: currentOriginalTask, // Use the original task as the relevance query for selecting key findings for planning.
                     chatHistory: chatHistoryForPlanning, maxTokenLimit: maxTokenLimitForContextAssembly,
                     customPreamble: "Контекст для первоначального планирования:",
                     enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL,
@@ -263,7 +278,6 @@ class OrchestratorAgent {
                                 const megaContextHash = crypto.createHash('sha256').update(megaContextResult.contextString).digest('hex');
                                 const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
                                 let existingCacheInfo = geminiCacheMap[megaContextHash];
-
                                 // Check if the cache entry has expired using the server-provided expireTime.
                                 if (existingCacheInfo?.modelName === planningModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
                                     geminiCachedContentName = existingCacheInfo.cachedContentName;
@@ -332,6 +346,7 @@ class OrchestratorAgent {
             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC.", { parentTaskId }));
             let chatHistoryForCwc = [];
             try {
+                // Fetch recent chat history for CWC update context.
                 chatHistoryForCwc = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
                 finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForCwc.length} for CWC.`, { parentTaskId }));
             } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `CWC history: ${err.message}`, { parentTaskId })); }
@@ -347,6 +362,7 @@ class OrchestratorAgent {
                 maxTokenLimit: maxTokenLimitForContextAssembly || 4096, customPreamble: "Контекст для обновления CWC:",
                 currentProgressSummary: currentWorkingContext.summaryOfProgress, currentNextObjective: currentWorkingContext.nextObjective,
                 recentErrorsSummary: recentErrorsSummary, summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc,
+                keyFindingsRelevanceQuery: currentWorkingContext.nextObjective || currentOriginalTask, // Prioritize current objective, then original task, for finding relevant CWC update context.
                 overallExecutionSuccess: overallSuccess, enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL,
                 priorityOrder: [ 'systemPrompt', 'taskDefinition', 'currentProgressSummary', 'currentNextObjective', 'overallExecutionSuccess', 'summarizedKeyFindingsText', 'recentErrorsSummary', 'chatHistory', 'uploadedFilePaths']
             };
@@ -427,6 +443,7 @@ class OrchestratorAgent {
             } else {
                 let chatHistoryForSynthesis = [];
                 try {
+                    // Fetch recent chat history for final synthesis context.
                     chatHistoryForSynthesis = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
                     finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForSynthesis.length} for synthesis.`, { parentTaskId }));
                 } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Synthesis history: ${err.message}`, { parentTaskId }));}
@@ -439,6 +456,7 @@ class OrchestratorAgent {
                     originalUserTask: currentOriginalTask, executionContext: lastExecutionContext,
                     currentWorkingContextSummary: currentWorkingContext.summaryOfProgress,
                     summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc, recentErrorsSummary: recentErrorsSummary,
+                    keyFindingsRelevanceQuery: currentOriginalTask, // Use the original task to find relevant findings for the final answer synthesis.
                     enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL,
                     priorityOrder: [ 'systemPrompt', 'originalUserTask', 'chatHistory', 'executionContext', 'summarizedKeyFindingsText', 'recentErrorsSummary', 'currentWorkingContextSummary', 'taskDefinition', 'uploadedFilePaths']
                 };

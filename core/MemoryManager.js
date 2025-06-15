@@ -246,6 +246,7 @@ class MemoryManager {
      * @param {boolean} [contextSpecification.includeTaskDefinition=false] - Whether to load and include 'task_definition.md'.
      * @param {string[]} [contextSpecification.uploadedFilePaths=[]] - Array of paths to user-uploaded files (relative to the task's memory bank) to include.
      * @param {number} [contextSpecification.maxLatestKeyFindings=0] - How many recent key findings to include. Findings are processed newest first.
+     * @param {string|null} [contextSpecification.keyFindingsRelevanceQuery=null] - An optional query string to filter/prioritize key findings. If provided, findings relevant to this query are preferred.
      * @param {boolean} [contextSpecification.includeRawContentForReferencedFindings=true] - If a key finding references raw content (e.g., a file path), attempt to load and include that raw content. If false or loading fails, uses finding's preview or data.
      * @param {object[]} [contextSpecification.chatHistory=[]] - Array of chat message objects (e.g., `{role: 'user', content: '...'}`). These are typically processed newest first for inclusion.
      * @param {number} contextSpecification.maxTokenLimit - The absolute maximum number of tokens for the assembled context string (including preambles, postambles, separators).
@@ -267,11 +268,15 @@ class MemoryManager {
      * @returns {Promise<object>} An object: `{ success: Boolean, contextString?: String, tokenCount?: Number, error?: String, fromCache?: boolean }`.
      */
     async assembleMegaContext(taskStateDirPath, contextSpecification, tokenizerCompatibleWithLLM) {
+        // The method assembles a text block (contextString) from various data sources like task definition,
+        // chat history, uploaded files, and key findings. Key findings can be filtered by relevance
+        // using keyFindingsRelevanceQuery. The process respects a maxTokenLimit.
         const {
             systemPrompt = null,
             includeTaskDefinition = false,
             uploadedFilePaths = [],
             maxLatestKeyFindings = 0,
+            keyFindingsRelevanceQuery = null, // Query to filter key findings by relevance.
             includeRawContentForReferencedFindings = true,
             chatHistory = [], // Expected to be an array of {role, content} objects
             maxTokenLimit,
@@ -378,11 +383,24 @@ class MemoryManager {
         };
 
         try {
-            const addPartToContext = (partContent, isCritical = false) => {
-                const partTokens = countTokens(partContent);
+            const addPartToContext = (partContent, isCritical = false, preComputedTokens = null) => {
+                const partTokens = preComputedTokens !== null ? preComputedTokens : countTokens(partContent);
                 if (partTokens <= remainingTokenBudget) {
-                    contextParts.push(partContent); currentTokenCount += partTokens; remainingTokenBudget -= partTokens; return true;
-                } else if (isCritical) throw new Error(`Critical context part too large (tokens: ${partTokens}, budget: ${remainingTokenBudget}).`);
+                    // Only push non-empty/non-whitespace content.
+                    // However, for critical parts like systemPrompt, even if empty by mistake, it should occupy its token space if preComputedTokens implies so.
+                    // For non-critical, if partContent is essentially empty, we might not want to push it.
+                    // Let's assume partContent is usually meaningful if addPartToContext is called.
+                    // The primary role here is budget checking and adding.
+                    if (partContent || (isCritical && preComputedTokens !== null)) { // Push if contentful, or if critical and tokens were pre-counted (implying intent)
+                       contextParts.push(partContent || ""); // Push empty string if content is null/undefined but tokens were counted
+                    }
+                    currentTokenCount += partTokens;
+                    remainingTokenBudget -= partTokens;
+                    return true;
+                } else if (isCritical) {
+                    const contentSample = partContent ? partContent.substring(0,100) + "..." : "(no content provided)";
+                    throw new Error(`Critical context part too large (tokens: ${partTokens}, budget: ${remainingTokenBudget}). Content: ${contentSample}`);
+                }
                 return false;
             };
 
@@ -425,24 +443,127 @@ class MemoryManager {
                     case 'recentErrorsSummary': if (recentErrorsSummary?.length && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Recent Errors Encountered:\n${JSON.stringify(recentErrorsSummary, null, 2)}`); break;
                     case 'overallExecutionSuccess': if (typeof overallExecutionSuccess === 'boolean' && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Overall Execution Success of Last Attempt: ${overallExecutionSuccess}`); break;
                     case 'executionContext': if (executionContext?.length && remainingTokenBudget > 0) addPartToContext(getSeparator() + `Execution Context (History):\n${JSON.stringify(executionContext, null, 2)}`); break;
-                    case 'keyFindings': // For complex findings objects
+                    case 'keyFindings':
                         if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') {
-                            const findings = await this.getLatestKeyFindings(taskStateDirPath, maxLatestKeyFindings);
-                            for (const finding of findings.reverse()) { // Process newest first
-                                if (remainingTokenBudget <= 0) break;
-                                let findingContentText = "";
-                                if (includeRawContentForReferencedFindings && finding.data?.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
-                                    try { findingContentText = await this.loadMemory(taskStateDirPath, finding.data.rawContentPath, {defaultValue:null}) || finding.data.preview || JSON.stringify(finding.data); }
-                                    catch (e) { console.warn(`Failed to load raw content for finding ${finding.id || finding.data.rawContentPath}: ${e.message}`); findingContentText = finding.data.preview || JSON.stringify(finding.data); }
-                                } else findingContentText = typeof finding.data === 'string' ? finding.data : (finding.data?.preview || JSON.stringify(finding.data));
-                                if (!addPartToContext(getSeparator() + `Key Finding (ID: ${finding.id || 'N/A'}, Tool: ${finding.sourceToolName || 'N/A'}):${findingSeparator}${findingContentText}`)) break;
+                            let findingsToProcess = [];
+                            const queryProvided = keyFindingsRelevanceQuery && typeof keyFindingsRelevanceQuery === 'string' && keyFindingsRelevanceQuery.trim() !== '';
+                            // Determine how many candidate findings to fetch. More if a relevance query is active to increase chances of finding relevant ones.
+                            const candidateLimit = (queryProvided && maxLatestKeyFindings > 0)
+                                ? Math.max(maxLatestKeyFindings * 2, maxLatestKeyFindings + 20)
+                                : maxLatestKeyFindings;
+
+                            // Initialize dynamic parts of the findings block header.
+                            let sectionTitle = `--- Key Findings (Up to ${maxLatestKeyFindings} most recent) ---`;
+                            let additionalTitleInfo = "";
+
+                            if (candidateLimit > 0) {
+                                const allCandidateFindings = (await this.getLatestKeyFindings(taskStateDirPath, candidateLimit)) || [];
+
+                                // Filter candidates if a relevance query is provided and candidates exist.
+                                if (queryProvided && allCandidateFindings.length > 0) {
+                                    const query = keyFindingsRelevanceQuery.toLowerCase().trim();
+                                    sectionTitle = `--- Key Findings (Up to ${maxLatestKeyFindings} most relevant; query: "${keyFindingsRelevanceQuery}") ---`;
+
+                                    // Perform case-insensitive search in finding's data, narrative, and tool name.
+                                    let relevantFindings = allCandidateFindings.filter(finding => {
+                                        let textCorpus = '';
+                                        if (finding.data && typeof finding.data === 'string') {
+                                            textCorpus += finding.data.toLowerCase();
+                                        } else if (finding.data) {
+                                            try { textCorpus += JSON.stringify(finding.data).toLowerCase(); } catch (e) { /* ignore */ }
+                                        }
+                                        if (finding.sourceStepNarrative) textCorpus += finding.sourceStepNarrative.toLowerCase();
+                                        if (finding.sourceToolName) textCorpus += finding.sourceToolName.toLowerCase();
+                                        return textCorpus.includes(query);
+                                    });
+
+                                    // If relevant findings are found, sort them by recency and take the top N.
+                                    if (relevantFindings.length > 0) {
+                                        relevantFindings.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                                        findingsToProcess = relevantFindings.slice(0, maxLatestKeyFindings);
+                                    } else {
+                                        // Fallback: If query yields no results, take the N most recent from all candidates.
+                                        additionalTitleInfo = ` (No findings directly matched query, showing up to ${maxLatestKeyFindings} most recent overall)`;
+                                        allCandidateFindings.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                                        findingsToProcess = allCandidateFindings.slice(0, maxLatestKeyFindings);
+                                    }
+                                } else { // No query, or no candidates to filter: Standard behavior, take N most recent.
+                                    allCandidateFindings.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                                    findingsToProcess = allCandidateFindings.slice(0, maxLatestKeyFindings);
+                                }
                             }
-                        } break;
+                            // findingsToProcess now contains the selected and sorted findings.
+                            if (findingsToProcess.length > 0) {
+                                let findingsBlockContent = "";
+                                let findingsAddedCount = 0;
+                                let currentBlockTokens = 0; // Token count for this entire findings block before adding to contextParts
+
+                                // Iterate over the processed findings (newest first).
+                                for (const finding of findingsToProcess) {
+                                    let findingHeaderText = `Finding ${findingsAddedCount + 1} (ID: ${finding.id || 'N/A'}, Tool: ${finding.sourceToolName || 'N/A'}, Timestamp: ${finding.timestamp || 'N/A'}):\n`;
+                                    let findingDetailText = "";
+
+                                    if (finding.type === 'file_reference' && finding.data && finding.data.path) {
+                                        findingDetailText += `  Type: File Reference\n  Path: ${finding.data.path}\n`;
+                                        if (finding.data.description) findingDetailText += `  Description: ${finding.data.description}\n`;
+                                        if (includeRawContentForReferencedFindings && finding.data.contentSample) {
+                                            findingDetailText += `  Content Sample:\n${finding.data.contentSample}\n`;
+                                        } else if (includeRawContentForReferencedFindings && !finding.data.contentSample) {
+                                            findingDetailText += `  Content Sample: (Not available or raw content not included)\n`;
+                                        }
+                                    } else if (finding.type === 'text_block' && finding.data && typeof finding.data === 'string') {
+                                        findingDetailText += `  Type: Text Block\n  Content: ${finding.data}\n`;
+                                    } else if (includeRawContentForReferencedFindings && finding.data?.type === 'reference_to_raw_content' && finding.data.rawContentPath) {
+                                        try {
+                                            const rawContent = await this.loadMemory(taskStateDirPath, finding.data.rawContentPath, {defaultValue:null});
+                                            findingDetailText += (rawContent || finding.data.preview || JSON.stringify(finding.data)) + "\n";
+                                        } catch (e) {
+                                            console.warn(`Failed to load raw content for finding ${finding.id || finding.data.rawContentPath}: ${e.message}`);
+                                            findingDetailText += (finding.data.preview || JSON.stringify(finding.data)) + "\n";
+                                        }
+                                    } else {
+                                        findingDetailText += `  Type: ${finding.type || 'Generic'}\n  Data: ${finding.data?.preview || JSON.stringify(finding.data)}\n`;
+                                    }
+
+                                    const fullFindingText = findingHeaderText + findingDetailText + findingSeparator;
+                                    const findingTokens = countTokens(fullFindingText);
+
+                                    // Check if this finding can fit in the *overall remaining budget* for the mega context
+                                    // This is a soft check; the final block addition is the hard check.
+                                    if (currentBlockTokens + findingTokens < remainingTokenBudget * 1.2) { // Allow slight overage for the block, will be checked finally
+                                       findingsBlockContent += fullFindingText;
+                                       currentBlockTokens += findingTokens;
+                                       findingsAddedCount++;
+                                    } else {
+                                        findingsBlockContent += "\n(Some findings omitted due to token limit for the findings block)";
+                                        break;
+                                    }
+                                }
+
+                                if (findingsBlockContent) {
+                                    const fullBlock = getSeparator() + sectionTitle + additionalTitleInfo + "\n" + findingsBlockContent;
+                                    // addPartToContext will check the token budget for the entire block.
+                                    if (!addPartToContext(fullBlock)) {
+                                        console.warn("MegaContext: Key findings block was too large to fit. Not included.");
+                                        // Potentially try to add just the title if that's useful and fits
+                                        const titleOnlyBlock = getSeparator() + sectionTitle + additionalTitleInfo + "\n(Findings content omitted due to token limit)";
+                                        addPartToContext(titleOnlyBlock); // Best effort
+                                    }
+                                }
+                            } else if (maxLatestKeyFindings > 0) { // No findings to process, but we might have tried (e.g. query returned nothing)
+                                const noFindingsText = queryProvided
+                                    ? `(No key findings matched your query: "${keyFindingsRelevanceQuery}")`
+                                    : "(No key findings found)";
+                                const fullBlock = getSeparator() + sectionTitle + additionalTitleInfo + "\n" + noFindingsText;
+                                addPartToContext(fullBlock); // Best effort to add the "no findings" message
+                            }
+                        }
+                        break;
                 }
             }
 
             // Construct the final context string with preamble and postamble
-            let finalContextString = preambleText + contextParts.join("") + postambleText;
+            let finalContextString = preambleText + contextParts.join("") + (contextParts.length > 0 && contextParts.join("").trim() !== "" ? "\n\n" : "") + postambleText;
             const finalTokenCount = countTokens(finalContextString);
 
             // Final check against token limit
