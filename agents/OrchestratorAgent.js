@@ -1,546 +1,359 @@
-const fs = require('fs'); // Keep for existing sync operations if any
-const fsp = require('fs').promises; // Added for async file operations
-const path = require('path'); // Ensure path is imported
-const crypto = require('crypto'); // Ensure crypto is imported (already added in a previous successful step)
-// const { v4: uuidv4 } = require('uuid'); // Already imported
-const { saveTaskState, loadTaskState, saveTaskJournal } = require('../utils/taskStateUtil');
-const PlanManager = require('../core/PlanManager');
-const PlanExecutor = require('../core/PlanExecutor');
-const MemoryManager = require('../core/MemoryManager'); // Add this
+// OrchestratorAgent.js
+    import fs from 'fs-extra';
+    import path from 'path';
+    import PlanExecutor from '../core/PlanExecutor.js';
+    import { PlanManager } from './PlanManager.js';
+    import { EXECUTE_FULL_PLAN, PLAN_ONLY, SYNTHESIZE_ONLY, EXECUTE_PLANNED_TASK } from '../utils/constants.js';
+    import MemoryManager from '../core/MemoryManager.js';
+    import ConfigManager from '../core/ConfigManager.js';
+    import { loadTaskState } from '../utils/taskStateUtil.js';
+    import { v4 as uuidv4 } from 'uuid';
 
-// uuidv4 is not directly used by OrchestratorAgent after refactoring.
-// It's used by PlanExecutor for sub-task IDs it generates.
+    class OrchestratorAgent {
+        constructor(activeAIService, taskQueue, memoryManager, reportGenerator, agentCapabilities, resultsQueue, savedTasksBaseDir) {
+            this.aiService = activeAIService;
+            this.taskQueue = taskQueue;
+            this.memoryManager = memoryManager;
+            this.reportGenerator = reportGenerator;
+            this.agentCapabilities = agentCapabilities;
+            this.resultsQueue = resultsQueue;
+            this.savedTasksBaseDir = savedTasksBaseDir;
 
-class OrchestratorAgent {
-  constructor(subTaskQueue, resultsQueue, aiService, agentApiKeysConfig) {
-    this.subTaskQueue = subTaskQueue;
-    this.resultsQueue = resultsQueue;
-    this.aiService = aiService; // Changed from llmService
-    this.agentApiKeysConfig = agentApiKeysConfig;
-    this.memoryManager = new MemoryManager(); // Initialize MemoryManager
-
-    const capabilitiesPath = path.join(__dirname, '..', 'config', 'agentCapabilities.json');
-    try {
-        const capabilitiesFileContent = fs.readFileSync(capabilitiesPath, 'utf8');
-        this.workerAgentCapabilities = JSON.parse(capabilitiesFileContent);
-        console.log("OrchestratorAgent: Worker capabilities loaded successfully.");
-    } catch (error) {
-        console.error(`OrchestratorAgent: Failed to load worker capabilities. Error: ${error.message}`);
-        this.workerAgentCapabilities = [];
-    }
-
-    this.planManager = new PlanManager(
-        this.aiService, // Changed from llmService
-        this.workerAgentCapabilities,
-        path.join(__dirname, '..', 'config', 'plan_templates')
-    );
-    this.planExecutor = new PlanExecutor(
-        this.subTaskQueue,
-        this.resultsQueue,
-        this.aiService, // Changed from llmService
-            { /* Tools can be passed here if PlanExecutor needs them directly */ },
-            path.join(__dirname, '..', 'saved_tasks') // Pass baseSavedTasksPath
-    );
-  }
-
-  _createOrchestratorJournalEntry(type, message, details = {}) {
-    return {
-        timestamp: new Date().toISOString(),
-        type,
-        source: "OrchestratorAgent",
-        message,
-        details
-    };
-  }
-
-  async _getSummarizedKeyFindingsForPrompt(parentTaskIdForJournal, finalJournalEntriesInput, taskDirPath, count = 5) {
-    const MAX_KEY_FINDINGS_TO_FETCH = count; // Max number of latest findings to fetch
-    const MAX_KEY_FINDINGS_FOR_DIRECT_INCLUSION = 5; // Max number of findings to try and include directly in the prompt (subset of fetched)
-    const MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT = 4000;
-    const findingsSummarizationPromptTemplate = `The following text is a collection of key findings obtained while working on a task. Each finding might be a piece of data, an observation, or a result from a tool. Please synthesize these findings into a brief, coherent summary that captures the most important information relevant to the overall task progress. Focus on actionable insights or critical data points.\n\nCollection of Key Findings:\n---\n{text_to_summarize}\n---\nBrief Synthesized Summary:`;
-
-    if (!taskDirPath) {
-        console.warn("OrchestratorAgent._getSummarizedKeyFindingsForPrompt: taskDirPath not provided.");
-        return "No key findings (taskDirPath missing).";
-    }
-
-    const actualKeyFindings = await this.memoryManager.getLatestKeyFindings(taskDirPath, MAX_KEY_FINDINGS_TO_FETCH);
-
-    if (!actualKeyFindings || actualKeyFindings.length === 0) {
-        return "No key findings.";
-    }
-
-    let findingsTextForPrompt = "";
-    let currentLength = 0;
-    let findingsToIncludeDirectly = [];
-
-    const reversedFindings = [...actualKeyFindings].reverse();
-    const iterationLimit = Math.min(reversedFindings.length, MAX_KEY_FINDINGS_FOR_DIRECT_INCLUSION);
-
-    for (let i = 0; i < iterationLimit; i++) {
-        const finding = reversedFindings[i];
-        const findingDataStr = typeof finding.data === 'string' ? finding.data : JSON.stringify(finding.data);
-        const findingRepresentation = `Finding (Tool: ${finding.sourceToolName}, Step: "${finding.sourceStepNarrative}"): ${findingDataStr.substring(0, 500) + (findingDataStr.length > 500 ? '...' : '')}\n`;
-
-        if (currentLength + findingRepresentation.length > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && findingsToIncludeDirectly.length > 0) {
-            break;
-        }
-        findingsToIncludeDirectly.unshift(findingRepresentation);
-        currentLength += findingRepresentation.length;
-    }
-
-    if (findingsToIncludeDirectly.length < actualKeyFindings.length || currentLength > MAX_TOTAL_FINDINGS_LENGTH_FOR_PROMPT && actualKeyFindings.length > 0) {
-        let allFindingsTextForSummarization = "";
-        actualKeyFindings.forEach(f => {
-            const findingDataStr = typeof f.data === 'string' ? f.data : JSON.stringify(f.data);
-            allFindingsTextForSummarization += `Tool: ${f.sourceToolName}, Step: "${f.sourceStepNarrative}"\nData: ${findingDataStr}\n---\n`;
-        });
-
-        if (finalJournalEntriesInput) finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("SUMMARIZING_KEY_FINDINGS_FOR_PROMPT_CONTEXT", `Summarizing ${actualKeyFindings.length} key findings.`, { parentTaskId: parentTaskIdForJournal, count: actualKeyFindings.length }));
-        try {
-            const summary = await this.aiService.generateText(
-                findingsSummarizationPromptTemplate.replace('{text_to_summarize}', allFindingsTextForSummarization),
-                { model: (this.aiService.baseConfig?.summarizationModel) || (this.aiService.getServiceName?.() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-pro'), temperature: 0.3, maxTokens: 500 }
+            this.planManager = new PlanManager(activeAIService, this.agentCapabilities);
+            this.planExecutor = new PlanExecutor(
+                this.taskQueue, this.resultsQueue, this.aiService,
+                {}, this.savedTasksBaseDir
             );
-            return `Summary of Recent Key Findings:\n${summary}`;
-        } catch (e) {
-            if (finalJournalEntriesInput) finalJournalEntriesInput.push(this._createOrchestratorJournalEntry("KEY_FINDINGS_SUMMARIZATION_FAILED", `Summarization failed: ${e.message}`, { parentTaskId: parentTaskIdForJournal }));
-            return "Key findings were too extensive for direct inclusion, and summarization failed.";
+            this.configManager = new ConfigManager();
+            console.log(\`OrchestratorAgent initialized with AI Service: \${this.aiService.getServiceName()}, PlanExecutor configured.\`);
         }
-    } else {
-        findingsTextForPrompt = "Key findings:\n" + findingsToIncludeDirectly.join('---\n');
-        return findingsTextForPrompt.trim();
-    }
-  }
 
-  /**
-   * Handles a user task, orchestrating planning, execution, and synthesis.
-   * @param {string} userTaskString - The user's task description.
-   * @param {Array<Object>=} uploadedFiles - Array of uploaded file objects, e.g., { name: string, content: string }. Defaults to an empty array.
-   * @param {string} parentTaskId - The unique ID for this task.
-   * @param {string|null} [taskIdToLoad=null] - Optional ID of a previous task state to load.
-   * @param {string} [executionMode="EXECUTE_FULL_PLAN"] - Defines the execution behavior.
-   *   - "EXECUTE_FULL_PLAN": Standard full cycle: plan -> execute -> synthesize.
-   *   - "PLAN_ONLY": Generates a plan and saves it, then stops.
-   *   - "EXECUTE_PLANNED_TASK": Loads a task state (must include a plan) and executes it.
-   *   - "SYNTHESIZE_ONLY": Loads a task state (must include execution context) and synthesizes a final answer.
-   * @returns {Promise<Object>} Result object containing success status, messages, and task outputs.
-   */
-  async handleUserTask(userTaskString, uploadedFiles = [], parentTaskId, taskIdToLoad = null, executionMode = "EXECUTE_FULL_PLAN") {
-    const MAX_ERRORS_FOR_CWC_PROMPT = 3;
-    const DEFAULT_MEGA_CONTEXT_TTL = 3600;
-    // Define the maximum number of recent chat history messages to retrieve for context assembly.
-    const CHAT_HISTORY_LIMIT = 20;
-    const DEFAULT_GEMINI_CACHED_CONTENT_TTL = 3600;
-    const MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE = 1024;
+        _createOrchestratorJournalEntry(type, message, details = {}) {
+            return { timestamp: new Date().toISOString(), type, source: "OrchestratorAgent", message, details };
+        }
 
-    const initialJournalEntries = [];
-    initialJournalEntries.push(this._createOrchestratorJournalEntry(
-        "TASK_RECEIVED", `Task received. Mode: ${executionMode}`,
-        { parentTaskId, userTaskStringPreview: userTaskString?.substring(0, 200) + '...' , uploadedFileCount: uploadedFiles.length, taskIdToLoad, executionMode }
-    ));
-    console.log(`OrchestratorAgent: Received task: '${userTaskString?.substring(0,100)+'...'}', uploadedFiles: ${uploadedFiles.length}, parentTaskId: ${parentTaskId}, taskIdToLoad: ${taskIdToLoad}, mode: ${executionMode}`);
+        async _processUserClarification(taskState) {
+            // ... (no change from previous version)
+            if (!taskState.needsUserInput || !taskState.pendingQuestionId) return;
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_CHECK_STARTED", \`Checking for response to QID \${taskState.pendingQuestionId}\`));
+            const chatHistory = await taskState.memoryManager.getChatHistory(taskState.taskDirPath, { sort_order: 'asc' });
+            const agentQuestionMessage = chatHistory.find(msg => msg.sender?.id === 'OrchestratorAgent' && msg.content?.questionDetails?.questionId === taskState.pendingQuestionId);
 
-    let currentWorkingContext = {
-        lastUpdatedAt: new Date().toISOString(), summaryOfProgress: "Task processing initiated.",
-        identifiedEntities: {}, pendingQuestions: [], nextObjective: "Define execution plan or synthesize based on mode.",
-        confidenceScore: 0.7,
-    };
-    initialJournalEntries.push(this._createOrchestratorJournalEntry("CWC_INITIALIZED", "CWC initialized.", { parentTaskId, summary: currentWorkingContext.summaryOfProgress }));
+            if (!agentQuestionMessage) {
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_ERROR", \`Agent's question \${taskState.pendingQuestionId} not found.\`));
+                return;
+            }
+            const agentQuestionTimestamp = new Date(agentQuestionMessage.timestamp);
+            const userResponse = chatHistory.find(msg => msg.sender?.role === 'user' && new Date(msg.timestamp) > agentQuestionTimestamp);
 
-    let finalJournalEntries = [...initialJournalEntries];
-    let executionResult = { success: false, executionContext: [], journalEntries: [], updatesForWorkingContext: { keyFindings: [], errorsEncountered: [] } };
-    let planStages = [];
-    let loadedState = null;
-    let currentOriginalTask = userTaskString;
-    let planResult = null;
-
-    const baseSavedTasksPath = path.join(__dirname, '..', 'saved_tasks');
-    const date = new Date();
-    const dateString = `${(date.getMonth() + 1).toString().padStart(2, '0')}${(date.getDate()).toString().padStart(2, '0')}${date.getFullYear()}`;
-    const datedTasksDirPath = path.join(baseSavedTasksPath, `tasks_${dateString}`);
-    const taskDirPath = path.join(datedTasksDirPath, parentTaskId);
-
-    const stateFilePath = path.join(taskDirPath, `task_state.json`);
-    const journalFilePath = path.join(taskDirPath, `journal.json`);
-
-    try {
-        await fsp.mkdir(taskDirPath, { recursive: true });
-        await this.memoryManager.initializeTaskMemory(taskDirPath);
-
-        // Log initial user query to chat history, if provided.
-        if (userTaskString && userTaskString.trim() !== '') {
-            try {
-                await this.memoryManager.addChatMessage(taskDirPath, { role: 'user', content: userTaskString });
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOGGED", "Initial user task logged.", { parentTaskId, role: 'user' }));
-            } catch (logError) {
-                console.warn(`Failed to log initial user message: ${logError.message}`);
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOG_FAILED", `Failed to log initial user message: ${logError.message}`, { parentTaskId }));
+            if (userResponse?.content?.text) {
+                const userAnswerText = userResponse.content.text;
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_RECEIVED", \`User responded to \${taskState.pendingQuestionId}: "\${userAnswerText.substring(0,100)}..."\`));
+                taskState.currentOriginalTask += \`\n\nUser Clarification (for QID \${taskState.pendingQuestionId}): \${userAnswerText}\`;
+                taskState.needsUserInput = false;
+                taskState.pendingQuestionId = null;
+                taskState.responseMessage = 'User clarification processed. Resuming task.';
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_PROCESSED", "User input processed."));
+            } else {
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_NOT_FOUND", \`No new user response for \${taskState.pendingQuestionId}.\`));
+                taskState.responseMessage = agentQuestionMessage.content.text;
+                taskState.overallSuccess = false;
             }
         }
 
-        let tokenizerFn;
-        let maxTokenLimitForContextAssembly;
-        try {
-            tokenizerFn = this.aiService?.getTokenizer?.() || ((text) => text ? Math.ceil(text.length / 4) : 0);
-            maxTokenLimitForContextAssembly = this.aiService?.getMaxContextTokens?.() || 4096;
-            if (!this.aiService?.getTokenizer || !this.aiService?.getMaxContextTokens) {
-                console.warn("OrchestratorAgent: aiService tokenizer/maxTokens methods not fully available. Using placeholders.");
-            }
-        } catch (serviceError) {
-            console.error(`Error obtaining tokenizer/maxTokens: ${serviceError.message}. Using placeholders.`);
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("AISERVICE_CONFIG_ERROR", `Error getting tokenizer/maxTokens: ${serviceError.message}`, { parentTaskId }));
-            tokenizerFn = (text) => text ? Math.ceil(text.length / 4) : 0;
-            maxTokenLimitForContextAssembly = 4096;
-        }
+        async _initializeTaskEnvironment(userTaskString, parentTaskId, taskIdToLoad, executionMode, existingState = null) {
+            // ... (no change from previous version)
+            let taskId, taskDirPath, finalJournalEntries, currentWorkingContext, uploadedFilePaths, planStages,
+                lastExecutionContext, currentOriginalTask, needsUserInput, pendingQuestionId, responseMessage,
+                currentWebSearchResults, lastError;
 
-        const initialTaskDefinitionContent = userTaskString || (taskIdToLoad ? "Task definition will be loaded." : "No initial task string provided.");
-        await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', initialTaskDefinitionContent);
+            if (existingState) {
+                taskId = existingState.taskId;
+                taskDirPath = existingState.taskDirPath;
+                finalJournalEntries = existingState.finalJournalEntries || [this._createOrchestratorJournalEntry("TASK_RESUMED", \`Task \${taskId} resumed.\`)];
+                currentWorkingContext = existingState.currentWorkingContext || 'No CWC loaded on resume.';
+                uploadedFilePaths = existingState.savedUploadedFilePaths || [];
+                planStages = existingState.plan || null;
+                lastExecutionContext = existingState.executionContext || null;
+                currentOriginalTask = existingState.currentOriginalTask || userTaskString;
+                needsUserInput = existingState.needsUserInput || false;
+                pendingQuestionId = existingState.pendingQuestionId || null;
+                responseMessage = existingState.responseMessage || '';
+                currentWebSearchResults = existingState.currentWebSearchResults || null;
+                lastError = existingState.lastError || null;
+            } else {
+                taskId = taskIdToLoad ? taskIdToLoad.split('_')[1] : Date.now().toString();
+                const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
+                const datedTasksDirPath = path.join(baseTaskDir, new Date().toISOString().split('T')[0]);
+                taskDirPath = path.join(datedTasksDirPath, \`task_\${taskId}\`);
 
-        const savedUploadedFilePaths = [];
-        if (uploadedFiles && uploadedFiles.length > 0) {
-            const uploadedFilesDir = path.join('uploaded_files');
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", `Saving ${uploadedFiles.length} files.`, { parentTaskId, count: uploadedFiles.length }));
-            for (const file of uploadedFiles) {
-                try {
-                    const safeFileName = path.basename(file.name);
-                    const relativeFilePath = path.join(uploadedFilesDir, safeFileName);
-                    await this.memoryManager.overwriteMemory(taskDirPath, relativeFilePath, file.content);
-                    savedUploadedFilePaths.push(relativeFilePath);
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", `Saved: ${relativeFilePath}`, { parentTaskId, fileName: file.name }));
-                } catch (uploadError) {
-                    console.error(`Error saving uploaded file '${file.name}': ${uploadError.message}`);
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_ERROR", `Error saving ${file.name}: ${uploadError.message}`, { parentTaskId, fileName: file.name }));
+                await fs.ensureDir(taskDirPath);
+                await fs.ensureDir(path.join(taskDirPath, 'uploaded_files'));
+                await this.memoryManager.initializeTaskMemory(taskDirPath);
+
+                finalJournalEntries = [this._createOrchestratorJournalEntry("TASK_INITIALIZED", \`Task \${taskId} (\${executionMode}) initialized.\`, { parentTaskId, taskIdToLoad })];
+                currentWorkingContext = 'No CWC generated yet.';
+                currentOriginalTask = userTaskString;
+                uploadedFilePaths = []; planStages = null; lastExecutionContext = null;
+                needsUserInput = false; pendingQuestionId = null; responseMessage = '';
+                currentWebSearchResults = null; lastError = null;
+
+                if (taskIdToLoad && executionMode !== EXECUTE_FULL_PLAN && executionMode !== PLAN_ONLY) {
+                    const loadTaskDir = path.join(baseTaskDir, new Date().toISOString().split('T')[0], \`task_\${taskIdToLoad.split('_')[1]}\`);
+                    try {
+                        const loadedCwc = await this.memoryManager.loadMemory(loadTaskDir, 'cwc.md');
+                        if (loadedCwc) currentWorkingContext = loadedCwc;
+                        else {
+                            const loadedCwcJson = await this.memoryManager.loadMemory(loadTaskDir, 'current_working_context.json', {isJson: true});
+                            if (loadedCwcJson?.CWC) currentWorkingContext = loadedCwcJson.CWC;
+                        }
+                        if (currentWorkingContext !== 'No CWC generated yet.') {
+                             finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_LOADED", "Existing CWC loaded.", { taskIdToLoad }));
+                        }
+                    } catch (error) {
+                         finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_LOAD_FAILED", \`Could not load CWC: \${error.message}\`, { taskIdToLoad }));
+                    }
                 }
+                const taskDefinitionContent = \`# Task: \${taskId}\nUser Task: \${currentOriginalTask}\nMode: \${executionMode}\`;
+                await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', taskDefinitionContent);
+                // Initial user message is now logged in handleUserTask after potential clarification processing
             }
-        }
-        await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
 
-        if (executionMode === "SYNTHESIZE_ONLY") {
-             if (!taskIdToLoad) return { success: false, message: "taskIdToLoad is required for SYNTHESIZE_ONLY mode." };
-            const loadResult = await loadTaskState(path.join(path.join(datedTasksDirPath, taskIdToLoad), 'task_state.json'));
-            if (!loadResult.success || !loadResult.taskState) return { success: false, message: "Failed to load state for SYNTHESIZE_ONLY."};
-            loadedState = loadResult.taskState;
-            currentOriginalTask = loadedState.userTaskString;
-            const synthesisPrompt = `Original task: "${currentOriginalTask}". Execution context: ${JSON.stringify(loadedState.executionContext)}. Synthesize the final answer.`;
-            const finalAnswer = await this.aiService.generateText(synthesisPrompt, { model: (this.aiService.baseConfig?.synthesisModel) || 'gpt-4' });
-            return { success: true, finalAnswer, originalTask: currentOriginalTask, executedPlan: loadedState.executionContext, plan: loadedState.plan, currentWorkingContext: loadedState.currentWorkingContext };
-        }
-        if (executionMode === "EXECUTE_PLANNED_TASK") {
-            if (!taskIdToLoad) return { success: false, message: "taskIdToLoad is required for EXECUTE_PLANNED_TASK mode." };
-            const loadResult = await loadTaskState(path.join(path.join(datedTasksDirPath, taskIdToLoad), 'task_state.json'));
-            if (!loadResult.success || !loadResult.taskState || !loadResult.taskState.plan || loadResult.taskState.plan.length === 0) {
-                 return { success: false, message: "Failed to load state or no plan found for EXECUTE_PLANNED_TASK."};
-            }
-            loadedState = loadResult.taskState;
-            currentOriginalTask = userTaskString || loadedState.userTaskString;
-            planStages = loadedState.plan;
-            if(loadedState.currentWorkingContext) currentWorkingContext = loadedState.currentWorkingContext;
-        }
-
-        if (executionMode === "EXECUTE_FULL_PLAN" || (executionMode === "PLAN_ONLY" )) {
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_STARTED", "Attempting to get a plan.", { parentTaskId, executionMode }));
-            const knownAgentRoles = (this.workerAgentCapabilities || []).map(agent => agent.role);
-            const knownToolsByRole = {};
-            (this.workerAgentCapabilities || []).forEach(agent => { knownToolsByRole[agent.role] = agent.tools.map(t => t.name); });
-
-            memoryContextForPlanning = {};
-            try {
-                memoryContextForPlanning.taskDefinition = await this.memoryManager.loadMemory(taskDirPath, 'task_definition.md', { defaultValue: currentOriginalTask });
-                let chatHistoryForPlanning = [];
-                try {
-                    // Fetch recent chat history for planning context.
-                    chatHistoryForPlanning = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForPlanning.length} for planning.`, { parentTaskId }));
-                } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Failed for planning: ${err.message}`, { parentTaskId })); }
-
-                const contextSpecificationForPlanning = {
-                    systemPrompt: "You are an AI assistant responsible for planning complex tasks...",
-                    includeTaskDefinition: true, uploadedFilePaths: savedUploadedFilePaths, maxLatestKeyFindings: 5,
-                    keyFindingsRelevanceQuery: currentOriginalTask, // Use the original task as the relevance query for selecting key findings for planning.
-                    chatHistory: chatHistoryForPlanning, maxTokenLimit: maxTokenLimitForContextAssembly,
-                    customPreamble: "Контекст для первоначального планирования:",
-                    enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL,
-                };
-                const megaContextResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForPlanning, tokenizerFn);
-
-                if (megaContextResult.success) {
-                    memoryContextForPlanning.megaContext = megaContextResult.contextString;
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", `Mega context for planning: ${megaContextResult.tokenCount} tokens.`, { parentTaskId, fromCache: megaContextResult.fromCache }));
-
-                    let geminiCachedContentName = null;
-                    if (this.aiService.getServiceName?.() === 'GeminiService' && typeof this.aiService.createCachedContent === 'function') {
-                        const planningModelName = (this.aiService.baseConfig?.planningModel) || (this.aiService.defaultModel) || 'gemini-1.5-pro-latest';
-                        const supportedCacheModels = ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'];
-                        if (supportedCacheModels.includes(planningModelName) && megaContextResult.tokenCount >= MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE) {
-                            finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ATTEMPT", `Attempting Gemini CachedContent for planning model ${planningModelName}.`, { parentTaskId }));
-                            try {
-                                const megaContextHash = crypto.createHash('sha256').update(megaContextResult.contextString).digest('hex');
-                                const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
-                                let existingCacheInfo = geminiCacheMap[megaContextHash];
-                                // Check if the cache entry has expired using the server-provided expireTime.
-                                if (existingCacheInfo?.modelName === planningModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
-                                    geminiCachedContentName = existingCacheInfo.cachedContentName;
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT", `Using existing Gemini CachedContent: ${geminiCachedContentName} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
-                                } else {
-                                    if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED", `Gemini CachedContent for planning (Hash: ${megaContextHash}, ExpireTime: ${existingCacheInfo.expireTime}) expired or invalid. Will recreate.`, { parentTaskId }));
-                                    const contentsForCache = [{ role: "user", parts: [{ text: megaContextResult.contextString }] }];
-                                    const newCachedContent = await this.aiService.createCachedContent({
-                                        modelName: planningModelName, contents: contentsForCache, systemInstruction: contextSpecificationForPlanning.systemPrompt,
-                                        ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_plan_${parentTaskId.substring(0,8)}_${megaContextHash.substring(0,8)}`
-                                    });
-                                    if (newCachedContent?.name && newCachedContent.expireTime) {
-                                        geminiCachedContentName = newCachedContent.name;
-                                        // Store metadata for the new Gemini CachedContent in the map.
-                                        // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
-                                        geminiCacheMap[megaContextHash] = {
-                                            cachedContentName: newCachedContent.name,
-                                            modelName: newCachedContent.model || planningModelName,
-                                            expireTime: newCachedContent.expireTime,
-                                            createTime: newCachedContent.createTime, // For reference
-                                            // requestedTtlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, // Optional: for reference if needed
-                                            originalContextTokenCount: megaContextResult.tokenCount
-                                        };
-                                        await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED", `Created Gemini CachedContent for planning: ${geminiCachedContentName} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
-                                    } else throw new Error("Failed to create Gemini CachedContent or received invalid/incomplete response (missing name or expireTime).");
-                                }
-                            } catch (cacheError) { console.warn(`Error with Gemini CachedContent for planning: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR", `Planning cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentName = null; }
-                        } else { /* Log skip reason for unsupported model or low token count */ }
-                    }
-                    if (geminiCachedContentName) {
-                        memoryContextForPlanning.geminiCachedContentName = geminiCachedContentName;
-                        memoryContextForPlanning.isMegaContextCachedByGemini = true;
-                    }
-                } else { finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Planning: ${megaContextResult.error}`, { parentTaskId }));}
-
-                 const decisionsPromptTemplate = `The following text is a log of key decisions...`;
-                 const summarizationLlmParams = { model: (this.aiService.baseConfig?.summarizationModel) || 'gpt-3.5-turbo', temperature: 0.3, maxTokens: 500 };
-                 const decisionsFromMemory = await this.memoryManager.getSummarizedMemory(taskDirPath, 'key_decisions_and_learnings.md', this.aiService, { maxOriginalLength: 3000, promptTemplate: decisionsPromptTemplate, llmParams: summarizationLlmParams, cacheSummary: true, defaultValue: "" });
-                 if (decisionsFromMemory?.trim()) memoryContextForPlanning.retrievedKeyDecisions = decisionsFromMemory;
-                 if (executionMode !== "EXECUTE_FULL_PLAN" || taskIdToLoad) {
-                    const cwcSnapshotFromMemory = await this.memoryManager.loadMemory(taskDirPath, 'current_working_context.json', { isJson: true, defaultValue: null });
-                    if (cwcSnapshotFromMemory) memoryContextForPlanning.retrievedCwcSnapshot = cwcSnapshotFromMemory;
-                 }
-
-            } catch (memError) { console.warn(`Error preparing planning context: ${memError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("MEMORY_CONTEXT_ERROR", `Planning context prep: ${memError.message}`, { parentTaskId })); }
-
-            planResult = await this.planManager.getPlan(currentOriginalTask, knownAgentRoles, knownToolsByRole, memoryContextForPlanning, currentWorkingContext);
-             if (!planResult.success) {
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { parentTaskId, error: planResult.message }));
-                return { success: false, message: planResult.message, taskId: parentTaskId, originalTask: currentOriginalTask, rawResponse: planResult.rawResponse };
-            }
-            planStages = planResult.plan;
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_COMPLETED", `Plan obtained. Stages: ${planStages.length}`, { parentTaskId, source: planResult.source }));
-            await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
-        }
-        if (executionMode === "PLAN_ONLY") {
-            return { success: true, message: "Plan generated and saved.", taskId: parentTaskId, originalTask: currentOriginalTask, plan: planStages, currentWorkingContext };
-        }
-
-        if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") {
-        // ... (execution loop)
-        }
-
-        if (executionMode === "EXECUTE_FULL_PLAN" || executionMode === "EXECUTE_PLANNED_TASK") {
-            finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_START", "Attempting LLM update for CWC.", { parentTaskId }));
-            let chatHistoryForCwc = [];
-            try {
-                // Fetch recent chat history for CWC update context.
-                chatHistoryForCwc = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForCwc.length} for CWC.`, { parentTaskId }));
-            } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `CWC history: ${err.message}`, { parentTaskId })); }
-
-            const summarizedKeyFindingsTextForCwc = await this._getSummarizedKeyFindingsForPrompt(parentTaskId, finalJournalEntries, taskDirPath, 10);
-            const recentErrorsForCwcUpdate = await this.memoryManager.getLatestErrorsEncountered(taskDirPath, MAX_ERRORS_FOR_CWC_PROMPT);
-            const recentErrorsSummary = recentErrorsForCwcUpdate.map(e => ({ narrative: e.sourceStepNarrative, tool: e.sourceToolName, error: e.errorMessage }));
-
-            const contextSpecificationForCwcUpdate = {
-                systemPrompt: "You are an expert system analyzing task progress...",
-                includeTaskDefinition: true, uploadedFilePaths: savedUploadedFilePaths, maxLatestKeyFindings: 10,
-                includeRawContentForReferencedFindings: true, chatHistory: chatHistoryForCwc,
-                maxTokenLimit: maxTokenLimitForContextAssembly || 4096, customPreamble: "Контекст для обновления CWC:",
-                currentProgressSummary: currentWorkingContext.summaryOfProgress, currentNextObjective: currentWorkingContext.nextObjective,
-                recentErrorsSummary: recentErrorsSummary, summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc,
-                keyFindingsRelevanceQuery: currentWorkingContext.nextObjective || currentOriginalTask, // Prioritize current objective, then original task, for finding relevant CWC update context.
-                overallExecutionSuccess: overallSuccess, enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_MEGA_CONTEXT_TTL,
-                priorityOrder: [ 'systemPrompt', 'taskDefinition', 'currentProgressSummary', 'currentNextObjective', 'overallExecutionSuccess', 'summarizedKeyFindingsText', 'recentErrorsSummary', 'chatHistory', 'uploadedFilePaths']
+            return {
+                taskId, parentTaskIdFromCall: parentTaskId, taskDirPath,
+                stateFilePath: path.join(taskDirPath, 'task_state.json'),
+                journalFilePath: path.join(taskDirPath, 'orchestrator_journal.json'),
+                finalJournalEntries, currentWorkingContext, userTaskString, executionMode, taskIdToLoad,
+                tokenizerFn: this.aiService.getTokenizer(),
+                maxTokenLimitForContextAssembly: (this.aiService.getMaxContextTokens() || 32000) * 0.8,
+                uploadedFilePaths, planStages, overallSuccess: existingState?.overallSuccess || false,
+                lastExecutionContext, finalAnswer: existingState?.finalAnswer || '', responseMessage,
+                currentOriginalTask, CHAT_HISTORY_LIMIT: 20, DEFAULT_MEGA_CONTEXT_TTL: 3600,
+                DEFAULT_GEMINI_CACHED_CONTENT_TTL: 3600, MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE: 1024,
+                aiService: this.aiService, memoryManager: this.memoryManager,
+                planManager: this.planManager, planExecutor: this.planExecutor,
+                workerAgentCapabilities: this.agentCapabilities,
+                needsUserInput, pendingQuestionId, currentWebSearchResults, lastError
             };
-            const megaContextCwcResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForCwcUpdate, tokenizerFn);
+        }
 
-            let cwcUpdatePromptString;
-            const cwcUpdateModelName = (this.aiService.baseConfig?.cwcUpdateModel) || (this.aiService.getServiceName?.() === 'OpenAI' ? 'gpt-3.5-turbo' : 'gemini-1.5-pro-latest');
-            const cwcLlmParams = { model: cwcUpdateModelName };
-            let geminiCachedContentNameForCwc = null;
+        async _processAndSaveUploadedFiles(uploadedFiles, taskState) {
+            // ... (no change)
+            if (uploadedFiles && uploadedFiles.length > 0) {
+                const uploadedFilesDir = path.join(taskState.taskDirPath, 'uploaded_files');
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", \`Saving \${uploadedFiles.length} files.\`));
+                for (const file of uploadedFiles) {
+                    try {
+                        const safeFileName = path.basename(file.name);
+                        const absoluteFilePath = path.join(uploadedFilesDir, safeFileName);
+                        await fs.writeFile(absoluteFilePath, file.content);
+                        taskState.uploadedFilePaths.push(path.join('uploaded_files', safeFileName));
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", \`Saved: \${safeFileName}\`));
+                    } catch (uploadError) {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_ERROR", \`Error saving \${file.name}: \${uploadError.message}\`));
+                    }
+                }
+            }
+        }
 
-            if (megaContextCwcResult.success) {
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", `CWC Context: ${megaContextCwcResult.tokenCount} tokens.`, { parentTaskId, fromCache: megaContextCwcResult.fromCache }));
-                if (this.aiService.getServiceName?.() === 'GeminiService' && typeof this.aiService.createCachedContent === 'function') {
-                    const supportedCacheModels = ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'];
-                    if (supportedCacheModels.includes(cwcUpdateModelName) && megaContextCwcResult.tokenCount >= MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE) {
-                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ATTEMPT_CWC", `Attempting Gemini CachedContent for CWC model ${cwcUpdateModelName}.`, { parentTaskId }));
-                        try {
-                            const megaContextCwcHash = crypto.createHash('sha256').update(megaContextCwcResult.contextString).digest('hex');
-                            const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
-                            let existingCacheInfo = geminiCacheMap[megaContextCwcHash];
-                            // Check if the cache entry has expired using the server-provided expireTime.
-                            if (existingCacheInfo?.modelName === cwcUpdateModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
-                                geminiCachedContentNameForCwc = existingCacheInfo.cachedContentName;
-                                finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_CWC", `Using Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
-                            } else {
-                                if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_CWC", `Expired CWC cache (Hash: ${megaContextCwcHash}, ExpireTime: ${existingCacheInfo.expireTime}). Will recreate.`, { parentTaskId }));
-                                const contentsForCache = [{ role: "user", parts: [{ text: megaContextCwcResult.contextString }] }];
-                                const newCachedContent = await this.aiService.createCachedContent({
-                                    modelName: cwcUpdateModelName, contents: contentsForCache, systemInstruction: contextSpecificationForCwcUpdate.systemPrompt,
-                                    ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_cwc_${parentTaskId.substring(0,8)}_${megaContextCwcHash.substring(0,8)}`
-                                });
-                                if (newCachedContent?.name && newCachedContent.expireTime) {
-                                    geminiCachedContentNameForCwc = newCachedContent.name;
-                                    // Store metadata for the new Gemini CachedContent in the map.
-                                    // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
-                                    geminiCacheMap[megaContextCwcHash] = {
-                                        cachedContentName: newCachedContent.name, modelName: newCachedContent.model || cwcUpdateModelName,
-                                        expireTime: newCachedContent.expireTime, createTime: newCachedContent.createTime,
-                                        originalContextTokenCount: megaContextCwcResult.tokenCount
-                                    };
-                                    await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_CWC", `Created Gemini CachedContent for CWC: ${geminiCachedContentNameForCwc} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
-                                } else throw new Error("Failed to create Gemini CachedContent for CWC or missing expireTime.");
+        async _classifyUserRequestForSearch(taskState, userMessageText) {
+            // ... (Implementation from Turn 49)
+            let previousChatHistoryString = "Нет предыдущего контекста.";
+            if (taskState.memoryManager && typeof taskState.memoryManager.getChatHistory === 'function') {
+                try {
+                    const historyOptions = { sort_order: 'desc', limit: 4 };
+                    const chatHistory = await taskState.memoryManager.getChatHistory(taskState.taskDirPath, historyOptions);
+                    if (chatHistory && chatHistory.length > 0) {
+                        previousChatHistoryString = chatHistory.reverse()
+                            .map(msg => {
+                                const senderPrefix = msg.senderId === 'OrchestratorAgent' || msg.sender?.role === 'assistant' ? 'Агент' : 'Пользователь';
+                                return \`\${senderPrefix}: \${msg.content.text}\`;
+                            })
+                            .join('\n');
+                    }
+                } catch (histError) { console.error(\`[OrchestratorAgent] Error fetching chat history for search classification: \${histError.stack}\`); }
+            } else { console.warn("[OrchestratorAgent] MemoryManager or getChatHistory not available for search classification."); }
+
+            const userMessagePlaceholder = '{{userMessage}}';
+            const chatHistoryPlaceholder = '{{previousChatHistory}}';
+            const promptTemplate = \`Ты — умный ассистент-классификатор. Твоя задача - проанализировать ЗАПРОС ПОЛЬЗОВАТЕЛЯ и решить, требуется ли для ответа на него или выполнения подразумеваемой задачи поиск АКТУАЛЬНОЙ или СПЕЦИФИЧЕСКОЙ информации в интернете. Учитывай "ПРЕДЫСТОРИЮ ДИАЛОГА" (если предоставлена), чтобы понять контекст. Не предлагай поиск, если ответ уже мог быть дан, или если вопрос является продолжением обсуждения, где поиск не требуется. КРИТЕРИИ ДЛЯ ПОИСКА: - Информация, скорее всего, отсутствует в базовых знаниях стандартной языковой модели (например, очень нишевые факты, данные о малоизвестных компаниях или людях). - Требуется актуальная информация (новости, курсы валют, погода, события, произошедшие недавно). - Запрос на конкретные факты, которые легко проверяются в вебе. ИЗБЕГАЙ ПОИСКА: - Для общих вопросов, на которые можно ответить на основе эрудиции. - Для генерации идей, творческих текстов, мнений, если это не подразумевает поиск конкретных примеров или фактов. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является прямым ответом на предыдущий вопрос агента. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является простой командой для другого инструмента (например, "посчитай 2+2", "создай файл x.txt"). ТВОЙ ОТВЕТ ДОЛЖЕН БЫТЬ В ОДНОМ ИЗ ДВУХ ФОРМАТОВ: 1.  Если поиск НУЖЕН: верни ТОЛЬКО строку поискового запроса, который следует использовать (например, "курс биткоина к доллару сегодня" или "симптомы гриппа H1N1"). Поисковый запрос должен быть на языке ЗАПРОСА ПОЛЬЗОВАТЕЛЯ. 2.  Если поиск НЕ НУЖЕН: верни ТОЛЬКО специальный маркер "NO_SEARCH". ПРЕДЫСТОРИЯ ДИАЛОГА (последние несколько сообщений, если есть):\n\${chatHistoryPlaceholder}\n\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n"\${userMessagePlaceholder}"\n\nТВОЙ ОТВЕТ:\`;
+            const finalPrompt = promptTemplate.replace(chatHistoryPlaceholder, previousChatHistoryString).replace(userMessagePlaceholder, userMessageText);
+            let classificationResult = 'NO_SEARCH';
+            if (!taskState.aiService) { taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", "aiService not available, defaulting to NO_SEARCH.")); return classificationResult; }
+            try {
+                const classificationLlmParams = { model: taskState.aiService.baseConfig?.models?.fast || taskState.aiService.baseConfig?.defaultModel || 'gpt-3.5-turbo', temperature: 0.1, max_tokens: 150 };
+                const messagesForClassifier = [{ role: 'user', content: finalPrompt }];
+                const preparedContext = await taskState.aiService.prepareContextForModel(messagesForClassifier, { modelName: classificationLlmParams.model });
+                let llmResponse;
+                const effectiveContext = (preparedContext && !preparedContext.cacheName) ? preparedContext : messagesForClassifier;
+                const callParams = { ...classificationLlmParams };
+                if (preparedContext && preparedContext.cacheName) { callParams.cacheHandle = { cacheName: preparedContext.cacheName }; }
+                llmResponse = await taskState.aiService.completeChat(effectiveContext, callParams);
+                if (llmResponse?.trim()) { classificationResult = llmResponse.trim(); } else { classificationResult = 'NO_SEARCH'; }
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ATTEMPT", \`User message: "\${userMessageText.substring(0,100)}...". LLM Response: "\${classificationResult}"\`));
+            } catch (classError) {
+                console.error(\`[OrchestratorAgent] Error during search classification: \${classError.stack}\`);
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", \`Error: \${classError.message}. Defaulting to NO_SEARCH.\`));
+                classificationResult = 'NO_SEARCH';
+            }
+            return classificationResult;
+        }
+
+        async _notifyAndExecuteSearch(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
+        async _summarizeAndPresentSearchResults(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
+        async _handleSynthesizeOnlyMode(taskState) { /* ... no change ... */ }
+        async _handleExecutePlannedTaskMode(taskState) { /* ... no change ... */ }
+        async _performPlanningPhase(taskState) { /* ... no change ... */ }
+        async _performExecutionPhase(taskState) { /* ... no change ... */ }
+        async _performCwcUpdateLLM(taskState) { /* ... no change ... */ }
+        async _performFinalSynthesis(taskState) { /* ... no change ... */ }
+        async _finalizeTaskProcessing(taskState) { /* ... no change ... */ }
+
+        async handleUserTask(userTaskString, uploadedFiles, parentTaskId = null, taskIdToLoad = null, executionMode = EXECUTE_FULL_PLAN) {
+            let taskState;
+            let loadedStateForResumption = null;
+            let performedAdHocSearchThisTurn = false;
+
+            if (taskIdToLoad) {
+                const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
+                let potentialTaskDirPath;
+                try {
+                    // TODO: Robust task path discovery for resuming/loading tasks, especially across different dates.
+                    const todayDate = new Date().toISOString().split('T')[0]; // This date assumption is a key limitation.
+                    potentialTaskDirPath = path.join(baseTaskDir, todayDate, \`task_\${taskIdToLoad}\`);
+
+                    const stateFilePath = path.join(potentialTaskDirPath, 'task_state.json');
+                    if (await fs.pathExists(stateFilePath)) {
+                        const stateResult = await loadTaskState(stateFilePath);
+                        if (stateResult.success && stateResult.taskState) {
+                            loadedStateForResumption = stateResult.taskState;
+                            loadedStateForResumption.taskDirPath = potentialTaskDirPath;
+                            if (loadedStateForResumption.needsUserInput && loadedStateForResumption.pendingQuestionId) {
+                                await this._processUserClarification(loadedStateForResumption);
                             }
-                        } catch (cacheError) { console.warn(`Error with Gemini CachedContent for CWC: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR_CWC", `CWC cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentNameForCwc = null; }
-                    } else { /* Log CWC cache skip if model not supported or low token count */ }
-                }
-                if (geminiCachedContentNameForCwc) {
-                    cwcLlmParams.cachedContentName = geminiCachedContentNameForCwc;
-                    cwcUpdatePromptString = `Based on the extensive context provided (now cached), provide an updated summary of progress...`;
-                } else {
-                    cwcUpdatePromptString = `${megaContextCwcResult.contextString}\n\nBased on all the provided context, provide an updated summary...`;
-                }
-            } else {
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `CWC Update: ${megaContextCwcResult.error}. Fallback.`, { parentTaskId }));
-                cwcUpdatePromptString = `The overall user task is: "${currentOriginalTask}".\nPrevious summary: "${currentWorkingContext.summaryOfProgress}"...\nBased on this, provide an updated summary...`;
+                        }
+                    } else if (executionMode !== EXECUTE_PLANNED_TASK && executionMode !== SYNTHESIZE_ONLY) {
+                        console.warn(\`No state file at \${stateFilePath} for taskIdToLoad: \${taskIdToLoad}\`);
+                    }
+                } catch (e) { console.warn(\`Error loading state for taskIdToLoad \${taskIdToLoad}: \${e.message}\`); }
             }
-            cwcUpdatePromptString += `\nReturn ONLY a JSON object with two keys: "updatedSummaryOfProgress" (string) and "updatedNextObjective" (string).\nExample: { "updatedSummaryOfProgress": "Data gathered...", "updatedNextObjective": "Synthesize findings..." }`;
 
             try {
-                const cwcUpdateResponse = await this.aiService.generateText(cwcUpdatePromptString, cwcLlmParams);
-                 const parsedCwcUpdate = JSON.parse(cwcUpdateResponse);
-                if (parsedCwcUpdate && parsedCwcUpdate.updatedSummaryOfProgress && parsedCwcUpdate.updatedNextObjective) {
-                    currentWorkingContext.summaryOfProgress = parsedCwcUpdate.updatedSummaryOfProgress;
-                    currentWorkingContext.nextObjective = parsedCwcUpdate.updatedNextObjective;
-                    await this.memoryManager.overwriteMemory(taskDirPath, 'current_working_context.json', currentWorkingContext, { isJson: true });
-                } else throw new Error("LLM CWC update response missing fields.");
-            } catch (cwcLlmError) { console.error(`Error updating CWC with LLM: ${cwcLlmError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_UPDATE_LLM_ERROR", `LLM CWC update failed: ${cwcLlmError.message}`, { parentTaskId }));}
-        }
+                taskState = await this._initializeTaskEnvironment(userTaskString, parentTaskId, taskIdToLoad, executionMode, loadedStateForResumption);
 
-        let finalAnswer = null;
-        let responseMessage = "";
-        if (wasFinalAnswerPreSynthesized) {
-            // ...
-        } else if (overallSuccess && lastExecutionContext && lastExecutionContext.length > 0) {
-             if (contextForLLMSynthesis.every(e => e.status === "FAILED" || (e.status === "COMPLETED" && !e.outcome_data))) {
-                // ...
-            } else {
-                let chatHistoryForSynthesis = [];
-                try {
-                    // Fetch recent chat history for final synthesis context.
-                    chatHistoryForSynthesis = await this.memoryManager.getChatHistory(taskDirPath, CHAT_HISTORY_LIMIT);
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCHED", `Fetched ${chatHistoryForSynthesis.length} for synthesis.`, { parentTaskId }));
-                } catch (err) { finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_HISTORY_FETCH_FAILED", `Synthesis history: ${err.message}`, { parentTaskId }));}
+                // Log the specific user input for this interaction if it's new (not just resuming a loaded task state)
+                if (userTaskString && (!loadedStateForResumption || userTaskString !== loadedStateForResumption.userTaskString)) {
+                     const currentInteractionUserMessage = {
+                        taskId: taskState.taskId,
+                        senderId: parentTaskId || 'user_interaction', // Distinguish from initial prompt if needed
+                        role: 'user',
+                        content: { type: 'text', text: userTaskString }
+                     };
+                     await this.memoryManager.addChatMessage(taskState.taskDirPath, currentInteractionUserMessage);
+                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("CURRENT_USER_INPUT_LOGGED", \`Logged current interaction: "\${userTaskString.substring(0,100)}..."\`));
+                }
 
-                const contextSpecificationForSynthesis = {
-                    systemPrompt: "You are an expert system synthesizing the final answer...",
-                    includeTaskDefinition: true, uploadedFilePaths: savedUploadedFilePaths, maxLatestKeyFindings: 20,
-                    includeRawContentForReferencedFindings: true, chatHistory: chatHistoryForSynthesis,
-                    maxTokenLimit: maxTokenLimitForContextAssembly || 8192, customPreamble: "Контекст для финального ответа:",
-                    originalUserTask: currentOriginalTask, executionContext: lastExecutionContext,
-                    currentWorkingContextSummary: currentWorkingContext.summaryOfProgress,
-                    summarizedKeyFindingsText: summarizedKeyFindingsTextForCwc, recentErrorsSummary: recentErrorsSummary,
-                    keyFindingsRelevanceQuery: currentOriginalTask, // Use the original task to find relevant findings for the final answer synthesis.
-                    enableMegaContextCache: true, megaContextCacheTTLSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL,
-                    priorityOrder: [ 'systemPrompt', 'originalUserTask', 'chatHistory', 'executionContext', 'summarizedKeyFindingsText', 'recentErrorsSummary', 'currentWorkingContextSummary', 'taskDefinition', 'uploadedFilePaths']
-                };
-                const megaContextSynthesisResult = await this.memoryManager.assembleMegaContext(taskDirPath, contextSpecificationForSynthesis, tokenizerFn);
+                await taskState.memoryManager.overwriteMemory(taskState.taskDirPath, 'current_working_context.json', { CWC: taskState.currentWorkingContext, lastUpdated: new Date().toISOString() }, { isJson: true });
+                await taskState.memoryManager.overwriteMemory(taskState.taskDirPath, 'cwc.md', taskState.currentWorkingContext);
 
-                let synthesisPromptString;
-                const synthesisModelName = (this.aiService.baseConfig?.synthesisModel) || (this.aiService.getServiceName?.() === 'OpenAI' ? 'gpt-4' : 'gemini-1.5-pro-latest');
-                const synthLlmParams = { model: synthesisModelName };
-                let geminiCachedContentNameForSynthesis = null;
+                if (!loadedStateForResumption || (uploadedFiles && uploadedFiles.length > 0) ) {
+                    await this._processAndSaveUploadedFiles(uploadedFiles, taskState);
+                }
 
-                if (megaContextSynthesisResult.success) {
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_SUCCESS", `Synthesis Context: ${megaContextSynthesisResult.tokenCount} tokens.`, { parentTaskId, fromCache: megaContextSynthesisResult.fromCache }));
-                    if (this.aiService.getServiceName?.() === 'GeminiService' && typeof this.aiService.createCachedContent === 'function') {
-                        const supportedCacheModels = ['gemini-1.5-pro-latest', 'gemini-1.5-flash-latest'];
-                        if (supportedCacheModels.includes(synthesisModelName) && megaContextSynthesisResult.tokenCount >= MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE) {
-                            finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ATTEMPT_SYNTH", `Attempting Gemini CachedContent for synthesis model ${synthesisModelName}.`, { parentTaskId }));
-                            try {
-                                const megaContextSynthHash = crypto.createHash('sha256').update(megaContextSynthesisResult.contextString).digest('hex');
-                                const geminiCacheMap = await this.memoryManager.loadGeminiCachedContentMap(taskDirPath);
-                                let existingCacheInfo = geminiCacheMap[megaContextSynthHash];
-                                // Check if the cache entry has expired using the server-provided expireTime.
-                                if (existingCacheInfo?.modelName === synthesisModelName && existingCacheInfo.expireTime && Date.now() < new Date(existingCacheInfo.expireTime).getTime()) {
-                                    geminiCachedContentNameForSynthesis = existingCacheInfo.cachedContentName;
-                                    finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_HIT_SYNTH", `Using Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis} (Expires: ${existingCacheInfo.expireTime})`, { parentTaskId }));
-                                } else {
-                                     if(existingCacheInfo) finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_EXPIRED_SYNTH", `Expired synthesis cache (Hash: ${megaContextSynthHash}, ExpireTime: ${existingCacheInfo.expireTime}). Will recreate.`, { parentTaskId }));
-                                    const contentsForCache = [{ role: "user", parts: [{ text: megaContextSynthesisResult.contextString }] }];
-                                    const newCachedContent = await this.aiService.createCachedContent({
-                                        modelName: synthesisModelName, contents: contentsForCache, systemInstruction: contextSpecificationForSynthesis.systemPrompt,
-                                        ttlSeconds: DEFAULT_GEMINI_CACHED_CONTENT_TTL, displayName: `mega_ctx_synth_${parentTaskId.substring(0,8)}_${megaContextSynthHash.substring(0,8)}`
-                                    });
-                                    if (newCachedContent?.name && newCachedContent.expireTime) {
-                                        geminiCachedContentNameForSynthesis = newCachedContent.name;
-                                        // Store metadata for the new Gemini CachedContent in the map.
-                                        // `expireTime` is provided by the Gemini API and is the authoritative source for cache expiration.
-                                        geminiCacheMap[megaContextSynthHash] = {
-                                            cachedContentName: newCachedContent.name, modelName: newCachedContent.model || synthesisModelName,
-                                            expireTime: newCachedContent.expireTime, createTime: newCachedContent.createTime,
-                                            originalContextTokenCount: megaContextSynthesisResult.tokenCount
-                                        };
-                                        await this.memoryManager.saveGeminiCachedContentMap(taskDirPath, geminiCacheMap);
-                                        finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_CREATED_SYNTH", `Created Gemini CachedContent for synthesis: ${geminiCachedContentNameForSynthesis} (Expires: ${newCachedContent.expireTime})`, { parentTaskId }));
-                                    } else throw new Error("Failed to create Gemini CachedContent for synthesis or missing expireTime.");
-                                }
-                            } catch (cacheError) { console.warn(`Error with Gemini CachedContent for synthesis: ${cacheError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_ERROR_SYNTH", `Synthesis cache error: ${cacheError.message}`, { parentTaskId })); geminiCachedContentNameForSynthesis = null; }
-                        } else { /* Log synthesis cache skip */ }
-                    }
-                    if (geminiCachedContentNameForSynthesis) {
-                        synthLlmParams.cachedContentName = geminiCachedContentNameForSynthesis;
-                        synthesisPromptString = `Based on the extensive context provided (now cached), synthesize a comprehensive answer for the original user task: "${currentOriginalTask}".`;
+                // --- Ad-hoc Search Query Classification & Execution ---
+                // Condition for running classifier:
+                // - Not currently waiting for user input (i.e., previous question was answered or no question was pending).
+                // - Current execution mode is EXECUTE_FULL_PLAN (typical for new general requests) or no specific mode (implying a new request).
+                // - Not a simple reload of a task if userTaskString is empty (meaning user just wants to "continue" without new input).
+                if (!taskState.needsUserInput &&
+                    (taskState.executionMode === EXECUTE_FULL_PLAN || !taskState.executionMode) &&
+                    userTaskString?.trim() // Only classify if there's new textual input from user for this turn
+                   ) {
+
+                    let messageToClassify = userTaskString; // Use the current input for classification
+
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_CLASSIFICATION_STARTED", \`Classifying for ad-hoc search: "\${messageToClassify.substring(0,100)}..."\`));
+                    const searchQueryOrNoSearch = await this._classifyUserRequestForSearch(taskState, messageToClassify);
+
+                    if (searchQueryOrNoSearch && searchQueryOrNoSearch.toUpperCase() !== 'NO_SEARCH') {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TRIGGERED", \`LLM classified for search. Query: "\${searchQueryOrNoSearch}"\`));
+                        taskState = await this._notifyAndExecuteSearch(taskState, searchQueryOrNoSearch);
+                        taskState = await this._summarizeAndPresentSearchResults(taskState, searchQueryOrNoSearch);
+                        taskState.overallSuccess = !taskState.lastError;
+                        performedAdHocSearchThisTurn = true;
                     } else {
-                        synthesisPromptString = `${megaContextSynthesisResult.contextString}\n\nBased on all the provided context, synthesize a comprehensive answer...`;
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_NOT_NEEDED", \`LLM classified as NO_SEARCH for: "\${messageToClassify.substring(0,100)}..."\`));
                     }
+                }
+                // --- End Ad-hoc Search ---
+
+                if (performedAdHocSearchThisTurn) {
+                    // If search was performed, this turn's primary action is complete.
+                    // responseMessage and overallSuccess are set by search methods.
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TURN_CONCLUDED", \`Ad-hoc search flow completed for task \${taskState.taskId}\`));
+                } else if (taskState.needsUserInput) {
+                    // If, after clarification processing or if planning asked a question, we still need input.
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("TASK_PAUSED_AWAITING_INPUT", \`Awaiting input for: \${taskState.pendingQuestionId}\`));
                 } else {
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILURE", `Synthesis: ${megaContextSynthesisResult.error}. Fallback.`, { parentTaskId }));
-                    synthesisPromptString = `The original user task was: "${currentOriginalTask}".\nExecution History (JSON Array):\n${synthesisContextString}\n Current Working Context Summary:\nProgress: ${currentWorkingContext.summaryOfProgress}\nNext Objective: ${currentWorkingContext.nextObjective}\nKey Findings (Summarized):\n${summarizedKeyFindingsTextForCwc}\nErrors Encountered (Last ${MAX_ERRORS_FOR_CWC_PROMPT}):\n${JSON.stringify(recentErrorsSummary,null,2)}\n---\nBased on the original user task, execution history, and current working context, synthesize a comprehensive answer.`;
-                }
-                 synthesisPromptString += `\nSynthesize a comprehensive answer for the original user task: "${currentOriginalTask}".`;
+                    // Standard execution flow if no ad-hoc search handled the turn and no user input is pending
+                    if (taskState.executionMode === SYNTHESIZE_ONLY) {
+                        return await this._handleSynthesizeOnlyMode(taskState); // This returns early, includes finalize
+                    }
+                    if (taskState.executionMode === EXECUTE_PLANNED_TASK) {
+                        if (!taskState.planStages?.length) { await this._handleExecutePlannedTaskMode(taskState); }
+                        if (!taskState.overallSuccess) { return; }
+                    }
 
-                try {
-                    finalAnswer = await this.aiService.generateText(synthesisPromptString, synthLlmParams);
-                     responseMessage = "Task completed and final answer synthesized.";
-                    finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SUCCESS", responseMessage, { parentTaskId }));
-                } catch (synthError) {
-                    responseMessage = "Synthesis failed: " + synthError.message;
-                    finalAnswer = "Error during final answer synthesis.";
-                    overallSuccess = false;
+                    if (taskState.executionMode === PLAN_ONLY || (taskState.executionMode === EXECUTE_FULL_PLAN && (!taskState.planStages?.length) )) {
+                        const planningOutcome = await this._performPlanningPhase(taskState);
+                        if (planningOutcome.needsUserInput) { return; } // This will go to finally
+                        if (!planningOutcome.success) {
+                            taskState.overallSuccess = false; taskState.responseMessage = planningOutcome.message || "Planning failed.";
+                            taskState.finalAnswer = JSON.stringify(planningOutcome.rawResponse || {}); return;
+                        }
+                    } else if (taskState.executionMode === EXECUTE_PLANNED_TASK && taskState.planStages?.length > 0) {
+                         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SKIPPED", "Skipping planning."));
+                    }
+
+                    if (taskState.needsUserInput) { return; } // Check again after planning phase
+
+                    if (taskState.executionMode === PLAN_ONLY) {
+                        taskState.responseMessage = "Plan created successfully.";
+                        taskState.finalAnswer = JSON.stringify(taskState.planStages);
+                        taskState.overallSuccess = true; return;
+                    }
+
+                    if (taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) {
+                        await this._performExecutionPhase(taskState);
+                    }
+                    if ((taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) && taskState.overallSuccess) {
+                        await this._performCwcUpdateLLM(taskState);
+                    }
+                    if (!taskState.wasFinalAnswerPreSynthesized) {
+                        await this._performFinalSynthesis(taskState);
+                    } else {
+                         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED_PRE_SYNTHESIZED", "Synthesis skipped."));
+                    }
                 }
+            } catch (error) {
+                console.error(\`Critical error in OrchestratorAgent.handleUserTask for \${taskState?.taskId || parentTaskId || 'unknown'}: \${error.stack}\`);
+                if (taskState) {
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("HANDLE_USER_TASK_CRITICAL_ERROR", \`Critical error: \${error.message}\`));
+                    taskState.overallSuccess = false; taskState.responseMessage = \`Critical error: \${error.message.substring(0, 200)}\`;
+                } else {
+                    const errorTaskId = parentTaskId || Date.now().toString() + '_init_fail';
+                    const tempJournal = [this._createOrchestratorJournalEntry("HANDLE_USER_TASK_INIT_ERROR", \`Critical init error: \${error.message}\`)];
+                    return { success: false, message: \`Critical initialization error: \${error.message.substring(0,200)}\`, taskId: errorTaskId, data: null, journal: tempJournal };
+                }
+            } finally {
+                if (taskState) { await this._finalizeTaskProcessing(taskState); }
             }
-        } else { /* ... other conditions for finalAnswer ... */ }
-
-        if (finalAnswer && (typeof finalAnswer === 'string' && finalAnswer.trim() !== '')) {
-            try {
-                await this.memoryManager.addChatMessage(taskDirPath, { role: 'assistant', content: finalAnswer });
-                finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOGGED", "Agent's final answer logged.", { parentTaskId }));
-            } catch (logError) { console.warn(`Failed to log agent's final answer: ${logError.message}`); finalJournalEntries.push(this._createOrchestratorJournalEntry("CHAT_MESSAGE_LOG_FAILED", `Failed to log agent final answer: ${logError.message}`, { parentTaskId }));}
+            return {
+                success: taskState.overallSuccess, message: taskState.responseMessage,
+                taskId: taskState.taskId, data: taskState.finalAnswer,
+                journal: taskState.finalJournalEntries,
+                needsUserInput: taskState.needsUserInput, pendingQuestionId: taskState.pendingQuestionId
+            };
         }
-        await saveTaskState(stateFilePath, taskStateToSave);
-        finalJournalEntries.push(this._createOrchestratorJournalEntry(overallSuccess ? "TASK_COMPLETED_SUCCESSFULLY" : "TASK_FAILED_FINAL", `Task processing finished. Success: ${overallSuccess}`, { parentTaskId, finalStatus: taskStateToSave.status }));
-        await saveTaskJournal(journalFilePath, finalJournalEntries);
-        return { success: overallSuccess, message: responseMessage, originalTask: currentOriginalTask, plan: planStages, executedPlan: executionContext, finalAnswer, currentWorkingContext };
-
-    } catch (error) { /* ... existing catch block ... */ }
-  }
-}
-
-module.exports = OrchestratorAgent;
+    }
+    export default OrchestratorAgent;

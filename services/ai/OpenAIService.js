@@ -1,151 +1,84 @@
 // File: services/ai/OpenAIService.js
-const BaseAIService = require('./BaseAIService');
-const OpenAI = require('openai'); // Official OpenAI library
-let get_encoding_lib; // To handle potential dynamic import
-try {
-    get_encoding_lib = require('tiktoken');
-} catch (e) {
-    console.warn("OpenAIService: tiktoken library not found or failed to load. `getTokenizer` will fall back to base. Error: " + e.message);
-    get_encoding_lib = null;
-}
-
+import BaseAIService from '../BaseAIService.js'; // Corrected path
+import OpenAI from 'openai'; // Official OpenAI library
+import { get_encoding, encoding_for_model as encodingForModel } from 'tiktoken'; // Specific import for get_encoding
 
 class OpenAIService extends BaseAIService {
+    /**
+     * Constructor for OpenAIService.
+     * @param {string} apiKey - The API key for OpenAI.
+     * @param {object} baseConfig - Base configuration options.
+     * @param {string} [baseConfig.defaultModel='gpt-3.5-turbo'] - Default model to use.
+     * @param {string} [baseConfig.tokenizerName='cl100k_base'] - Default tokenizer encoding name.
+     * @param {number} [baseConfig.temperature=0.7] - Default temperature.
+     * @param {number} [baseConfig.maxTokens=2048] - Default max output tokens.
+     */
     constructor(apiKey, baseConfig = {}) {
-        super(apiKey, baseConfig);
-        this.defaultModel = baseConfig.defaultModel || 'gpt-3.5-turbo';
-        this.openai = null; // Initialize to null
+        super(apiKey, baseConfig); // Sets this.apiKey and this.baseConfig
+        this.openai = null; // Initialized in _ensureClient
         this.tokenizerName = this.baseConfig.tokenizerName || 'cl100k_base';
         this.enc = null;
 
-        if (get_encoding_lib) {
+        try {
+            // Try to get encoding by model name first if a defaultModel is specified
+            if (this.baseConfig.defaultModel) {
+                 this.enc = encodingForModel(this.baseConfig.defaultModel);
+            } else {
+                this.enc = get_encoding(this.tokenizerName);
+            }
+        } catch (e) {
+            console.warn(\`OpenAIService: Failed to load tiktoken encoder '\${this.baseConfig.defaultModel || this.tokenizerName}'. Attempting fallback to '${this.tokenizerName}'. Error: \${e.message}\`);
             try {
-                this.enc = get_encoding_lib.get_encoding(this.tokenizerName);
-            } catch (e) {
-                console.warn(`OpenAIService: Failed to load tiktoken encoder '${this.tokenizerName}'. Falling back to base tokenizer. Error: ${e.message}`);
-                this.enc = null;
+                this.enc = get_encoding(this.tokenizerName);
+            } catch (e2) {
+                 console.warn(\`OpenAIService: Fallback tiktoken encoder '\${this.tokenizerName}' also failed. Tokenizer will not be available. Error: \${e2.message}\`);
             }
         }
 
-        if (!this.apiKey && !process.env.OPENAI_API_KEY) {
-            console.warn("OpenAIService: API key is not provided at construction and OPENAI_API_KEY env var is not set. Service will likely fail on execution.");
-        }
-
-        // Attempt to initialize only if a key might be available (either direct or env)
-        // The actual key retrieval and check is done in _getApiKey before each call.
-        const potentialApiKey = this.apiKey || process.env.OPENAI_API_KEY;
-        if (potentialApiKey) {
-            try {
-                this.openai = new OpenAI({ apiKey: potentialApiKey });
-            } catch (error) {
-                console.error(`OpenAIService: Failed to initialize OpenAI client during construction. Error: ${error.message}`);
-                // this.openai remains null
-            }
-        } else {
-            // No API key available at all, openai client cannot be initialized.
-            // console.warn already issued.
+        if (!this._getApiKey()) {
+            console.warn("OpenAIService: API key is not provided directly or via OPENAI_API_KEY env var. Service will fail on execution unless key is available then.");
         }
     }
 
     _getApiKey() {
-        const key = this.apiKey || process.env.OPENAI_API_KEY;
-        if (!key) {
-            throw new Error("OpenAI API key is missing. Please provide it in the constructor or set OPENAI_API_KEY environment variable.");
-        }
-        return key;
+        return this.apiKey || process.env.OPENAI_API_KEY;
     }
 
-    // Helper to ensure openai client is initialized, attempting late initialization if possible.
     _ensureClient() {
         if (this.openai) {
             return true;
         }
-        // Attempt to initialize if not done already (e.g. API key set via env var after construction)
-        const potentialApiKey = this.apiKey || process.env.OPENAI_API_KEY;
-        if (potentialApiKey && !this.openai) {
-            try {
-                console.log("OpenAIService: Attempting late initialization of OpenAI client.");
-                this.openai = new OpenAI({ apiKey: potentialApiKey });
-                return true;
-            } catch (error) {
-                console.error(`OpenAIService: Failed to initialize OpenAI client (late attempt). Error: ${error.message}`);
-                this.openai = null; // Explicitly set to null on failure
-            }
+        const apiKey = this._getApiKey();
+        if (!apiKey) {
+             throw new Error("OpenAIService: API key is missing. Cannot initialize client.");
         }
-        if (!this.openai) {
-             throw new Error("OpenAIService: OpenAI client is not initialized. API key might be missing or initialization failed.");
-        }
-        return false; // Should not be reached if error is thrown
-    }
-
-    async completeChat(messages, params = {}) {
-        this._ensureClient(); // Checks API key and initializes client if needed and possible
-
-        const model = params.model || this.defaultModel;
-        const temperature = params.temperature !== undefined ? params.temperature : (this.baseConfig.temperature !== undefined ? this.baseConfig.temperature : 0.7);
-        const maxTokens = params.maxTokens || this.baseConfig.maxTokens || 2048; // Default for many chat models
-
         try {
-            // Ensure messages is an array and has at least one message
-            if (!Array.isArray(messages) || messages.length === 0) {
-                throw new Error("Messages array cannot be empty and must be an array.");
-            }
-            // Ensure each message has 'role' and 'content'
-            for (const msg of messages) {
-                if (typeof msg.role !== 'string' || typeof msg.content !== 'string') {
-                    throw new Error("Each message in the array must have a 'role' (string) and 'content' (string).");
-                }
-            }
-
-            console.log(`OpenAIService: Calling ChatCompletion API. Model: ${model}, Messages Count: ${messages.length}, Temp: ${temperature}, MaxTokens: ${maxTokens}`);
-
-            const requestPayload = {
-                model: model,
-                messages: messages,
-                temperature: temperature,
-                max_tokens: maxTokens,
-            };
-            if (params.topP !== undefined) requestPayload.top_p = params.topP;
-            if (params.stopSequences !== undefined) requestPayload.stop = params.stopSequences;
-            // Add other common parameters as needed based on params object
-
-            const completion = await this.openai.chat.completions.create(requestPayload);
-
-            if (completion.choices && completion.choices.length > 0) {
-                const choice = completion.choices[0];
-                if (choice.message && choice.message.content) {
-                    console.log(`OpenAIService: ChatCompletion successful. Finish reason: ${choice.finish_reason}, Model used: ${completion.model}`);
-                    return choice.message.content.trim();
-                } else {
-                    console.warn("OpenAIService API response format warning: No message content found in the first choice.", completion.choices[0]);
-                    throw new Error("OpenAI API response format error: No message content found in the first choice.");
-                }
-            } else {
-                console.warn("OpenAIService API response format warning: No choices returned.", completion);
-                throw new Error("OpenAI API response format error: No choices returned.");
-            }
+            // console.log("OpenAIService: Initializing OpenAI client.");
+            this.openai = new OpenAI({ apiKey });
+            return true;
         } catch (error) {
-            let errorDetail = error.message;
-            if (error.response && error.response.data && error.response.data.error && error.response.data.error.message) {
-                errorDetail = error.response.data.error.message;
-            } else if (error.error && error.error.message) { // Sometimes error structure is different
-                errorDetail = error.error.message;
-            }
-            console.error(`OpenAIService: Error during OpenAI API call to model ${model}: ${errorDetail}`, error.stack);
-            throw new Error(`OpenAI API Error: ${errorDetail}`);
+            console.error(\`OpenAIService: Failed to initialize OpenAI client. Error: \${error.message}\`);
+            this.openai = null;
+            throw new Error(\`OpenAIService client initialization failed: \${error.message}\`);
         }
     }
 
-    async generateText(prompt, params = {}) {
-        // Ensure prompt is a string
-        if (typeof prompt !== 'string') {
-            throw new Error("Prompt must be a string for generateText.");
+    /**
+     * @override
+     */
+    async generateText(promptString, params = {}) {
+        this._ensureClient();
+        if (typeof promptString !== 'string') {
+            throw new Error("OpenAIService.generateText: promptString must be a string.");
         }
-        const messages = [{ role: 'user', content: prompt }];
+
+        const messages = [];
         if (params.systemMessage && typeof params.systemMessage === 'string') {
-            messages.unshift({ role: 'system', content: params.systemMessage });
+            messages.push({ role: 'system', content: params.systemMessage });
         }
-        // Remove systemMessage from params if it exists, so it's not passed to completeChat's generic params
+        messages.push({ role: 'user', content: promptString });
+
+        // Remove systemMessage from params to avoid conflict if it's not an official OpenAI param for chat.completions
         const chatParams = { ...params };
         delete chatParams.systemMessage;
 
@@ -153,65 +86,162 @@ class OpenAIService extends BaseAIService {
     }
 
     /**
-     * Returns a tokenizer function for OpenAI models using the `tiktoken` library.
-     * If `tiktoken` is unavailable or the specified encoder fails to load,
-     * it falls back to the base class's approximate tokenizer.
-     * @returns {Function} A function that takes a string and returns the number of tokens.
+     * @override
+     */
+    async completeChat(messagesArray, params = {}) {
+        this._ensureClient();
+
+        const model = params.model || this.baseConfig.defaultModel || 'gpt-3.5-turbo';
+        const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
+        const maxTokens = params.max_tokens || params.maxTokens || this.baseConfig.maxTokens; // OpenAI uses max_tokens
+        const topP = params.top_p || params.topP || this.baseConfig.topP;
+        const stopSequences = params.stop || params.stopSequences || this.baseConfig.stopSequences;
+
+        if (!Array.isArray(messagesArray) || messagesArray.length === 0) {
+            throw new Error("OpenAIService.completeChat: messagesArray cannot be empty.");
+        }
+        messagesArray.forEach(msg => {
+            if (typeof msg.role !== 'string' || typeof msg.content !== 'string') {
+                throw new Error("OpenAIService.completeChat: Each message must have 'role' and 'content' strings.");
+            }
+        });
+
+        // console.log(\`OpenAIService: Calling ChatCompletion API. Model: \${model}, Messages: \${messagesArray.length}\`);
+        try {
+            const requestPayload = {
+                model: model,
+                messages: messagesArray,
+            };
+            if (temperature !== undefined) requestPayload.temperature = temperature;
+            if (maxTokens !== undefined) requestPayload.max_tokens = maxTokens;
+            if (topP !== undefined) requestPayload.top_p = topP;
+            if (stopSequences !== undefined) requestPayload.stop = stopSequences;
+            // Add other OpenAI specific parameters from params if needed
+
+            const completion = await this.openai.chat.completions.create(requestPayload);
+
+            if (completion.choices && completion.choices.length > 0) {
+                const choice = completion.choices[0];
+                if (choice.message && choice.message.content) {
+                    return choice.message.content.trim();
+                }
+            }
+            console.warn("OpenAIService API response warning: No content found or unexpected format.", completion);
+            throw new Error("OpenAI API response error: No message content found.");
+        } catch (error) {
+            const errorDetail = error.response?.data?.error?.message || error.error?.message || error.message;
+            console.error(\`OpenAIService: Error during chat completion for model \${model}:\`, errorDetail, error.stack);
+            throw new Error(\`OpenAI API Error: \${errorDetail}\`);
+        }
+    }
+
+    /**
+     * @override
      */
     getTokenizer() {
         if (this.enc) {
             return (text) => text ? this.enc.encode(text).length : 0;
         }
-        // Fallback to BaseAIService's placeholder if tiktoken loading failed
-        console.warn("OpenAIService.getTokenizer: tiktoken encoder not available, falling back to base approximate tokenizer.");
-        return super.getTokenizer();
+        console.warn("OpenAIService.getTokenizer: tiktoken encoder not available. Falling back to basic word count.");
+        return (text) => text ? text.split(/\\s+/).length : 0; // Basic fallback
     }
 
     /**
-     * Returns the maximum number of context tokens for the configured default OpenAI model.
-     * It uses a predefined map of known OpenAI models and their context window sizes.
-     * @returns {number} The maximum number of context tokens.
+     * @override
      */
     getMaxContextTokens() {
-        const model = this.defaultModel || (this.baseConfig && this.baseConfig.defaultModel) || 'gpt-3.5-turbo';
-        // Source: https://platform.openai.com/docs/models
-        // Refreshed April 2024
+        const model = params.model || this.baseConfig.defaultModel || 'gpt-3.5-turbo'; // Use params.model if provided for specific call context
+        // Source: https://platform.openai.com/docs/models (Context window column)
+        // Values as of late 2023 / early 2024. Always verify with OpenAI documentation.
         const modelContextWindows = {
-            // GPT-4 Turbo (includes vision) - all these point to models with 128k context
+            // GPT-4 Turbo models
             'gpt-4-turbo': 128000,
             'gpt-4-turbo-2024-04-09': 128000,
             'gpt-4-turbo-preview': 128000,
             'gpt-4-0125-preview': 128000,
             'gpt-4-1106-preview': 128000,
-            'gpt-4-vision-preview': 128000, // Vision model, but context window is for tokens
+            'gpt-4-vision-preview': 128000,
 
-            // GPT-4
+            // GPT-4 base models
             'gpt-4': 8192,
             'gpt-4-0613': 8192,
             'gpt-4-32k': 32768,
             'gpt-4-32k-0613': 32768,
 
-            // GPT-3.5 Turbo
+            // GPT-3.5 Turbo models
             'gpt-3.5-turbo-0125': 16385,
-            'gpt-3.5-turbo': 16385, // Default alias often points to 16k model
-            'gpt-3.5-turbo-1106': 16385, // Also 16k
-            'gpt-3.5-turbo-instruct': 4096,
-            'gpt-3.5-turbo-16k': 16385, // Explicit 16k model
-            'gpt-3.5-turbo-0613': 4096, // Older 4k model
+            'gpt-3.5-turbo': 16385,          // Often updated, currently (early 2024) 16K.
+            'gpt-3.5-turbo-1106': 16385,     // 16K context window.
+            'gpt-3.5-turbo-instruct': 4096, // Instruct model.
+            // Older gpt-3.5-turbo versions might have 4096, but aliases usually point to newer ones.
+            'gpt-3.5-turbo-0613': 4096,
+            'gpt-3.5-turbo-16k': 16385, // Explicitly 16k.
+            'gpt-3.5-turbo-16k-0613': 16385,
 
-            // Default if model not listed
-            'default': 4096
+
+            'default': 4096 // Default fallback
         };
 
-        const contextSize = modelContextWindows[model] || modelContextWindows['default'];
-        if (!modelContextWindows[model]) {
-            console.warn(`OpenAIService.getMaxContextTokens: Model ${model} not found in known list. Using default ${contextSize} tokens.`);
+        let contextSize = modelContextWindows[model];
+        if (!contextSize) {
+            // Try to find a base model if versioned e.g. gpt-4-0125-preview -> gpt-4
+            const baseModel = model.split('-').slice(0, 2).join('-');
+            contextSize = modelContextWindows[baseModel];
+            if (!contextSize && model.startsWith('gpt-4')) contextSize = modelContextWindows['gpt-4'];
+            else if (!contextSize && model.startsWith('gpt-3.5-turbo')) contextSize = modelContextWindows['gpt-3.5-turbo'];
+            else contextSize = modelContextWindows['default'];
+            // console.warn(\`OpenAIService.getMaxContextTokens: Model '\${model}' not found in known list. Using inferred \${contextSize} tokens.\`);
         }
         return contextSize;
     }
 
-    // Optional: cleanup encoder when no longer needed
-    // close() { if (this.enc) this.enc.free(); } // Tiktoken docs say free is not usually needed in JS
+    /**
+     * @override
+     */
+    getServiceName() {
+        return "OpenAI";
+    }
+
+    /**
+     * @override
+     */
+    async prepareContextForModel(contextParts, options = {}) {
+        // OpenAI API for chat completions expects an array of message objects.
+        // This method ensures the contextParts are in that format or converts them.
+        // No actual caching or special handle is returned like for Gemini.
+
+        if (typeof contextParts === 'string') {
+            // If a simple string is provided, assume it's a user message.
+            // System message could be passed in options.systemMessage.
+            const messages = [];
+            if (options.systemMessage && typeof options.systemMessage === 'string') {
+                messages.push({ role: 'system', content: options.systemMessage });
+            }
+            messages.push({ role: 'user', content: contextParts });
+            return messages;
+        } else if (Array.isArray(contextParts)) {
+            // Assume contextParts is already an array of message objects.
+            // Basic validation can be done here if desired.
+            let valid = true;
+            if (contextParts.length > 0) {
+                 valid = contextParts.every(msg =>
+                    typeof msg.role === 'string' && typeof msg.content === 'string'
+                );
+            }
+            if (valid) {
+                return contextParts;
+            } else {
+                throw new Error("OpenAIService.prepareContextForModel: If contextParts is an array, it must be an array of {role, content} objects.");
+            }
+        } else if (contextParts === null || contextParts === undefined) {
+             return []; // Return empty array if no context parts
+        }
+
+        throw new Error("OpenAIService.prepareContextForModel: contextParts must be a string or an array of message objects.");
+    }
+
+    // Optional: cleanup encoder when no longer needed (rarely needed in JS)
+    // close() { if (this.enc) this.enc.free(); }
 }
 
-module.exports = OpenAIService;
+export default OpenAIService;

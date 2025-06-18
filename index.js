@@ -1,183 +1,284 @@
 require('dotenv').config();
 const express = require('express');
 const { v4: uuidv4 } = require('uuid');
+const multer = require('multer');
+const path = require('path');
+const http = require('http');
+const { WebSocketServer, WebSocket } = require('ws');
+const url = require('url');
+const EventEmitter = require('events');
 
-// Импорт классов агентов и очередей
+// Core Components
 const OrchestratorAgent = require('./agents/OrchestratorAgent');
 const ResearchAgent = require('./agents/ResearchAgent');
 const UtilityAgent = require('./agents/UtilityAgent');
 const SubTaskQueue = require('./core/SubTaskQueue');
 const ResultsQueue = require('./core/ResultsQueue');
+const MemoryManager = require('./core/MemoryManager');
 
-// Импорт классов инструментов
+// Tools
 const WebSearchTool = require('./tools/WebSearchTool');
 const ReadWebpageTool = require('./tools/ReadWebpageTool');
 const CalculatorTool = require('./tools/CalculatorTool');
-const Context7Client = require('./services/Context7Client'); // Added
-const Context7DocumentationTool = require('./tools/Context7DocumentationTool'); // Added
+const Context7Client = require('./services/Context7Client');
+const Context7DocumentationTool = require('./tools/Context7DocumentationTool');
 
-// Импорт LLM сервиса
-// const geminiLLMService = require('./services/LLMService'); // Removed
+// AI Services
 const GeminiService = require('./services/ai/GeminiService');
 const OpenAIService = require('./services/ai/OpenAIService');
+
 const { initializeLocalization, t } = require('./utils/localization');
 
-initializeLocalization(); // Call localization setup
+initializeLocalization();
 
-// Инициализация очередей
+// --- GLOBAL INSTANCES ---
+const globalEventEmitter = new EventEmitter();
 const subTaskQueue = new SubTaskQueue();
 const resultsQueue = new ResultsQueue();
+const savedTasksBaseDir = path.join(process.cwd(), 'tasks');
+const memoryManager = new MemoryManager(globalEventEmitter);
 
-// Конфигурация API ключей для агентов (если необходимо для инструментов)
-// README упоминает SEARCH_API_KEY и CSE_ID для WebSearchTool.
-// Эти ключи должны быть доступны через process.env
 const agentApiKeysConfig = {
-    googleSearch: {
-        apiKey: process.env.SEARCH_API_KEY,
-        cseId: process.env.CSE_ID
-    }
-    // Другие ключи по мере необходимости
+    googleSearch: { apiKey: process.env.SEARCH_API_KEY, cseId: process.env.CSE_ID }
 };
 
-// Инициализация инструментов
-const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch); // Предполагаем, что конструктор принимает конфиг
+const webSearchTool = new WebSearchTool(agentApiKeysConfig.googleSearch);
 const readWebpageTool = new ReadWebpageTool();
 const calculatorTool = new CalculatorTool();
-
-// Initialize Context7 Client and Tool
-const context7ServerUrl = process.env.CONTEXT7_SERVER_URL || 'http://localhost:8080/mcp';
-const context7ClientInstance = new Context7Client(context7ServerUrl);
-// console.log(`Context7 Client initialized for server: ${context7ServerUrl}`); // For localization later
+const context7ClientInstance = new Context7Client(process.env.CONTEXT7_SERVER_URL || 'http://localhost:8080/mcp');
 const context7DocumentationTool = new Context7DocumentationTool(context7ClientInstance);
 
-// Инициализация AI сервисов с детальной конфигурацией моделей
 const openAIService = new OpenAIService(process.env.OPENAI_API_KEY, {
-    defaultModel: 'gpt-3.5-turbo',
-    planningModel: 'gpt-4',
-    cwcUpdateModel: 'gpt-3.5-turbo',
-    synthesisModel: 'gpt-4',
-    defaultLLMStepModel: 'gpt-3.5-turbo',
+    defaultModel: 'gpt-4o', planningModel: 'gpt-4-turbo',
+    cwcUpdateModel: 'gpt-4o', synthesisModel: 'gpt-4-turbo',
     summarizationModel: 'gpt-3.5-turbo'
 });
-
 const geminiService = new GeminiService(process.env.GEMINI_API_KEY, {
-    defaultModel: 'gemini-pro',
-    planningModel: 'gemini-pro',
-    cwcUpdateModel: 'gemini-pro',
-    synthesisModel: 'gemini-pro',
-    defaultLLMStepModel: 'gemini-pro',
-    summarizationModel: 'gemini-pro'
+    defaultModel: 'gemini-1.5-flash-latest', planningModel: 'gemini-1.5-pro-latest',
+    cwcUpdateModel: 'gemini-1.5-flash-latest', synthesisModel: 'gemini-1.5-pro-latest'
 });
 
-// Global agents that don't depend on per-request AI service selection
-const researchAgentTools = {
-    "WebSearchTool": webSearchTool,
-    "ReadWebpageTool": readWebpageTool,
-    "Context7DocumentationTool": context7DocumentationTool // Added
-};
+const researchAgentTools = { "WebSearchTool": webSearchTool, "ReadWebpageTool": readWebpageTool, "Context7DocumentationTool": context7DocumentationTool };
 const researchAgent = new ResearchAgent(subTaskQueue, resultsQueue, researchAgentTools, agentApiKeysConfig);
-
-const utilityAgentTools = {
-    "CalculatorTool": calculatorTool
-};
+const utilityAgentTools = { "CalculatorTool": calculatorTool };
 const utilityAgent = new UtilityAgent(subTaskQueue, resultsQueue, utilityAgentTools, agentApiKeysConfig);
-
-// Запуск прослушивания для рабочих агентов
 researchAgent.startListening();
 utilityAgent.startListening();
 
-// Настройка Express приложения
+// --- EXPRESS APP SETUP ---
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.json());
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
-// API эндпоинт для задач
-app.post('/api/generate-plan', async (req, res) => {
-    const { task, taskIdToLoad, mode, aiService: requestedService } = req.body; // Added aiService
+// --- HTTP SERVER CREATION ---
+const server = http.createServer(app);
 
-    // Определяем режим по умолчанию, если не указан
+// --- API ROUTES ---
+const getTaskDirectoryPath = (taskId) => {
+    const today = new Date().toISOString().split('T')[0];
+    // TODO: This is a simplified assumption for tasks created "today".
+    // Robustly resolve task path if tasks can span multiple days or have different structures.
+    return path.join(savedTasksBaseDir, today, taskId.startsWith('task_') ? taskId : \`task_\${taskId}\`);
+};
+
+app.post('/api/generate-plan', upload.array('files'), async (req, res) => {
+    // ... (generate-plan route handler - no changes)
+    const { task, taskIdToLoad, mode, aiService: requestedService, agentId } = req.body;
+    const uploadedFileObjects = (req.files || []).map(file => ({ name: file.originalname, content: file.buffer.toString() }));
     const effectiveMode = mode || "EXECUTE_FULL_PLAN";
-
-    if (effectiveMode === "EXECUTE_FULL_PLAN") {
-        if (!task || typeof task !== 'string' || task.trim() === "") {
-            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for EXECUTE_FULL_PLAN mode." });
-        }
-    } else if (effectiveMode === "SYNTHESIZE_ONLY") {
-        if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
-            return res.status(400).json({ success: false, message: "Invalid request: 'taskIdToLoad' must be a non-empty string for SYNTHESIZE_ONLY mode." });
-        }
-        // В этом режиме 'task' не обязателен, так как он будет загружен из состояния
-    } else if (effectiveMode === "PLAN_ONLY") {
-        if (!task || typeof task !== 'string' || task.trim() === "") {
-            return res.status(400).json({ success: false, message: "Invalid request: 'task' must be a non-empty string for PLAN_ONLY mode." });
-        }
-        // taskIdToLoad не используется в этом режиме
-    } else if (effectiveMode === "EXECUTE_PLANNED_TASK") {
-        if (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "") {
-            return res.status(400).json({ success: false, message: "Invalid request: 'taskIdToLoad' must be a non-empty string for EXECUTE_PLANNED_TASK mode." });
-        }
-        // 'task' (userTaskString) не требуется в теле запроса, он будет загружен из состояния.
-    } else {
-        return res.status(400).json({ success: false, message: `Invalid request: Unknown mode '${effectiveMode}'.` });
-    }
-
-    const parentTaskId = uuidv4(); // Генерируем уникальный ID для этой сессии обработки
-
+    if ((effectiveMode === "EXECUTE_FULL_PLAN" || effectiveMode === "PLAN_ONLY") && (!task || typeof task !== 'string' || task.trim() === "")) { return res.status(400).json({ success: false, message: \`'task' is required for \${effectiveMode} mode.\` }); }
+    if ((effectiveMode === "SYNTHESIZE_ONLY" || effectiveMode === "EXECUTE_PLANNED_TASK") && (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "")) { return res.status(400).json({ success: false, message: \`'taskIdToLoad' is required for \${effectiveMode} mode.\` }); }
+    if (!["EXECUTE_FULL_PLAN", "PLAN_ONLY", "SYNTHESIZE_ONLY", "EXECUTE_PLANNED_TASK"].includes(effectiveMode)) { return res.status(400).json({ success: false, message: \`Unknown mode '\${effectiveMode}'.\` }); }
+    const parentTaskId = uuidv4();
     try {
-        // Логируем полученные параметры (кроме всего тела запроса, чтобы не дублировать)
-        console.log(`Received API request for mode: ${effectiveMode}, task (if any): "${task ? task.substring(0, 50) + '...' : 'N/A'}", taskIdToLoad (if any): ${taskIdToLoad}, requested AI Service: ${requestedService || 'default'}, generated parentTaskId: ${parentTaskId}`);
-
-        // Выбор AI сервиса для текущего запроса
+        console.log(\`[API /api/generate-plan] Mode: \${effectiveMode}, TaskIdToLoad: \${taskIdToLoad || 'N/A'}, AgentId: \${agentId || 'default'}, ParentTaskId: \${parentTaskId}\`);
         let activeAIService;
-        if (requestedService && typeof requestedService === 'string') {
-            if (requestedService.toLowerCase() === 'gemini') {
-                activeAIService = geminiService;
-            } else if (requestedService.toLowerCase() === 'openai') {
-                activeAIService = openAIService;
-            } else {
-                console.warn(`Invalid aiService '${requestedService}' requested. Falling back to default.`);
-                activeAIService = openAIService; // Default
-            }
-        } else {
-            activeAIService = openAIService; // Default if not specified
-        }
-
-        console.log(`Request ${parentTaskId}: Using AI Service: ${activeAIService.getServiceName()} for this task.`);
-
-        // Инициализация OrchestratorAgent внутри обработчика с выбранным AI сервисом
-        const orchestratorAgent = new OrchestratorAgent(subTaskQueue, resultsQueue, activeAIService, agentApiKeysConfig);
-        // Если OrchestratorAgent требует FileSystemTool, он должен быть доступен здесь
-        // Предполагая, что fileSystemTool глобально инициализирован и может быть передан, если OrchestratorAgent.js был изменен для его приема.
-        // Если OrchestratorAgent сам инстанцирует FileSystemTool или он не нужен в конструкторе, этот вызов остается как есть.
-        // На данный момент, OrchestratorAgent.js не принимает fileSystemTool в конструкторе, а устанавливает его как свойство.
-        // Это можно сделать и здесь, если необходимо: orchestratorAgent.fileSystemTool = fileSystemTool; (fileSystemTool - глобальный)
-        // Однако, для чистоты, лучше если OrchestratorAgent управляет своими зависимостями или они передаются в конструктор.
-        // Для этого задания, предположим, что текущий конструктор OrchestratorAgent достаточен.
-
-
-        // userTaskString для handleUserTask будет либо `task` из запроса, либо загружен из состояния внутри handleUserTask.
-        // Передаем `task` как есть; OrchestratorAgent должен будет это учитывать.
-        const result = await orchestratorAgent.handleUserTask(task, parentTaskId, taskIdToLoad, effectiveMode);
-        console.log("Orchestrator result:", result); // Consider logging less for very large results
+        const serviceIdentifier = agentId || requestedService;
+        if (serviceIdentifier?.toLowerCase() === 'gemini') activeAIService = geminiService;
+        else activeAIService = openAIService;
+        console.log(\`Request \${parentTaskId}: Using AI Service: \${activeAIService.getServiceName()} for orchestrator.\`);
+        const orchestratorAgent = new OrchestratorAgent( activeAIService, subTaskQueue, memoryManager, null, agentApiKeysConfig, resultsQueue, savedTasksBaseDir );
+        const result = await orchestratorAgent.handleUserTask(task, uploadedFileObjects, parentTaskId, taskIdToLoad, effectiveMode);
         res.json(result);
     } catch (error) {
-        console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error);
-        res.status(500).json({ success: false, message: "Internal server error", error: error.message, parentTaskId: parentTaskId });
+        console.error(\`Error in /api/generate-plan (parentTaskId: \${parentTaskId}):\`, error.stack);
+        res.status(500).json({ success: false, message: \`Internal server error: \${error.message.substring(0,100)}\`, parentTaskId });
     }
 });
 
-// Простое сообщение о состоянии для корневого пути
+app.get('/api/agent-instances', (req, res) => {
+    const availableAgents = [ { id: 'openai', name: 'OpenAI (GPT Series)', description: 'Uses OpenAI models for orchestration.'}, { id: 'gemini', name: 'Gemini (1.5 Series)', description: 'Uses Gemini models for orchestration.' }, ];
+    res.json(availableAgents);
+});
+
+// --- CHAT API ENDPOINTS ---
+app.post('/api/tasks/:taskId/chat', async (req, res) => {
+    const { taskId: rawTaskId } = req.params;
+    const { messageContent, clientMessageId, senderId, relatedToMessageId } = req.body;
+    if (!messageContent || !messageContent.text || typeof messageContent.text !== 'string' || messageContent.text.trim() === '') { return res.status(400).json({ error: 'Message content and non-empty text are required.' }); }
+    if (!senderId) { return res.status(400).json({ error: 'senderId is required.' }); }
+    let taskDirPath;
+    try { taskDirPath = getTaskDirectoryPath(rawTaskId); await memoryManager.initializeTaskMemory(taskDirPath); }
+    catch (pathError) { return res.status(404).json({ error: 'Task not found or path could not be determined.' }); }
+    try {
+        const messageDataToSave = { taskId: rawTaskId, senderId, content: messageContent, clientMessageId, relatedToMessageId };
+        const savedMessage = await memoryManager.addChatMessage(taskDirPath, messageDataToSave);
+        console.log(\`[CHAT API] Message saved for task \${rawTaskId} with server ID \${savedMessage.id}. Event emitted.\`);
+        res.status(202).json({ status: 'accepted', serverMessageId: savedMessage.id, clientMessageId: savedMessage.clientMessageId, taskId: savedMessage.taskId, timestamp: savedMessage.timestamp, sender: savedMessage.sender, content: savedMessage.content });
+    } catch (error) { res.status(500).json({ error: 'Failed to save or process chat message.' }); }
+});
+
+app.get('/api/tasks/:taskId/chat', async (req, res) => {
+    const { taskId: rawTaskId } = req.params;
+    const { since_timestamp, limit = "20", sort_order = 'asc' } = req.query;
+    // Timeout parameter is no longer used for long polling here.
+
+    console.log(\`[CHAT API] Received GET on /api/tasks/\${rawTaskId}/chat. Query: \`, { since_timestamp, limit, sort_order });
+
+    let taskDirPath;
+    try {
+        taskDirPath = getTaskDirectoryPath(rawTaskId);
+    } catch (pathError) {
+        console.error(\`[CHAT API] Error resolving taskDirPath for \${rawTaskId}: \${pathError.message}\`);
+        return res.status(404).json({ error: 'Task not found or path could not be determined for chat history.' });
+    }
+
+    try {
+        const messages = await memoryManager.getChatHistory(taskDirPath, {
+            since_timestamp,
+            limit: parseInt(limit, 10),
+            sort_order
+        });
+
+        // Determine the lastTimestamp based on the actual messages returned and sort order
+        let lastTimestampInResponse;
+        if (messages.length > 0) {
+            lastTimestampInResponse = (sort_order === 'asc')
+                ? messages[messages.length - 1].timestamp
+                : messages[0].timestamp;
+        } else {
+            lastTimestampInResponse = since_timestamp || new Date(0).toISOString();
+        }
+
+        res.status(200).json({
+            taskId: rawTaskId,
+            messages: messages,
+            lastTimestamp: lastTimestampInResponse
+        });
+    } catch (error) {
+        console.error(\`[CHAT API] Error fetching chat history for task \${rawTaskId}: \${error.stack}\`);
+        res.status(500).json({ error: 'Failed to fetch chat history.' });
+    }
+});
+
+// --- Root Route ---
 app.get('/', (req, res) => {
     res.json({ status: 'Backend server is running', timestamp: new Date().toISOString() });
 });
 
-// Запуск сервера
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-    console.log("Ensure you have .env file with GEMINI_API_KEY, OPENAI_API_KEY, SEARCH_API_KEY, CSE_ID, and optionally CONTEXT7_SERVER_URL.");
-    console.log("Available agents: Orchestrator, Research, Utility.");
-    console.log("ResearchAgent tools: WebSearchTool, ReadWebpageTool, Context7DocumentationTool.");
-    console.log("UtilityAgent tools: CalculatorTool.");
-    console.log("API endpoint for tasks: POST /api/generate-plan with modes: EXECUTE_FULL_PLAN, SYNTHESIZE_ONLY, PLAN_ONLY, EXECUTE_PLANNED_TASK.");
+// --- WEBSOCKET SERVER SETUP ---
+const CHAT_WEBSOCKET_PATH = '/api/chat_ws';
+const wss = new WebSocketServer({ server, path: CHAT_WEBSOCKET_PATH });
+const activeTaskSockets = new Map();
+
+console.log(\`WebSocket server is listening on path \${CHAT_WEBSOCKET_PATH}\`);
+
+globalEventEmitter.on('newMessage', (savedMessage) => {
+    const taskId = savedMessage.taskId;
+    if (taskId && activeTaskSockets.has(taskId)) {
+        const clients = activeTaskSockets.get(taskId);
+        const messageString = JSON.stringify(savedMessage);
+        clients.forEach(clientWs => {
+            if (clientWs.readyState === WebSocket.OPEN) {
+                try { clientWs.send(messageString); }
+                catch (sendError) { console.error(\`[WebSocket] Error sending to client for task \${taskId}:\`, sendError); }
+            }
+        });
+        console.log(\`[WebSocket] Broadcasted message ID \${savedMessage.id} to \${clients.size} clients for task \${taskId}\`);
+    }
+});
+
+wss.on('connection', (ws, req) => {
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const requestUrl = url.parse(req.url, true);
+    const taskId = requestUrl.query.taskId;
+
+    if (!taskId || typeof taskId !== 'string' || taskId.trim() === '') {
+        console.log(\`[WebSocket] Connection from \${clientIp} without valid taskId. Path: \${req.url}. Closing.\`);
+        ws.terminate(); return;
+    }
+    console.log(\`[WebSocket] Client \${clientIp} connected for taskId: \${taskId}\`);
+
+    if (!activeTaskSockets.has(taskId)) activeTaskSockets.set(taskId, new Set());
+    activeTaskSockets.get(taskId).add(ws);
+    console.log(\`[WebSocket] Added client \${clientIp} to task \${taskId}. Total for task: \${activeTaskSockets.get(taskId).size}\`);
+
+    ws.on('message', async (messageBuffer) => {
+        const messageString = messageBuffer.toString();
+        let parsedMessage;
+        try { parsedMessage = JSON.parse(messageString); }
+        catch (e) {
+            console.error(\`[WebSocket] Error parsing JSON from \${clientIp} (Task: \${taskId}):\`, e);
+            ws.send(JSON.stringify({ type: 'error', content: { text: 'Invalid JSON.' }, senderId: 'system', ts: new Date().toISOString() }));
+            return;
+        }
+        console.log(\`[WebSocket] Parsed message from \${clientIp} (Task: \${taskId}):\`, parsedMessage);
+
+        if (!parsedMessage.messageContent || typeof parsedMessage.messageContent.text !== 'string' || !parsedMessage.senderId || !parsedMessage.messageContent.type) {
+            console.error(\`[WebSocket] Invalid message structure from \${clientIp} (Task: \${taskId}):\`, parsedMessage);
+            ws.send(JSON.stringify({ type: 'error', content: { text: 'Invalid structure. Needs: senderId, messageContent.type, messageContent.text.' }, senderId: 'system', ts: new Date().toISOString() }));
+            return;
+        }
+        let taskDirPath;
+        try { taskDirPath = getTaskDirectoryPath(taskId); await memoryManager.initializeTaskMemory(taskDirPath); }
+        catch (pathError) {
+            console.error(\`[WebSocket] Error resolving taskDirPath for \${taskId} from \${clientIp}: \${pathError.message}\`);
+            ws.send(JSON.stringify({ type: 'error', content: { text: 'Server error: Task context issue.' }, senderId: 'system', ts: new Date().toISOString() }));
+            return;
+        }
+        const messageDataToSave = { taskId, senderId: parsedMessage.senderId, content: parsedMessage.messageContent, clientMessageId: parsedMessage.clientMessageId, relatedToMessageId: parsedMessage.relatedToMessageId };
+        try {
+            await memoryManager.addChatMessage(taskDirPath, messageDataToSave);
+            console.log(\`[WebSocket] Message from \${clientIp} (Task: \${taskId}) processed and event emitted.\`);
+            if (parsedMessage.senderId !== 'agent' && parsedMessage.messageContent.type === 'text') {
+                 console.log(\`[WebSocket] TODO: Trigger OrchestratorAgent for taskId: \${taskId} with new message: "\${parsedMessage.messageContent.text}"\`);
+            }
+        } catch (error) {
+            console.error(\`[WebSocket] Error during message persistence for \${clientIp} (Task: \${taskId}):\`, error);
+            ws.send(JSON.stringify({ type: 'error', content: { text: 'Error processing message server-side.' }, senderId: 'system', ts: new Date().toISOString() }));
+        }
+    });
+
+    ws.on('close', () => {
+        if (activeTaskSockets.has(taskId)) {
+            activeTaskSockets.get(taskId).delete(ws);
+            console.log(\`[WebSocket] Removed client \${clientIp} from task \${taskId}. Remaining clients: \${activeTaskSockets.get(taskId).size}\`);
+            if (activeTaskSockets.get(taskId).size === 0) {
+                activeTaskSockets.delete(taskId);
+                console.log(\`[WebSocket] No more clients for task \${taskId}, removed task from active sockets.\`);
+            }
+        }
+        console.log(\`[WebSocket] Client \${clientIp} (Task: \${taskId}) disconnected\`);
+    });
+    ws.on('error', (error) => {
+        console.error(\`[WebSocket] Error on connection with \${clientIp} (Task: \${taskId}):\`, error);
+        if (activeTaskSockets.has(taskId)) {
+            activeTaskSockets.get(taskId).delete(ws);
+             if (activeTaskSockets.get(taskId).size === 0) {
+                activeTaskSockets.delete(taskId);
+            }
+        }
+    });
+
+    try { ws.send(JSON.stringify({ type: 'system', message: \`Successfully connected to WebSocket for taskId \${taskId}.\` })); }
+    catch (error) { console.error(\`[WebSocket] Failed to send welcome message to \${clientIp} (Task: \${taskId}):\`, error); }
+});
+
+// --- START SERVER ---
+server.listen(PORT, () => {
+    console.log(\`HTTP and WebSocket Server running on http://localhost:\${PORT}\`);
+    console.log(\`WebSocket endpoint for chat: ws://localhost:\${PORT}\${CHAT_WEBSOCKET_PATH}?taskId=YOUR_TASK_ID\`);
 });
