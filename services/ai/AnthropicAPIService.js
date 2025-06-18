@@ -1,6 +1,6 @@
 // File: services/ai/AnthropicAPIService.js
-import BaseAIService from '../BaseAIService.js';
-import Anthropic from '@anthropic-ai/sdk';
+const BaseAIService = require('../BaseAIService.js');
+const Anthropic = require('@anthropic-ai/sdk');
 
 class AnthropicAPIService extends BaseAIService {
     /**
@@ -237,4 +237,4 @@ class AnthropicAPIService extends BaseAIService {
     }
 }
 
-export default AnthropicAPIService;
+module.exports = AnthropicAPIService;

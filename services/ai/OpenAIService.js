@@ -1,7 +1,7 @@
 // File: services/ai/OpenAIService.js
-import BaseAIService from '../BaseAIService.js'; // Corrected path
-import OpenAI from 'openai'; // Official OpenAI library
-import { get_encoding, encoding_for_model as encodingForModel } from 'tiktoken'; // Specific import for get_encoding
+const BaseAIService = require('../BaseAIService.js'); // Corrected path
+const OpenAI = require('openai'); // Official OpenAI library
+const { get_encoding, encoding_for_model: encodingForModel } = require('tiktoken'); // Specific import for get_encoding
 
 class OpenAIService extends BaseAIService {
     /**
@@ -244,4 +244,4 @@ class OpenAIService extends BaseAIService {
     // close() { if (this.enc) this.enc.free(); }
 }
 
-export default OpenAIService;
+module.exports = OpenAIService;

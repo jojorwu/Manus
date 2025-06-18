@@ -1,6 +1,6 @@
 // File: services/ai/GeminiService.js
-import BaseAIService from '../BaseAIService.js'; // Corrected path
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+const BaseAIService = require('../BaseAIService.js'); // Corrected path
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 
 class GeminiService extends BaseAIService {
     /**
@@ -412,5 +412,5 @@ class GeminiService extends BaseAIService {
     }
 }
 
-// module.exports = GeminiService; // Use ES module export for consistency with BaseAIService
-export default GeminiService;
+module.exports = GeminiService; // Use ES module export for consistency with BaseAIService
+// export default GeminiService;

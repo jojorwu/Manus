@@ -101,5 +101,5 @@ class BaseAIService {
     }
 }
 
-export default BaseAIService;
-// module.exports = BaseAIService; // Uncomment if using CommonJS modules elsewhere for this base class
+// export default BaseAIService;
+module.exports = BaseAIService; // Uncomment if using CommonJS modules elsewhere for this base class

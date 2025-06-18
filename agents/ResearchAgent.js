@@ -1,7 +1,3 @@
-class ResearchAgent {
-  constructor(subTaskQueue, resultsQueue, toolsMap, agentApiKeysConfig) {
-    this.subTaskQueue = subTaskQueue;
-    this.resultsQueue = resultsQueue;
 const { t } = require('../utils/localization');
 
 class ResearchAgent {

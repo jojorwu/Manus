@@ -1,13 +1,13 @@
 // OrchestratorAgent.js
-    import fs from 'fs-extra';
-    import path from 'path';
-    import PlanExecutor from '../core/PlanExecutor.js';
-    import { PlanManager } from './PlanManager.js';
-    import { EXECUTE_FULL_PLAN, PLAN_ONLY, SYNTHESIZE_ONLY, EXECUTE_PLANNED_TASK } from '../utils/constants.js';
-    import MemoryManager from '../core/MemoryManager.js';
-    import ConfigManager from '../core/ConfigManager.js';
-    import { loadTaskState } from '../utils/taskStateUtil.js';
-    import { v4 as uuidv4 } from 'uuid';
+    const fs = require('fs-extra');
+    const path = require('path');
+    const PlanExecutor = require('../core/PlanExecutor.js');
+    const { PlanManager } = require('./PlanManager.js');
+    const { EXECUTE_FULL_PLAN, PLAN_ONLY, SYNTHESIZE_ONLY, EXECUTE_PLANNED_TASK } = require('../utils/constants.js');
+    const MemoryManager = require('../core/MemoryManager.js');
+    const ConfigManager = require('../core/ConfigManager.js');
+    const { loadTaskState } = require('../utils/taskStateUtil.js');
+    const { v4: uuidv4 } = require('uuid');
 
     class OrchestratorAgent {
         constructor(activeAIService, taskQueue, memoryManager, reportGenerator, agentCapabilities, resultsQueue, savedTasksBaseDir) {
@@ -356,4 +356,4 @@
             };
         }
     }
-    export default OrchestratorAgent;
+    module.exports = OrchestratorAgent;

@@ -1,11 +1,11 @@
 // core/websocketHandler.js
-import { WebSocketServer, WebSocket } from 'ws';
-import url from 'url';
+const { WebSocketServer, WebSocket } = require('ws');
+const url = require('url');
 
 const CHAT_WEBSOCKET_PATH = '/api/chat_ws';
 const activeTaskSockets = new Map(); // Key: taskId (string), Value: Set<WebSocket>
 
-export default function initializeWebSocketHandler(
+function initializeWebSocketHandler(
     httpServer,
     eventEmitter,
     memoryManager,
@@ -146,3 +146,5 @@ export default function initializeWebSocketHandler(
 
     return wss; // Optionally return the wss instance
 }
+
+module.exports = initializeWebSocketHandler;

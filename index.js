@@ -7,15 +7,15 @@ const http = require('http');
 // url module is now used in websocketHandler.js
 // EventEmitter is imported via dependencies.js
 
-// Import local modules using ES module syntax
-import OrchestratorAgent from './agents/OrchestratorAgent.js';
-import { initializeLocalization, t } from './utils/localization.js';
-import initializeApiRoutes from './routes/apiRoutes.js';
-import initializeWebSocketHandler from './core/websocketHandler.js';
-import { getTaskDirectoryPath } from './utils/taskPathUtils.js'; // Import from new util module
+// Import local modules using CommonJS syntax
+const OrchestratorAgent = require('./agents/OrchestratorAgent.js');
+const { initializeLocalization, t } = require('./utils/localization.js');
+const initializeApiRoutes = require('./routes/apiRoutes.js');
+const initializeWebSocketHandler = require('./core/websocketHandler.js');
+const { getTaskDirectoryPath } = require('./utils/taskPathUtils.js'); // Import from new util module
 
 // Import initialized instances from dependencies.js
-import {
+const {
     globalEventEmitter,
     memoryManager,
     openAIService,
@@ -24,7 +24,7 @@ import {
     resultsQueue,
     savedTasksBaseDir, // Still needed if getTaskDirectoryPath used it directly, but now getTaskDirectoryPath imports it
     agentApiKeysConfig
-} from './core/dependencies.js';
+} = require('./core/dependencies.js');
 
 initializeLocalization();
 

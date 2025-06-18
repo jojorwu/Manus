@@ -1,10 +1,10 @@
 // routes/apiRoutes.js
-import express from 'express';
-import { v4 as uuidv4 } from 'uuid'; // uuidv4 is used in /generate-plan
+const express = require('express');
+const { v4: uuidv4 } = require('uuid'); // uuidv4 is used in /generate-plan
 
 // Note: multer instance ('upload') and getTaskDirectoryPath are passed via dependencies
 
-export default function initializeApiRoutes(dependencies) {
+function initializeApiRoutes(dependencies) {
     const router = express.Router();
     const {
         OrchestratorAgent, // Class
@@ -172,3 +172,5 @@ export default function initializeApiRoutes(dependencies) {
 
     return router;
 }
+
+module.exports = initializeApiRoutes;
