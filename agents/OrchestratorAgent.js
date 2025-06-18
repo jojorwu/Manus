@@ -33,6 +33,7 @@
         }
 
         async _processUserClarification(taskState) {
+            // ... (no change from previous version)
             if (!taskState.needsUserInput || !taskState.pendingQuestionId) return;
             taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_CHECK_STARTED", \`Checking for response to QID \${taskState.pendingQuestionId}\`));
             const chatHistory = await taskState.memoryManager.getChatHistory(taskState.taskDirPath, { sort_order: 'asc' });
@@ -61,7 +62,7 @@
         }
 
         async _initializeTaskEnvironment(userTaskString, parentTaskId, taskIdToLoad, executionMode, existingState = null) {
-            // ... (Implementation from Turn 37 - no changes in this step)
+            // ... (no change from previous version)
             let taskId, taskDirPath, finalJournalEntries, currentWorkingContext, uploadedFilePaths, planStages,
                 lastExecutionContext, currentOriginalTask, needsUserInput, pendingQuestionId, responseMessage,
                 currentWebSearchResults, lastError;
@@ -115,9 +116,7 @@
                 }
                 const taskDefinitionContent = \`# Task: \${taskId}\nUser Task: \${currentOriginalTask}\nMode: \${executionMode}\`;
                 await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', taskDefinitionContent);
-                if (currentOriginalTask?.trim()) {
-                    await this.memoryManager.addChatMessage(taskDirPath, {taskId, senderId: parentTaskId || 'user_initial', role: 'user', content: {type:'text', text:currentOriginalTask}});
-                }
+                // Initial user message is now logged in handleUserTask after potential clarification processing
             }
 
             return {
@@ -157,111 +156,51 @@
             }
         }
 
-        async _notifyAndExecuteSearch(taskState, searchQuery) {
-            // ... (Implementation from Turn 39 - no changes in this step, but it now has a subsequent step)
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("WEB_SEARCH_INITIATED", \`Search query: "\${searchQuery}"\`));
-            const searchNotificationText = \`Performing web search for: "\${searchQuery}"...\`;
-            const agentSearchNotificationMessage = {
-                taskId: taskState.taskId, senderId: 'OrchestratorAgent', role: 'assistant',
-                content: { type: 'agent_status', text: searchNotificationText }
-            };
-            const savedNotification = await taskState.memoryManager.addChatMessage(taskState.taskDirPath, agentSearchNotificationMessage);
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_NOTIFIED_OF_SEARCH", \`Notification sent, chat msg ID: \${savedNotification.id}\`));
-            // taskState.responseMessage = searchNotificationText; // This will be overwritten by search results or summary
-
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("WEB_SEARCH_EXECUTION_STARTED", \`Executing WebSearchTool for: "\${searchQuery}"\`));
-            taskState.currentWebSearchResults = null;
-            taskState.lastError = null;
-
-            const searchStepId = \`adhoc_search_\${uuidv4().substring(0,8)}\`;
-            const singleStepPlan = [[ { stepId: searchStepId, tool_name: "WebSearchTool", sub_task_input: { query: searchQuery }, narrative_step: \`Perform web search for: \${searchQuery}\`, assigned_agent_role: "ResearchAgent" } ]];
-
-            try {
-                const searchExecutionResult = await taskState.planExecutor.executePlan( singleStepPlan, taskState.taskId, taskState.currentOriginalTask );
-                if (searchExecutionResult.journalEntries?.length) taskState.finalJournalEntries.push(...searchExecutionResult.journalEntries);
-                if (searchExecutionResult.success && searchExecutionResult.executionContext?.length > 0) {
-                    const lastStepOutcome = searchExecutionResult.executionContext[0];
-                    if (lastStepOutcome.stepId === searchStepId && lastStepOutcome.status === "COMPLETED") {
-                        taskState.currentWebSearchResults = lastStepOutcome.processed_result_data || lastStepOutcome.raw_result_data;
-                        const resultsCount = Array.isArray(taskState.currentWebSearchResults) ? taskState.currentWebSearchResults.length : (taskState.currentWebSearchResults ? 1 : 0);
-                        taskState.responseMessage = \`Web search for "\${searchQuery}" completed. Found \${resultsCount} results. Summarizing...\`; // Temp message
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("WEB_SEARCH_EXECUTION_SUCCESS", \`Query: "\${searchQuery}", Results: \${resultsCount}\`));
-                        taskState.currentOriginalTask += \`\n\nSystem Note: Web search for "\${searchQuery}" yielded \${resultsCount} results. Raw results (first ~1KB):\n\${JSON.stringify(taskState.currentWebSearchResults).substring(0, 1000)}...\`;
-                    } else { throw new Error(lastStepOutcome.error_details?.message || "WebSearchTool step did not complete successfully."); }
-                } else { throw new Error(searchExecutionResult.failedStepDetails?.error_details?.message || "Web search execution failed."); }
-            } catch (error) {
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("WEB_SEARCH_EXECUTION_ERROR", \`Error: \${error.message}\`, { query: searchQuery }));
-                taskState.lastError = { message: error.message, source: "WebSearchToolExecution" };
-                taskState.responseMessage = \`Failed to execute web search for "\${searchQuery}".\`;
-            }
-            return taskState;
-        }
-
-        async _summarizeAndPresentSearchResults(taskState, searchQuery) {
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_PROCESSING_STARTED", \`Processing search results for query: "\${searchQuery}"\`));
-            let messageText;
-
-            if (taskState.lastError) {
-                messageText = \`There was an error during the web search for "\${searchQuery}": \${taskState.lastError.message}\`;
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_PROCESSING_ERROR", messageText));
-            } else if (!taskState.currentWebSearchResults || (Array.isArray(taskState.currentWebSearchResults) && taskState.currentWebSearchResults.length === 0)) {
-                messageText = \`Sorry, the web search for "\${searchQuery}" did not yield any results.\`;
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_PROCESSING_NO_RESULTS", messageText));
-            } else {
-                const topResults = Array.isArray(taskState.currentWebSearchResults)
-                    ? taskState.currentWebSearchResults.slice(0, 5)
-                    : [taskState.currentWebSearchResults]; // Handle if results is single object
-
-                const formattedResultsString = topResults.map((res, index) =>
-                    \`Result \${index + 1}:\nTitle: \${res.title || 'N/A'}\nLink: \${res.link || 'N/A'}\nSnippet: \${res.snippet || 'N/A'}\`
-                ).join('\n\n');
-
-                const summarizationSystemPrompt = "You are an AI assistant. Your task is to summarize the provided web search results in the context of the original user query.";
-                const summarizationUserPrompt = \`Original search query: "\${searchQuery}"
-
-Search Results (Top \${topResults.length}):
-\${formattedResultsString}
-
-Please provide a concise summary of these search results (2-4 sentences). If possible, directly answer the user's implicit question that led to this search. Highlight 1-2 most relevant sources (titles) if they are critical for the answer. Do not just list the results.\`;
-
-                const summaryMessages = [
-                    { role: 'system', content: summarizationSystemPrompt },
-                    { role: 'user', content: summarizationUserPrompt }
-                ];
-
+        async _classifyUserRequestForSearch(taskState, userMessageText) {
+            // ... (Implementation from Turn 49)
+            let previousChatHistoryString = "Нет предыдущего контекста.";
+            if (taskState.memoryManager && typeof taskState.memoryManager.getChatHistory === 'function') {
                 try {
-                    const summaryModel = taskState.aiService.baseConfig?.summarizationModel || taskState.aiService.baseConfig?.defaultModel || 'claude-3-haiku-20240307';
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_SUMMARIZATION_INVOKED", \`Invoking LLM (\${summaryModel}) for search result summarization.\`));
-
-                    const preparedContext = await taskState.aiService.prepareContextForModel(summaryMessages, { modelName: summaryModel });
-                    const summarizedText = await taskState.aiService.completeChat(preparedContext || summaryMessages, { model: summaryModel, temperature: 0.4 });
-
-                    if (summarizedText?.trim()) {
-                        messageText = summarizedText.trim();
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_SUMMARIZATION_SUCCESS", \`Summarized search results: \${messageText.substring(0, 200)}...\`));
-                    } else {
-                        messageText = "I found some search results, but encountered an issue summarizing them. You can review the raw data that was added to the task context.";
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_SUMMARIZATION_EMPTY", "LLM returned empty summary."));
+                    const historyOptions = { sort_order: 'desc', limit: 4 };
+                    const chatHistory = await taskState.memoryManager.getChatHistory(taskState.taskDirPath, historyOptions);
+                    if (chatHistory && chatHistory.length > 0) {
+                        previousChatHistoryString = chatHistory.reverse()
+                            .map(msg => {
+                                const senderPrefix = msg.senderId === 'OrchestratorAgent' || msg.sender?.role === 'assistant' ? 'Агент' : 'Пользователь';
+                                return \`\${senderPrefix}: \${msg.content.text}\`;
+                            })
+                            .join('\n');
                     }
-                } catch (error) {
-                    messageText = \`I found search results, but an error occurred while summarizing them: \${error.message}. You can review the raw data added to the task context.\`;
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_SUMMARIZATION_ERROR", \`Error: \${error.message}\`));
-                    taskState.lastError = { message: \`Summarization error: \${error.message}\`, source: "SummarizationLLM" };
-                }
-            }
+                } catch (histError) { console.error(\`[OrchestratorAgent] Error fetching chat history for search classification: \${histError.stack}\`); }
+            } else { console.warn("[OrchestratorAgent] MemoryManager or getChatHistory not available for search classification."); }
 
-            const agentResponseMessage = {
-                taskId: taskState.taskId,
-                senderId: 'OrchestratorAgent',
-                role: 'assistant',
-                content: { type: 'text', text: messageText }
-            };
-            await taskState.memoryManager.addChatMessage(taskState.taskDirPath, agentResponseMessage);
-            taskState.responseMessage = messageText; // This will be the final message for this turn
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_RESULTS_PRESENTED_TO_USER", "Final search summary/status sent to user."));
-            return taskState;
+            const userMessagePlaceholder = '{{userMessage}}';
+            const chatHistoryPlaceholder = '{{previousChatHistory}}';
+            const promptTemplate = \`Ты — умный ассистент-классификатор. Твоя задача - проанализировать ЗАПРОС ПОЛЬЗОВАТЕЛЯ и решить, требуется ли для ответа на него или выполнения подразумеваемой задачи поиск АКТУАЛЬНОЙ или СПЕЦИФИЧЕСКОЙ информации в интернете. Учитывай "ПРЕДЫСТОРИЮ ДИАЛОГА" (если предоставлена), чтобы понять контекст. Не предлагай поиск, если ответ уже мог быть дан, или если вопрос является продолжением обсуждения, где поиск не требуется. КРИТЕРИИ ДЛЯ ПОИСКА: - Информация, скорее всего, отсутствует в базовых знаниях стандартной языковой модели (например, очень нишевые факты, данные о малоизвестных компаниях или людях). - Требуется актуальная информация (новости, курсы валют, погода, события, произошедшие недавно). - Запрос на конкретные факты, которые легко проверяются в вебе. ИЗБЕГАЙ ПОИСКА: - Для общих вопросов, на которые можно ответить на основе эрудиции. - Для генерации идей, творческих текстов, мнений, если это не подразумевает поиск конкретных примеров или фактов. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является прямым ответом на предыдущий вопрос агента. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является простой командой для другого инструмента (например, "посчитай 2+2", "создай файл x.txt"). ТВОЙ ОТВЕТ ДОЛЖЕН БЫТЬ В ОДНОМ ИЗ ДВУХ ФОРМАТОВ: 1.  Если поиск НУЖЕН: верни ТОЛЬКО строку поискового запроса, который следует использовать (например, "курс биткоина к доллару сегодня" или "симптомы гриппа H1N1"). Поисковый запрос должен быть на языке ЗАПРОСА ПОЛЬЗОВАТЕЛЯ. 2.  Если поиск НЕ НУЖЕН: верни ТОЛЬКО специальный маркер "NO_SEARCH". ПРЕДЫСТОРИЯ ДИАЛОГА (последние несколько сообщений, если есть):\n\${chatHistoryPlaceholder}\n\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n"\${userMessagePlaceholder}"\n\nТВОЙ ОТВЕТ:\`;
+            const finalPrompt = promptTemplate.replace(chatHistoryPlaceholder, previousChatHistoryString).replace(userMessagePlaceholder, userMessageText);
+            let classificationResult = 'NO_SEARCH';
+            if (!taskState.aiService) { taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", "aiService not available, defaulting to NO_SEARCH.")); return classificationResult; }
+            try {
+                const classificationLlmParams = { model: taskState.aiService.baseConfig?.models?.fast || taskState.aiService.baseConfig?.defaultModel || 'gpt-3.5-turbo', temperature: 0.1, max_tokens: 150 };
+                const messagesForClassifier = [{ role: 'user', content: finalPrompt }];
+                const preparedContext = await taskState.aiService.prepareContextForModel(messagesForClassifier, { modelName: classificationLlmParams.model });
+                let llmResponse;
+                const effectiveContext = (preparedContext && !preparedContext.cacheName) ? preparedContext : messagesForClassifier;
+                const callParams = { ...classificationLlmParams };
+                if (preparedContext && preparedContext.cacheName) { callParams.cacheHandle = { cacheName: preparedContext.cacheName }; }
+                llmResponse = await taskState.aiService.completeChat(effectiveContext, callParams);
+                if (llmResponse?.trim()) { classificationResult = llmResponse.trim(); } else { classificationResult = 'NO_SEARCH'; }
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ATTEMPT", \`User message: "\${userMessageText.substring(0,100)}...". LLM Response: "\${classificationResult}"\`));
+            } catch (classError) {
+                console.error(\`[OrchestratorAgent] Error during search classification: \${classError.stack}\`);
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", \`Error: \${classError.message}. Defaulting to NO_SEARCH.\`));
+                classificationResult = 'NO_SEARCH';
+            }
+            return classificationResult;
         }
 
+        async _notifyAndExecuteSearch(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
+        async _summarizeAndPresentSearchResults(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
         async _handleSynthesizeOnlyMode(taskState) { /* ... no change ... */ }
         async _handleExecutePlannedTaskMode(taskState) { /* ... no change ... */ }
         async _performPlanningPhase(taskState) { /* ... no change ... */ }
@@ -273,85 +212,135 @@ Please provide a concise summary of these search results (2-4 sentences). If pos
         async handleUserTask(userTaskString, uploadedFiles, parentTaskId = null, taskIdToLoad = null, executionMode = EXECUTE_FULL_PLAN) {
             let taskState;
             let loadedStateForResumption = null;
+            let performedAdHocSearchThisTurn = false;
 
-            if (taskIdToLoad) { /* ... state loading logic from Turn 37 ... */ }
+            if (taskIdToLoad) {
+                const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
+                let potentialTaskDirPath;
+                try {
+                    // TODO: Robust task path discovery for resuming/loading tasks, especially across different dates.
+                    const todayDate = new Date().toISOString().split('T')[0]; // This date assumption is a key limitation.
+                    potentialTaskDirPath = path.join(baseTaskDir, todayDate, \`task_\${taskIdToLoad}\`);
+
+                    const stateFilePath = path.join(potentialTaskDirPath, 'task_state.json');
+                    if (await fs.pathExists(stateFilePath)) {
+                        const stateResult = await loadTaskState(stateFilePath);
+                        if (stateResult.success && stateResult.taskState) {
+                            loadedStateForResumption = stateResult.taskState;
+                            loadedStateForResumption.taskDirPath = potentialTaskDirPath;
+                            if (loadedStateForResumption.needsUserInput && loadedStateForResumption.pendingQuestionId) {
+                                await this._processUserClarification(loadedStateForResumption);
+                            }
+                        }
+                    } else if (executionMode !== EXECUTE_PLANNED_TASK && executionMode !== SYNTHESIZE_ONLY) {
+                        console.warn(\`No state file at \${stateFilePath} for taskIdToLoad: \${taskIdToLoad}\`);
+                    }
+                } catch (e) { console.warn(\`Error loading state for taskIdToLoad \${taskIdToLoad}: \${e.message}\`); }
+            }
 
             try {
                 taskState = await this._initializeTaskEnvironment(userTaskString, parentTaskId, taskIdToLoad, executionMode, loadedStateForResumption);
 
+                // Log the specific user input for this interaction if it's new (not just resuming a loaded task state)
                 if (userTaskString && (!loadedStateForResumption || userTaskString !== loadedStateForResumption.userTaskString)) {
-                     await this.memoryManager.addChatMessage(taskState.taskDirPath, { taskId: taskState.taskId, senderId: parentTaskId || 'user_resuming_prompt', role: 'user', content: { type: 'text', text: userTaskString } });
+                     const currentInteractionUserMessage = {
+                        taskId: taskState.taskId,
+                        senderId: parentTaskId || 'user_interaction', // Distinguish from initial prompt if needed
+                        role: 'user',
+                        content: { type: 'text', text: userTaskString }
+                     };
+                     await this.memoryManager.addChatMessage(taskState.taskDirPath, currentInteractionUserMessage);
+                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("CURRENT_USER_INPUT_LOGGED", \`Logged current interaction: "\${userTaskString.substring(0,100)}..."\`));
                 }
+
                 await taskState.memoryManager.overwriteMemory(taskState.taskDirPath, 'current_working_context.json', { CWC: taskState.currentWorkingContext, lastUpdated: new Date().toISOString() }, { isJson: true });
                 await taskState.memoryManager.overwriteMemory(taskState.taskDirPath, 'cwc.md', taskState.currentWorkingContext);
-                if (!loadedStateForResumption || uploadedFiles?.length > 0) {
+
+                if (!loadedStateForResumption || (uploadedFiles && uploadedFiles.length > 0) ) {
                     await this._processAndSaveUploadedFiles(uploadedFiles, taskState);
                 }
 
                 // --- Ad-hoc Search Query Classification & Execution ---
-                // TODO: Implement LLM-based classification of taskState.currentOriginalTask or latest user message.
-                // This is a placeholder for where that logic would go.
-                let classifiedSearchQuery = null; // Example: "benefits of AI in software engineering"
-                // if (taskState.currentOriginalTask.toLowerCase().includes("search for:")) { // Dummy trigger
-                //    classifiedSearchQuery = taskState.currentOriginalTask.substring(taskState.currentOriginalTask.toLowerCase().indexOf("search for:") + "search for:".length).trim();
-                // }
+                // Condition for running classifier:
+                // - Not currently waiting for user input (i.e., previous question was answered or no question was pending).
+                // - Current execution mode is EXECUTE_FULL_PLAN (typical for new general requests) or no specific mode (implying a new request).
+                // - Not a simple reload of a task if userTaskString is empty (meaning user just wants to "continue" without new input).
+                if (!taskState.needsUserInput &&
+                    (taskState.executionMode === EXECUTE_FULL_PLAN || !taskState.executionMode) &&
+                    userTaskString?.trim() // Only classify if there's new textual input from user for this turn
+                   ) {
 
-                if (classifiedSearchQuery) {
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TRIGGERED", \`Ad-hoc search triggered for query: \${classifiedSearchQuery}\`));
-                    taskState = await this._notifyAndExecuteSearch(taskState, classifiedSearchQuery);
-                    taskState = await this._summarizeAndPresentSearchResults(taskState, classifiedSearchQuery);
-                    // After search and presentation, the agent's turn for this specific ad-hoc query is done.
-                    // The taskState.responseMessage is now the summary (or error/no results message).
-                    // We might want to set overallSuccess based on whether the summary was positive.
-                    // For now, if summarization happened, consider this interaction path successful.
-                    taskState.overallSuccess = !taskState.lastError; // Success if search and summary had no major errors
-                    return; // Goes to finally block
+                    let messageToClassify = userTaskString; // Use the current input for classification
+
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_CLASSIFICATION_STARTED", \`Classifying for ad-hoc search: "\${messageToClassify.substring(0,100)}..."\`));
+                    const searchQueryOrNoSearch = await this._classifyUserRequestForSearch(taskState, messageToClassify);
+
+                    if (searchQueryOrNoSearch && searchQueryOrNoSearch.toUpperCase() !== 'NO_SEARCH') {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TRIGGERED", \`LLM classified for search. Query: "\${searchQueryOrNoSearch}"\`));
+                        taskState = await this._notifyAndExecuteSearch(taskState, searchQueryOrNoSearch);
+                        taskState = await this._summarizeAndPresentSearchResults(taskState, searchQueryOrNoSearch);
+                        taskState.overallSuccess = !taskState.lastError;
+                        performedAdHocSearchThisTurn = true;
+                    } else {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_NOT_NEEDED", \`LLM classified as NO_SEARCH for: "\${messageToClassify.substring(0,100)}..."\`));
+                    }
                 }
                 // --- End Ad-hoc Search ---
 
-                if (taskState.executionMode === SYNTHESIZE_ONLY) { return await this._handleSynthesizeOnlyMode(taskState); }
-                if (taskState.executionMode === EXECUTE_PLANNED_TASK) {
-                    if (!taskState.planStages?.length) { await this._handleExecutePlannedTaskMode(taskState); }
-                    if (!taskState.overallSuccess) { return; }
-                }
-                if (taskState.needsUserInput) { return; } // Check after clarification processing
-
-                if (taskState.executionMode === PLAN_ONLY || (taskState.executionMode === EXECUTE_FULL_PLAN && (!taskState.planStages?.length) )) {
-                    const planningOutcome = await this._performPlanningPhase(taskState);
-                    if (planningOutcome.needsUserInput) { return; }
-                    if (!planningOutcome.success) {
-                        taskState.overallSuccess = false; taskState.responseMessage = planningOutcome.message || "Planning failed.";
-                        taskState.finalAnswer = JSON.stringify(planningOutcome.rawResponse || {}); return;
-                    }
-                } else if (taskState.executionMode === EXECUTE_PLANNED_TASK && taskState.planStages?.length > 0) {
-                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SKIPPED", "Skipping planning."));
-                }
-
-                if (taskState.needsUserInput) { return; } // Check after planning (clarifying question)
-
-                if (taskState.executionMode === PLAN_ONLY) {
-                    taskState.responseMessage = "Plan created successfully.";
-                    taskState.finalAnswer = JSON.stringify(taskState.planStages);
-                    taskState.overallSuccess = true; return;
-                }
-
-                if (taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) {
-                    await this._performExecutionPhase(taskState);
-                }
-                if ((taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) && taskState.overallSuccess) {
-                    await this._performCwcUpdateLLM(taskState);
-                }
-                if (!taskState.wasFinalAnswerPreSynthesized) {
-                    await this._performFinalSynthesis(taskState);
+                if (performedAdHocSearchThisTurn) {
+                    // If search was performed, this turn's primary action is complete.
+                    // responseMessage and overallSuccess are set by search methods.
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TURN_CONCLUDED", \`Ad-hoc search flow completed for task \${taskState.taskId}\`));
+                } else if (taskState.needsUserInput) {
+                    // If, after clarification processing or if planning asked a question, we still need input.
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("TASK_PAUSED_AWAITING_INPUT", \`Awaiting input for: \${taskState.pendingQuestionId}\`));
                 } else {
-                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED_PRE_SYNTHESIZED", "Synthesis skipped."));
+                    // Standard execution flow if no ad-hoc search handled the turn and no user input is pending
+                    if (taskState.executionMode === SYNTHESIZE_ONLY) {
+                        return await this._handleSynthesizeOnlyMode(taskState); // This returns early, includes finalize
+                    }
+                    if (taskState.executionMode === EXECUTE_PLANNED_TASK) {
+                        if (!taskState.planStages?.length) { await this._handleExecutePlannedTaskMode(taskState); }
+                        if (!taskState.overallSuccess) { return; }
+                    }
+
+                    if (taskState.executionMode === PLAN_ONLY || (taskState.executionMode === EXECUTE_FULL_PLAN && (!taskState.planStages?.length) )) {
+                        const planningOutcome = await this._performPlanningPhase(taskState);
+                        if (planningOutcome.needsUserInput) { return; } // This will go to finally
+                        if (!planningOutcome.success) {
+                            taskState.overallSuccess = false; taskState.responseMessage = planningOutcome.message || "Planning failed.";
+                            taskState.finalAnswer = JSON.stringify(planningOutcome.rawResponse || {}); return;
+                        }
+                    } else if (taskState.executionMode === EXECUTE_PLANNED_TASK && taskState.planStages?.length > 0) {
+                         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SKIPPED", "Skipping planning."));
+                    }
+
+                    if (taskState.needsUserInput) { return; } // Check again after planning phase
+
+                    if (taskState.executionMode === PLAN_ONLY) {
+                        taskState.responseMessage = "Plan created successfully.";
+                        taskState.finalAnswer = JSON.stringify(taskState.planStages);
+                        taskState.overallSuccess = true; return;
+                    }
+
+                    if (taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) {
+                        await this._performExecutionPhase(taskState);
+                    }
+                    if ((taskState.executionMode === EXECUTE_FULL_PLAN || taskState.executionMode === EXECUTE_PLANNED_TASK) && taskState.overallSuccess) {
+                        await this._performCwcUpdateLLM(taskState);
+                    }
+                    if (!taskState.wasFinalAnswerPreSynthesized) {
+                        await this._performFinalSynthesis(taskState);
+                    } else {
+                         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FINAL_SYNTHESIS_SKIPPED_PRE_SYNTHESIZED", "Synthesis skipped."));
+                    }
                 }
             } catch (error) {
                 console.error(\`Critical error in OrchestratorAgent.handleUserTask for \${taskState?.taskId || parentTaskId || 'unknown'}: \${error.stack}\`);
                 if (taskState) {
                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("HANDLE_USER_TASK_CRITICAL_ERROR", \`Critical error: \${error.message}\`));
                     taskState.overallSuccess = false; taskState.responseMessage = \`Critical error: \${error.message.substring(0, 200)}\`;
-                } else { /* ... error handling for no taskState ... */
+                } else {
                     const errorTaskId = parentTaskId || Date.now().toString() + '_init_fail';
                     const tempJournal = [this._createOrchestratorJournalEntry("HANDLE_USER_TASK_INIT_ERROR", \`Critical init error: \${error.message}\`)];
                     return { success: false, message: \`Critical initialization error: \${error.message.substring(0,200)}\`, taskId: errorTaskId, data: null, journal: tempJournal };
