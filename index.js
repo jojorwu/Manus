@@ -67,5 +67,5 @@ initializeWebSocketHandler(server, globalEventEmitter, memoryManager, getTaskDir
 
 // --- START SERVER ---
 server.listen(PORT, () => {
-    console.log(\`HTTP and WebSocket Server running on http://localhost:\${PORT}\`);
+    console.log(`HTTP and WebSocket Server running on http://localhost:${PORT}`);
 });

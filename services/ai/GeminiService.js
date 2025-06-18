@@ -46,7 +46,7 @@ class GeminiService extends BaseAIService {
             this.genAI = new GoogleGenerativeAI(apiKey);
             return true;
         } catch (error) {
-            console.error(\`GeminiService: Failed to initialize GoogleGenerativeAI client. Error: \${error.message}\`);
+            console.error(`GeminiService: Failed to initialize GoogleGenerativeAI client. Error: ${error.message}`);
             this.genAI = null; // Ensure it's null on failure
             // Optional: throw new Error(\`GeminiService client initialization failed: \${error.message}\`);
             return false;
@@ -59,7 +59,7 @@ class GeminiService extends BaseAIService {
     async generateText(promptString, params = {}) {
         if (!this._ensureClient()) {
             console.warn("GeminiService: Client not available. Returning stub for generateText.");
-            return \`GeminiService stub response for: \${promptString.substring(0, 50)}...\`;
+            return `GeminiService stub response for: ${promptString.substring(0, 50)}...`;
         }
 
         const modelName = params.model || this.baseConfig.defaultModel || 'gemini-pro';
@@ -110,12 +110,12 @@ class GeminiService extends BaseAIService {
             } else if (response?.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return response.candidates[0].content.parts[0].text;
             } else {
-                console.warn(\`GeminiService (\${modelName}): API response format error. No text found. Response:\`, JSON.stringify(response, null, 2));
+                console.warn(`GeminiService (${modelName}): API response format error. No text found. Response:`, JSON.stringify(response, null, 2));
                 throw new Error("Gemini API response format error: No text content found.");
             }
         } catch (error) {
-            console.error(\`GeminiService (\${modelName}): Error during Gemini API call (generateContent):\`, error.message);
-            throw new Error(\`Gemini API Error: \${error.message}\`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent):`, error.message);
+            throw new Error(`Gemini API Error: ${error.message}`);
         }
     }
 
@@ -168,8 +168,8 @@ class GeminiService extends BaseAIService {
                 if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
                 throw new Error("Gemini API chat response format error (with cache): No text content found.");
             } catch (error) {
-                console.error(\`GeminiService (\${modelName}): Error during generateContent (with cache for chat):\`, error.message);
-                throw new Error(\`Gemini API Error (with cache for chat): \${error.message}\`);
+                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat):`, error.message);
+                throw new Error(`Gemini API Error (with cache for chat): ${error.message}`);
             }
         }
 
@@ -213,7 +213,7 @@ class GeminiService extends BaseAIService {
             if (messagesForChatSDK.length > 0 && messagesForChatSDK[messagesForChatSDK.length -1].role === 'user') {
                  lastUserMessage = messagesForChatSDK.pop().parts[0].text;
             } else if (messagesForChatSDK.length === 0 && !lastUserMessage && !currentSystemInstruction) {
-                // console.warn(`GeminiService (\${modelName}): completeChat called with no user messages to respond to and no system instruction.`);
+                // console.warn(`GeminiService (${modelName}): completeChat called with no user messages to respond to and no system instruction.`);
                  lastUserMessage = ""; // Allow sending empty message if history is also empty (e.g. to kick off with system prompt)
             }
 
@@ -226,8 +226,8 @@ class GeminiService extends BaseAIService {
             if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
             throw new Error("Gemini API chat response format error: No text content found.");
         } catch (error) {
-            console.error(\`GeminiService (\${modelName}): Error during Gemini API call (sendMessage/startChat):\`, error.message);
-            throw new Error(\`Gemini API Chat Error: \${error.message}\`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat):`, error.message);
+            throw new Error(`Gemini API Chat Error: ${error.message}`);
         }
     }
 
@@ -309,7 +309,7 @@ class GeminiService extends BaseAIService {
         // but for cache creation, it might need the "models/" prefix.
         // The `createCachedContent` in the previous version of this file used `this.genAI.caches.create`.
         // Let's assume the model name needs the "models/" prefix for cache operations.
-        const fullModelName = modelName.startsWith("models/") ? modelName : \`models/\${modelName}\`;
+        const fullModelName = modelName.startsWith("models/") ? modelName : `models/${modelName}`;
 
         const cacheCreationRequest = {
             model: fullModelName,
@@ -327,7 +327,7 @@ class GeminiService extends BaseAIService {
         }
 
         try {
-            // console.log(\`GeminiService: Creating cached content for model \${fullModelName}. DisplayName: \${displayName || 'N/A'}\`);
+            // console.log(`GeminiService: Creating cached content for model ${fullModelName}. DisplayName: ${displayName || 'N/A'}`);
             // Assuming this.genAI is the top-level GenerativeModel instance from new GoogleGenerativeAI(apiKey)
             // and it has a .cachedContent property or similar for managing caches.
             // The exact SDK call might differ slightly based on version (e.g., this.genAI.cache() or this.genAI.cachedContent())
@@ -339,11 +339,11 @@ class GeminiService extends BaseAIService {
             const modelInstanceForCache = this.genAI.getGenerativeModel({ model: modelName }); // Use plain model name here
             const cachedContentResult = await modelInstanceForCache.createCachedContent(cacheCreationRequest); // Pass the full request
 
-            // console.log(\`GeminiService: Cached content created successfully. Name: \${cachedContentResult.name}\`);
+            // console.log(`GeminiService: Cached content created successfully. Name: ${cachedContentResult.name}`);
             return cachedContentResult; // This is the CachedContent object
         } catch (error) {
-            console.error(\`GeminiService._createOrUpdateCachedContent: Error for model \${fullModelName}:\`, error.message);
-            throw new Error(\`Gemini API Error (_createOrUpdateCachedContent): \${error.message}\`);
+            console.error(`GeminiService._createOrUpdateCachedContent: Error for model ${fullModelName}:`, error.message);
+            throw new Error(`Gemini API Error (_createOrUpdateCachedContent): ${error.message}`);
         }
     }
 
@@ -405,7 +405,7 @@ class GeminiService extends BaseAIService {
             }
             return null;
         } catch (error) {
-            console.error(\`GeminiService.prepareContextForModel: Failed to prepare/cache context for model \${modelName}:\`, error.message);
+            console.error(`GeminiService.prepareContextForModel: Failed to prepare/cache context for model ${modelName}:`, error.message);
             // Don't re-throw, allow fallback to non-cached generation if desired by caller
             return null;
         }

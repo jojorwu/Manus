@@ -23,7 +23,7 @@ function getTaskDirectoryPath(taskId) {
     // TODO: This date-based folder structure assumes tasks are always created/accessed under "today".
     // For loading older tasks or more robust task path resolution, a metadata store or
     // a different directory structure (e.g., based on full taskId without date folders) would be needed.
-    return path.join(savedTasksBaseDir, today, taskId.startsWith('task_') ? taskId : \`task_\${taskId}\`);
+    return path.join(savedTasksBaseDir, today, taskId.startsWith('task_') ? taskId : `task_${taskId}`);
 }
 
 module.exports = {

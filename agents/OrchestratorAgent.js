@@ -2,10 +2,15 @@
     const fs = require('fs-extra');
     const path = require('path');
     const PlanExecutor = require('../core/PlanExecutor.js');
-    const { PlanManager } = require('./PlanManager.js');
-    const { EXECUTE_FULL_PLAN, PLAN_ONLY, SYNTHESIZE_ONLY, EXECUTE_PLANNED_TASK } = require('../utils/constants.js');
+    const { PlanManager } = require('../core/PlanManager.js');
+    // const { EXECUTE_FULL_PLAN, PLAN_ONLY, SYNTHESIZE_ONLY, EXECUTE_PLANNED_TASK } = require('../utils/constants.js'); // Commmented out due to missing file
+    // Temporary definitions for missing constants
+    const EXECUTE_FULL_PLAN = 'EXECUTE_FULL_PLAN';
+    const PLAN_ONLY = 'PLAN_ONLY';
+    const SYNTHESIZE_ONLY = 'SYNTHESIZE_ONLY';
+    const EXECUTE_PLANNED_TASK = 'EXECUTE_PLANNED_TASK';
     const MemoryManager = require('../core/MemoryManager.js');
-    const ConfigManager = require('../core/ConfigManager.js');
+    // const ConfigManager = require('../core/ConfigManager.js'); // Commented out due to missing file
     const { loadTaskState } = require('../utils/taskStateUtil.js');
     const { v4: uuidv4 } = require('uuid');
 
@@ -24,8 +29,8 @@
                 this.taskQueue, this.resultsQueue, this.aiService,
                 {}, this.savedTasksBaseDir
             );
-            this.configManager = new ConfigManager();
-            console.log(\`OrchestratorAgent initialized with AI Service: \${this.aiService.getServiceName()}, PlanExecutor configured.\`);
+            // this.configManager = new ConfigManager(); // Commented out due to missing file
+            console.log(`OrchestratorAgent initialized with AI Service: ${this.aiService.getServiceName()}, PlanExecutor configured.`);
         }
 
         _createOrchestratorJournalEntry(type, message, details = {}) {
@@ -35,12 +40,12 @@
         async _processUserClarification(taskState) {
             // ... (no change from previous version)
             if (!taskState.needsUserInput || !taskState.pendingQuestionId) return;
-            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_CHECK_STARTED", \`Checking for response to QID \${taskState.pendingQuestionId}\`));
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_CHECK_STARTED", `Checking for response to QID ${taskState.pendingQuestionId}`));
             const chatHistory = await taskState.memoryManager.getChatHistory(taskState.taskDirPath, { sort_order: 'asc' });
             const agentQuestionMessage = chatHistory.find(msg => msg.sender?.id === 'OrchestratorAgent' && msg.content?.questionDetails?.questionId === taskState.pendingQuestionId);
 
             if (!agentQuestionMessage) {
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_ERROR", \`Agent's question \${taskState.pendingQuestionId} not found.\`));
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_ERROR", `Agent's question ${taskState.pendingQuestionId} not found.`));
                 return;
             }
             const agentQuestionTimestamp = new Date(agentQuestionMessage.timestamp);
@@ -48,14 +53,14 @@
 
             if (userResponse?.content?.text) {
                 const userAnswerText = userResponse.content.text;
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_RECEIVED", \`User responded to \${taskState.pendingQuestionId}: "\${userAnswerText.substring(0,100)}..."\`));
-                taskState.currentOriginalTask += \`\n\nUser Clarification (for QID \${taskState.pendingQuestionId}): \${userAnswerText}\`;
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_RECEIVED", `User responded to ${taskState.pendingQuestionId}: "${userAnswerText.substring(0,100)}..."`));
+                taskState.currentOriginalTask += `\n\nUser Clarification (for QID ${taskState.pendingQuestionId}): ${userAnswerText}`;
                 taskState.needsUserInput = false;
                 taskState.pendingQuestionId = null;
                 taskState.responseMessage = 'User clarification processed. Resuming task.';
                 taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_PROCESSED", "User input processed."));
             } else {
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_NOT_FOUND", \`No new user response for \${taskState.pendingQuestionId}.\`));
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("USER_CLARIFICATION_NOT_FOUND", `No new user response for ${taskState.pendingQuestionId}.`));
                 taskState.responseMessage = agentQuestionMessage.content.text;
                 taskState.overallSuccess = false;
             }
@@ -70,7 +75,7 @@
             if (existingState) {
                 taskId = existingState.taskId;
                 taskDirPath = existingState.taskDirPath;
-                finalJournalEntries = existingState.finalJournalEntries || [this._createOrchestratorJournalEntry("TASK_RESUMED", \`Task \${taskId} resumed.\`)];
+                finalJournalEntries = existingState.finalJournalEntries || [this._createOrchestratorJournalEntry("TASK_RESUMED", `Task ${taskId} resumed.`)];
                 currentWorkingContext = existingState.currentWorkingContext || 'No CWC loaded on resume.';
                 uploadedFilePaths = existingState.savedUploadedFilePaths || [];
                 planStages = existingState.plan || null;
@@ -85,13 +90,13 @@
                 taskId = taskIdToLoad ? taskIdToLoad.split('_')[1] : Date.now().toString();
                 const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
                 const datedTasksDirPath = path.join(baseTaskDir, new Date().toISOString().split('T')[0]);
-                taskDirPath = path.join(datedTasksDirPath, \`task_\${taskId}\`);
+                taskDirPath = path.join(datedTasksDirPath, `task_${taskId}`);
 
                 await fs.ensureDir(taskDirPath);
                 await fs.ensureDir(path.join(taskDirPath, 'uploaded_files'));
                 await this.memoryManager.initializeTaskMemory(taskDirPath);
 
-                finalJournalEntries = [this._createOrchestratorJournalEntry("TASK_INITIALIZED", \`Task \${taskId} (\${executionMode}) initialized.\`, { parentTaskId, taskIdToLoad })];
+                finalJournalEntries = [this._createOrchestratorJournalEntry("TASK_INITIALIZED", `Task ${taskId} (${executionMode}) initialized.`, { parentTaskId, taskIdToLoad })];
                 currentWorkingContext = 'No CWC generated yet.';
                 currentOriginalTask = userTaskString;
                 uploadedFilePaths = []; planStages = null; lastExecutionContext = null;
@@ -99,7 +104,7 @@
                 currentWebSearchResults = null; lastError = null;
 
                 if (taskIdToLoad && executionMode !== EXECUTE_FULL_PLAN && executionMode !== PLAN_ONLY) {
-                    const loadTaskDir = path.join(baseTaskDir, new Date().toISOString().split('T')[0], \`task_\${taskIdToLoad.split('_')[1]}\`);
+                    const loadTaskDir = path.join(baseTaskDir, new Date().toISOString().split('T')[0], `task_${taskIdToLoad.split('_')[1]}`);
                     try {
                         const loadedCwc = await this.memoryManager.loadMemory(loadTaskDir, 'cwc.md');
                         if (loadedCwc) currentWorkingContext = loadedCwc;
@@ -111,10 +116,10 @@
                              finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_LOADED", "Existing CWC loaded.", { taskIdToLoad }));
                         }
                     } catch (error) {
-                         finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_LOAD_FAILED", \`Could not load CWC: \${error.message}\`, { taskIdToLoad }));
+                         finalJournalEntries.push(this._createOrchestratorJournalEntry("CWC_LOAD_FAILED", `Could not load CWC: ${error.message}`, { taskIdToLoad }));
                     }
                 }
-                const taskDefinitionContent = \`# Task: \${taskId}\nUser Task: \${currentOriginalTask}\nMode: \${executionMode}\`;
+                const taskDefinitionContent = `# Task: ${taskId}\nUser Task: ${currentOriginalTask}\nMode: ${executionMode}`;
                 await this.memoryManager.overwriteMemory(taskDirPath, 'task_definition.md', taskDefinitionContent);
                 // Initial user message is now logged in handleUserTask after potential clarification processing
             }
@@ -141,16 +146,16 @@
             // ... (no change)
             if (uploadedFiles && uploadedFiles.length > 0) {
                 const uploadedFilesDir = path.join(taskState.taskDirPath, 'uploaded_files');
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", \`Saving \${uploadedFiles.length} files.\`));
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", `Saving ${uploadedFiles.length} files.`));
                 for (const file of uploadedFiles) {
                     try {
                         const safeFileName = path.basename(file.name);
                         const absoluteFilePath = path.join(uploadedFilesDir, safeFileName);
                         await fs.writeFile(absoluteFilePath, file.content);
                         taskState.uploadedFilePaths.push(path.join('uploaded_files', safeFileName));
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", \`Saved: \${safeFileName}\`));
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", `Saved: ${safeFileName}`));
                     } catch (uploadError) {
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_ERROR", \`Error saving \${file.name}: \${uploadError.message}\`));
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_ERROR", `Error saving ${file.name}: ${uploadError.message}`));
                     }
                 }
             }
@@ -167,16 +172,16 @@
                         previousChatHistoryString = chatHistory.reverse()
                             .map(msg => {
                                 const senderPrefix = msg.senderId === 'OrchestratorAgent' || msg.sender?.role === 'assistant' ? 'Агент' : 'Пользователь';
-                                return \`\${senderPrefix}: \${msg.content.text}\`;
+                              return `${senderPrefix}: ${msg.content.text}`;
                             })
                             .join('\n');
                     }
-                } catch (histError) { console.error(\`[OrchestratorAgent] Error fetching chat history for search classification: \${histError.stack}\`); }
+              } catch (histError) { console.error(`[OrchestratorAgent] Error fetching chat history for search classification: ${histError.stack}`); }
             } else { console.warn("[OrchestratorAgent] MemoryManager or getChatHistory not available for search classification."); }
 
             const userMessagePlaceholder = '{{userMessage}}';
             const chatHistoryPlaceholder = '{{previousChatHistory}}';
-            const promptTemplate = \`Ты — умный ассистент-классификатор. Твоя задача - проанализировать ЗАПРОС ПОЛЬЗОВАТЕЛЯ и решить, требуется ли для ответа на него или выполнения подразумеваемой задачи поиск АКТУАЛЬНОЙ или СПЕЦИФИЧЕСКОЙ информации в интернете. Учитывай "ПРЕДЫСТОРИЮ ДИАЛОГА" (если предоставлена), чтобы понять контекст. Не предлагай поиск, если ответ уже мог быть дан, или если вопрос является продолжением обсуждения, где поиск не требуется. КРИТЕРИИ ДЛЯ ПОИСКА: - Информация, скорее всего, отсутствует в базовых знаниях стандартной языковой модели (например, очень нишевые факты, данные о малоизвестных компаниях или людях). - Требуется актуальная информация (новости, курсы валют, погода, события, произошедшие недавно). - Запрос на конкретные факты, которые легко проверяются в вебе. ИЗБЕГАЙ ПОИСКА: - Для общих вопросов, на которые можно ответить на основе эрудиции. - Для генерации идей, творческих текстов, мнений, если это не подразумевает поиск конкретных примеров или фактов. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является прямым ответом на предыдущий вопрос агента. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является простой командой для другого инструмента (например, "посчитай 2+2", "создай файл x.txt"). ТВОЙ ОТВЕТ ДОЛЖЕН БЫТЬ В ОДНОМ ИЗ ДВУХ ФОРМАТОВ: 1.  Если поиск НУЖЕН: верни ТОЛЬКО строку поискового запроса, который следует использовать (например, "курс биткоина к доллару сегодня" или "симптомы гриппа H1N1"). Поисковый запрос должен быть на языке ЗАПРОСА ПОЛЬЗОВАТЕЛЯ. 2.  Если поиск НЕ НУЖЕН: верни ТОЛЬКО специальный маркер "NO_SEARCH". ПРЕДЫСТОРИЯ ДИАЛОГА (последние несколько сообщений, если есть):\n\${chatHistoryPlaceholder}\n\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n"\${userMessagePlaceholder}"\n\nТВОЙ ОТВЕТ:\`;
+          const promptTemplate = `Ты — умный ассистент-классификатор. Твоя задача - проанализировать ЗАПРОС ПОЛЬЗОВАТЕЛЯ и решить, требуется ли для ответа на него или выполнения подразумеваемой задачи поиск АКТУАЛЬНОЙ или СПЕЦИФИЧЕСКОЙ информации в интернете. Учитывай "ПРЕДЫСТОРИЮ ДИАЛОГА" (если предоставлена), чтобы понять контекст. Не предлагай поиск, если ответ уже мог быть дан, или если вопрос является продолжением обсуждения, где поиск не требуется. КРИТЕРИИ ДЛЯ ПОИСКА: - Информация, скорее всего, отсутствует в базовых знаниях стандартной языковой модели (например, очень нишевые факты, данные о малоизвестных компаниях или людях). - Требуется актуальная информация (новости, курсы валют, погода, события, произошедшие недавно). - Запрос на конкретные факты, которые легко проверяются в вебе. ИЗБЕГАЙ ПОИСКА: - Для общих вопросов, на которые можно ответить на основе эрудиции. - Для генерации идей, творческих текстов, мнений, если это не подразумевает поиск конкретных примеров или фактов. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является прямым ответом на предыдущий вопрос агента. - Если ЗАПРОС ПОЛЬЗОВАТЕЛЯ является простой командой для другого инструмента (например, "посчитай 2+2", "создай файл x.txt"). ТВОЙ ОТВЕТ ДОЛЖЕН БЫТЬ В ОДНОМ ИЗ ДВУХ ФОРМАТОВ: 1.  Если поиск НУЖЕН: верни ТОЛЬКО строку поискового запроса, который следует использовать (например, "курс биткоина к доллару сегодня" или "симптомы гриппа H1N1"). Поисковый запрос должен быть на языке ЗАПРОСА ПОЛЬЗОВАТЕЛЯ. 2.  Если поиск НЕ НУЖЕН: верни ТОЛЬКО специальный маркер "NO_SEARCH". ПРЕДЫСТОРИЯ ДИАЛОГА (последние несколько сообщений, если есть):\n${chatHistoryPlaceholder}\n\nЗАПРОС ПОЛЬЗОВАТЕЛЯ:\n"${userMessagePlaceholder}"\n\nТВОЙ ОТВЕТ:`;
             const finalPrompt = promptTemplate.replace(chatHistoryPlaceholder, previousChatHistoryString).replace(userMessagePlaceholder, userMessageText);
             let classificationResult = 'NO_SEARCH';
             if (!taskState.aiService) { taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", "aiService not available, defaulting to NO_SEARCH.")); return classificationResult; }
@@ -190,10 +195,10 @@
                 if (preparedContext && preparedContext.cacheName) { callParams.cacheHandle = { cacheName: preparedContext.cacheName }; }
                 llmResponse = await taskState.aiService.completeChat(effectiveContext, callParams);
                 if (llmResponse?.trim()) { classificationResult = llmResponse.trim(); } else { classificationResult = 'NO_SEARCH'; }
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ATTEMPT", \`User message: "\${userMessageText.substring(0,100)}...". LLM Response: "\${classificationResult}"\`));
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ATTEMPT", `User message: "${userMessageText.substring(0,100)}...". LLM Response: "${classificationResult}"`));
             } catch (classError) {
-                console.error(\`[OrchestratorAgent] Error during search classification: \${classError.stack}\`);
-                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", \`Error: \${classError.message}. Defaulting to NO_SEARCH.\`));
+                console.error(`[OrchestratorAgent] Error during search classification: ${classError.stack}`);
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SEARCH_CLASSIFICATION_ERROR", `Error: ${classError.message}. Defaulting to NO_SEARCH.`));
                 classificationResult = 'NO_SEARCH';
             }
             return classificationResult;
@@ -220,7 +225,7 @@
                 try {
                     // TODO: Robust task path discovery for resuming/loading tasks, especially across different dates.
                     const todayDate = new Date().toISOString().split('T')[0]; // This date assumption is a key limitation.
-                    potentialTaskDirPath = path.join(baseTaskDir, todayDate, \`task_\${taskIdToLoad}\`);
+                  potentialTaskDirPath = path.join(baseTaskDir, todayDate, `task_${taskIdToLoad}`);
 
                     const stateFilePath = path.join(potentialTaskDirPath, 'task_state.json');
                     if (await fs.pathExists(stateFilePath)) {
@@ -233,9 +238,9 @@
                             }
                         }
                     } else if (executionMode !== EXECUTE_PLANNED_TASK && executionMode !== SYNTHESIZE_ONLY) {
-                        console.warn(\`No state file at \${stateFilePath} for taskIdToLoad: \${taskIdToLoad}\`);
+                        console.warn(`No state file at ${stateFilePath} for taskIdToLoad: ${taskIdToLoad}`);
                     }
-                } catch (e) { console.warn(\`Error loading state for taskIdToLoad \${taskIdToLoad}: \${e.message}\`); }
+                } catch (e) { console.warn(`Error loading state for taskIdToLoad ${taskIdToLoad}: ${e.message}`); }
             }
 
             try {
@@ -250,7 +255,7 @@
                         content: { type: 'text', text: userTaskString }
                      };
                      await this.memoryManager.addChatMessage(taskState.taskDirPath, currentInteractionUserMessage);
-                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("CURRENT_USER_INPUT_LOGGED", \`Logged current interaction: "\${userTaskString.substring(0,100)}..."\`));
+                     taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("CURRENT_USER_INPUT_LOGGED", `Logged current interaction: "${userTaskString.substring(0,100)}..."`));
                 }
 
                 await taskState.memoryManager.overwriteMemory(taskState.taskDirPath, 'current_working_context.json', { CWC: taskState.currentWorkingContext, lastUpdated: new Date().toISOString() }, { isJson: true });
@@ -272,17 +277,17 @@
 
                     let messageToClassify = userTaskString; // Use the current input for classification
 
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_CLASSIFICATION_STARTED", \`Classifying for ad-hoc search: "\${messageToClassify.substring(0,100)}..."\`));
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_CLASSIFICATION_STARTED", `Classifying for ad-hoc search: "${messageToClassify.substring(0,100)}..."`));
                     const searchQueryOrNoSearch = await this._classifyUserRequestForSearch(taskState, messageToClassify);
 
                     if (searchQueryOrNoSearch && searchQueryOrNoSearch.toUpperCase() !== 'NO_SEARCH') {
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TRIGGERED", \`LLM classified for search. Query: "\${searchQueryOrNoSearch}"\`));
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TRIGGERED", `LLM classified for search. Query: "${searchQueryOrNoSearch}"`));
                         taskState = await this._notifyAndExecuteSearch(taskState, searchQueryOrNoSearch);
                         taskState = await this._summarizeAndPresentSearchResults(taskState, searchQueryOrNoSearch);
                         taskState.overallSuccess = !taskState.lastError;
                         performedAdHocSearchThisTurn = true;
                     } else {
-                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_NOT_NEEDED", \`LLM classified as NO_SEARCH for: "\${messageToClassify.substring(0,100)}..."\`));
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_NOT_NEEDED", `LLM classified as NO_SEARCH for: "${messageToClassify.substring(0,100)}..."`));
                     }
                 }
                 // --- End Ad-hoc Search ---
@@ -290,10 +295,10 @@
                 if (performedAdHocSearchThisTurn) {
                     // If search was performed, this turn's primary action is complete.
                     // responseMessage and overallSuccess are set by search methods.
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TURN_CONCLUDED", \`Ad-hoc search flow completed for task \${taskState.taskId}\`));
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("ADHOC_SEARCH_TURN_CONCLUDED", `Ad-hoc search flow completed for task ${taskState.taskId}`));
                 } else if (taskState.needsUserInput) {
                     // If, after clarification processing or if planning asked a question, we still need input.
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("TASK_PAUSED_AWAITING_INPUT", \`Awaiting input for: \${taskState.pendingQuestionId}\`));
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("TASK_PAUSED_AWAITING_INPUT", `Awaiting input for: ${taskState.pendingQuestionId}`));
                 } else {
                     // Standard execution flow if no ad-hoc search handled the turn and no user input is pending
                     if (taskState.executionMode === SYNTHESIZE_ONLY) {
@@ -336,14 +341,14 @@
                     }
                 }
             } catch (error) {
-                console.error(\`Critical error in OrchestratorAgent.handleUserTask for \${taskState?.taskId || parentTaskId || 'unknown'}: \${error.stack}\`);
+                console.error(`Critical error in OrchestratorAgent.handleUserTask for ${taskState?.taskId || parentTaskId || 'unknown'}: ${error.stack}`);
                 if (taskState) {
-                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("HANDLE_USER_TASK_CRITICAL_ERROR", \`Critical error: \${error.message}\`));
-                    taskState.overallSuccess = false; taskState.responseMessage = \`Critical error: \${error.message.substring(0, 200)}\`;
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("HANDLE_USER_TASK_CRITICAL_ERROR", `Critical error: ${error.message}`));
+                    taskState.overallSuccess = false; taskState.responseMessage = `Critical error: ${error.message.substring(0, 200)}`;
                 } else {
                     const errorTaskId = parentTaskId || Date.now().toString() + '_init_fail';
-                    const tempJournal = [this._createOrchestratorJournalEntry("HANDLE_USER_TASK_INIT_ERROR", \`Critical init error: \${error.message}\`)];
-                    return { success: false, message: \`Critical initialization error: \${error.message.substring(0,200)}\`, taskId: errorTaskId, data: null, journal: tempJournal };
+                    const tempJournal = [this._createOrchestratorJournalEntry("HANDLE_USER_TASK_INIT_ERROR", `Critical init error: ${error.message}`)];
+                    return { success: false, message: `Critical initialization error: ${error.message.substring(0,200)}`, taskId: errorTaskId, data: null, journal: tempJournal };
                 }
             } finally {
                 if (taskState) { await this._finalizeTaskProcessing(taskState); }

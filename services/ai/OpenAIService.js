@@ -27,11 +27,11 @@ class OpenAIService extends BaseAIService {
                 this.enc = get_encoding(this.tokenizerName);
             }
         } catch (e) {
-            console.warn(\`OpenAIService: Failed to load tiktoken encoder '\${this.baseConfig.defaultModel || this.tokenizerName}'. Attempting fallback to '${this.tokenizerName}'. Error: \${e.message}\`);
+            console.warn(`OpenAIService: Failed to load tiktoken encoder '${this.baseConfig.defaultModel || this.tokenizerName}'. Attempting fallback to '${this.tokenizerName}'. Error: ${e.message}`);
             try {
                 this.enc = get_encoding(this.tokenizerName);
             } catch (e2) {
-                 console.warn(\`OpenAIService: Fallback tiktoken encoder '\${this.tokenizerName}' also failed. Tokenizer will not be available. Error: \${e2.message}\`);
+                 console.warn(`OpenAIService: Fallback tiktoken encoder '${this.tokenizerName}' also failed. Tokenizer will not be available. Error: ${e2.message}`);
             }
         }
 
@@ -57,9 +57,9 @@ class OpenAIService extends BaseAIService {
             this.openai = new OpenAI({ apiKey });
             return true;
         } catch (error) {
-            console.error(\`OpenAIService: Failed to initialize OpenAI client. Error: \${error.message}\`);
+            console.error(`OpenAIService: Failed to initialize OpenAI client. Error: ${error.message}`);
             this.openai = null;
-            throw new Error(\`OpenAIService client initialization failed: \${error.message}\`);
+            throw new Error(`OpenAIService client initialization failed: ${error.message}`);
         }
     }
 
@@ -130,8 +130,8 @@ class OpenAIService extends BaseAIService {
             throw new Error("OpenAI API response error: No message content found.");
         } catch (error) {
             const errorDetail = error.response?.data?.error?.message || error.error?.message || error.message;
-            console.error(\`OpenAIService: Error during chat completion for model \${model}:\`, errorDetail, error.stack);
-            throw new Error(\`OpenAI API Error: \${errorDetail}\`);
+            console.error(`OpenAIService: Error during chat completion for model ${model}:`, errorDetail, error.stack);
+            throw new Error(`OpenAI API Error: ${errorDetail}`);
         }
     }
 

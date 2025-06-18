@@ -30,9 +30,9 @@ class MemoryManager {
             const content = await fsp.readFile(filePath, 'utf8');
             return crypto.createHash('sha256').update(content).digest('hex');
         } catch (error) {
-            if (error.code === 'ENOENT') return \`FILE_NOT_FOUND:\${path.basename(filePath)}\`;
-            console.warn(\`MemoryManager: Error reading file \${filePath} for hashing: \${error.message}\`);
-            return \`ERROR_READING_FILE:\${path.basename(filePath)}\`;
+            if (error.code === 'ENOENT') return `FILE_NOT_FOUND:${path.basename(filePath)}`;
+            console.warn(`MemoryManager: Error reading file ${filePath} for hashing: ${error.message}`);
+            return `ERROR_READING_FILE:${path.basename(filePath)}`;
         }
     }
 
@@ -49,7 +49,7 @@ class MemoryManager {
     }
 
     _getCacheFilePath(cacheDir, cacheKey) {
-        return path.join(cacheDir, \`\${cacheKey.substring(0, 32)}.json\`);
+        return path.join(cacheDir, `${cacheKey.substring(0, 32)}.json`);
     }
 
     getMemoryFilePath(taskDirPath, memoryCategoryFileName) {
@@ -105,7 +105,7 @@ class MemoryManager {
         await this.initializeTaskMemory(taskDirPath);
         const history = await this.loadMemory(taskDirPath, CHAT_HISTORY_FILENAME, { isJson: true, defaultValue: [] });
         if (!Array.isArray(history)) {
-            console.warn(\`MemoryManager.addChatMessage: Chat history for \${taskDirPath} was not an array. Resetting.\`);
+            console.warn(`MemoryManager.addChatMessage: Chat history for ${taskDirPath} was not an array. Resetting.`);
             history = [];
         }
         let role = messageData.role;
@@ -116,7 +116,7 @@ class MemoryManager {
         }
         const taskIdFromPath = path.basename(taskDirPath).replace('task_', '');
         const newMessage = {
-            id: \`msg_\${uuidv4()}\`,
+            id: `msg_${uuidv4()}`,
             taskId: messageData.taskId || taskIdFromPath,
             sender: { id: messageData.senderId, role: role },
             timestamp: new Date().toISOString(),
@@ -142,7 +142,7 @@ class MemoryManager {
         if (!Array.isArray(history)) { return []; }
         if (since_timestamp) {
             try { const sinceDate = new Date(since_timestamp); history = history.filter(msg => new Date(msg.timestamp) > sinceDate); }
-            catch (e) { console.warn(\`MM.getChatHistory: Invalid since_timestamp '\${since_timestamp}'.\`); }
+            catch (e) { console.warn(`MM.getChatHistory: Invalid since_timestamp '${since_timestamp}'.`); }
         }
         history.sort((a, b) => { const dateA = new Date(a.timestamp); const dateB = new Date(b.timestamp); return sort_order === 'asc' ? dateA - dateB : dateB - dateA; });
         if (limit !== undefined) { const numLimit = parseInt(limit, 10); if (!isNaN(numLimit) && numLimit > 0) { history = sort_order === 'asc' ? history.slice(-numLimit) : history.slice(0, numLimit); }}
@@ -155,12 +155,12 @@ class MemoryManager {
         const parts = filename.split('.');
         const ext = parts.length > 1 ? '.' + parts.pop() : '';
         const base = parts.join('.');
-        return path.join(dir, \`\${base}_summary\${ext}\`);
+        return path.join(dir, `${base}_summary${ext}`);
     }
     _getSummaryMetaFilePath(summaryFilePath) { /* ... no change ... */
         const dir = path.dirname(summaryFilePath);
         const filename = path.basename(summaryFilePath);
-        return path.join(dir, \`\${filename}.meta.json\`);
+        return path.join(dir, `${filename}.meta.json`);
     }
     async getSummarizedMemory(taskDirPath, memoryCategoryFileName, aiService, summarizationOptions = {}) { /* ... no change ... */
         const { maxOriginalLength = 3000, promptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}", llmParams = {}, cacheSummary = true, forceSummarize = false, defaultValue = null } = summarizationOptions;
@@ -175,7 +175,7 @@ class MemoryManager {
         if (!forceSummarize && originalContent.length <= maxOriginalLength) return originalContent;
         if (cacheSummary && !forceSummarize) {
             try { const metaContent = JSON.parse(await fsp.readFile(summaryMetaFilePath, 'utf8')); if (metaContent.originalContentHash === currentOriginalHash) { return await fsp.readFile(summaryFilePath, 'utf8'); } }
-            catch (error) { if (error.code !== 'ENOENT') console.warn(\`MM: Error checking summary cache for '\${memoryCategoryFileName}': \${error.message}.\`); }
+            catch (error) { if (error.code !== 'ENOENT') console.warn(`MM: Error checking summary cache for '${memoryCategoryFileName}': ${error.message}.`); }
         }
         if (!aiService || typeof aiService.generateText !== 'function') throw new Error("aiService with generateText method is required for summarization.");
         const prompt = promptTemplate.replace('{text_to_summarize}', originalContent.substring(0, maxOriginalLength * 2));
@@ -184,10 +184,10 @@ class MemoryManager {
             const summaryContent = await aiService.generateText(prompt, effectiveLlmParams);
             if (cacheSummary) {
                 try { await this.overwriteMemory(taskDirPath, path.basename(summaryFilePath), summaryContent); await this.overwriteMemory(taskDirPath, path.basename(summaryMetaFilePath), { originalContentHash: currentOriginalHash, summaryGeneratedTimestamp: new Date().toISOString() }, { isJson: true }); }
-                catch (writeError) { console.error(\`MM: Failed to cache summary for '\${memoryCategoryFileName}': \${writeError.message}\`); }
+                catch (writeError) { console.error(`MM: Failed to cache summary for '${memoryCategoryFileName}': ${writeError.message}`); }
             }
             return summaryContent;
-        } catch (llmError) { throw new Error(\`Failed to summarize '\${memoryCategoryFileName}': \${llmError.message}\`); }
+        } catch (llmError) { throw new Error(`Failed to summarize '${memoryCategoryFileName}': ${llmError.message}`); }
     }
     async assembleMegaContext(taskDirPath, contextSpecification, tokenizerCompatibleWithLLM) { /* ... no change ... */
         const { systemPrompt = null, includeTaskDefinition = false, uploadedFilePaths = [], maxLatestKeyFindings = 0, keyFindingsRelevanceQuery = null, includeRawContentForReferencedFindings = true, chatHistory = [], maxTokenLimit, priorityOrder = ['systemPrompt', 'chatHistory', 'uploadedFilePaths', 'taskDefinition', 'keyFindings'], customPreamble = "Use the following information context:\n--- BEGIN CONTEXT ---", customPostamble = "--- END CONTEXT ---", recordSeparator = "\n\n--- Next Record ---\n", findingSeparator = "\n---\n", currentProgressSummary, currentNextObjective, recentErrorsSummary, summarizedKeyFindingsText, overallExecutionSuccess, executionContext, originalUserTask, enableMegaContextCache = true, megaContextCacheTTLSeconds = null } = contextSpecification || {};
@@ -198,16 +198,16 @@ class MemoryManager {
             const cacheKeyData = { version: MEGA_CONTEXT_CACHE_VERSION, spec: { systemPrompt, maxTokenLimit, priorityOrder } };
             cacheKey = this._calculateObjectHash(cacheKeyData); cacheDir = this._getMegaContextCachePath(taskDirPath); cacheFilePath = this._getCacheFilePath(cacheDir, cacheKey);
             try { const cachedData = JSON.parse(await fsp.readFile(cacheFilePath, 'utf8')); if (cachedData.contextString && typeof cachedData.tokenCount === 'number' && cachedData.timestamp) { if (!megaContextCacheTTLSeconds || (new Date().getTime() - new Date(cachedData.timestamp).getTime()) / 1000 <= megaContextCacheTTLSeconds) { return { success: true, contextString: cachedData.contextString, tokenCount: cachedData.tokenCount, fromCache: true }; } } }
-            catch (error) { if (error.code !== 'ENOENT') console.warn(\`MM.assembleMegaContext: Error reading cache: \${error.message}\`); }
+            catch (error) { if (error.code !== 'ENOENT') console.warn(`MM.assembleMegaContext: Error reading cache: ${error.message}`); }
         }
         const contextParts = []; let currentTokenCount = 0; const countTokens = (text) => text ? tokenizerCompatibleWithLLM(text) : 0;
-        const addPartToContext = (partContent, isCritical = false) => { if (!partContent || typeof partContent !== 'string' || !partContent.trim()) return true; const partTokens = countTokens(partContent); if (currentTokenCount + partTokens <= remainingTokenBudget) { contextParts.push(partContent); currentTokenCount += partTokens; return true; } else if (isCritical) throw new Error(\`Critical context part too large: \${partContent.substring(0,50)}...\`); return false; };
+        const addPartToContext = (partContent, isCritical = false) => { if (!partContent || typeof partContent !== 'string' || !partContent.trim()) return true; const partTokens = countTokens(partContent); if (currentTokenCount + partTokens <= remainingTokenBudget) { contextParts.push(partContent); currentTokenCount += partTokens; return true; } else if (isCritical) throw new Error(`Critical context part too large: ${partContent.substring(0,50)}...`); return false; };
         let remainingTokenBudget = maxTokenLimit - countTokens(customPreamble) - countTokens(customPostamble) - countTokens(recordSeparator)*(priorityOrder.length-1);
-        for (const contentType of priorityOrder) { if (remainingTokenBudget <= 0) break; let contentToAdd = ""; switch (contentType) { case 'systemPrompt': if (systemPrompt) contentToAdd = systemPrompt; break; case 'originalUserTask': if(originalUserTask) contentToAdd = \`Original User Task:\n\${originalUserTask}\`; break; case 'currentWorkingContext': if(contextSpecification.currentWorkingContext) contentToAdd = \`Current Working Context:\n\${contextSpecification.currentWorkingContext}\`; break; case 'taskDefinition': if (includeTaskDefinition) contentToAdd = await this.loadMemory(taskDirPath, 'task_definition.md', {defaultValue: ''}); if (contentToAdd) contentToAdd = \`Task Definition:\n\${contentToAdd}\`; break; case 'chatHistory': if (chatHistory?.length) contentToAdd = "Chat History (newest first):\n" + chatHistory.map(m => \`\${m.role}: \${m.content}\`).join('\n---\n'); break; case 'uploadedFilePaths': if (uploadedFilePaths?.length) { let filesContent = ""; for (const relPath of uploadedFilePaths) { try { filesContent += \`Document: \${path.basename(relPath)}\nContent:\n\${await this.loadMemory(taskDirPath, relPath, {defaultValue: '(empty)'})}\n\n\`; } catch(e){ console.warn(\`Failed to load uploaded file \${relPath}\`); }} contentToAdd = filesContent.trim(); } break; case 'keyFindings': if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') { const findings = await this.getLatestKeyFindings(taskDirPath, maxLatestKeyFindings, keyFindingsRelevanceQuery); if (findings?.length) contentToAdd = "Key Findings:\n" + findings.map(f => \`\${f.sourceStepNarrative}: \${JSON.stringify(f.data)}\`).join(findingSeparator); } break; } if (!addPartToContext(contentToAdd, contentType === 'systemPrompt')) break; }
+        for (const contentType of priorityOrder) { if (remainingTokenBudget <= 0) break; let contentToAdd = ""; switch (contentType) { case 'systemPrompt': if (systemPrompt) contentToAdd = systemPrompt; break; case 'originalUserTask': if(originalUserTask) contentToAdd = `Original User Task:\n${originalUserTask}`; break; case 'currentWorkingContext': if(contextSpecification.currentWorkingContext) contentToAdd = `Current Working Context:\n${contextSpecification.currentWorkingContext}`; break; case 'taskDefinition': if (includeTaskDefinition) contentToAdd = await this.loadMemory(taskDirPath, 'task_definition.md', {defaultValue: ''}); if (contentToAdd) contentToAdd = `Task Definition:\n${contentToAdd}`; break; case 'chatHistory': if (chatHistory?.length) contentToAdd = "Chat History (newest first):\n" + chatHistory.map(m => `${m.role}: ${m.content}`).join('\n---\n'); break; case 'uploadedFilePaths': if (uploadedFilePaths?.length) { let filesContent = ""; for (const relPath of uploadedFilePaths) { try { filesContent += `Document: ${path.basename(relPath)}\nContent:\n${await this.loadMemory(taskDirPath, relPath, {defaultValue: '(empty)'})}\n\n`; } catch(e){ console.warn(`Failed to load uploaded file ${relPath}`); }} contentToAdd = filesContent.trim(); } break; case 'keyFindings': if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') { const findings = await this.getLatestKeyFindings(taskDirPath, maxLatestKeyFindings, keyFindingsRelevanceQuery); if (findings?.length) contentToAdd = "Key Findings:\n" + findings.map(f => `${f.sourceStepNarrative}: ${JSON.stringify(f.data)}`).join(findingSeparator); } break; } if (!addPartToContext(contentToAdd, contentType === 'systemPrompt')) break; }
         let finalContextString = customPreamble + "\n" + contextParts.join(recordSeparator) + "\n" + customPostamble;
         const finalTokenCount = countTokens(finalContextString);
         if (finalTokenCount > maxTokenLimit) return { success: false, error: "Assembled context exceeds token limit.", tokenCount: finalTokenCount };
-        if (enableMegaContextCache && cacheKey && cacheFilePath) { try { await fsp.mkdir(cacheDir, { recursive: true }); await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(\`MM.assembleMegaContext: Error writing to cache: \${cacheWriteError.message}\`); }}
+        if (enableMegaContextCache && cacheKey && cacheFilePath) { try { await fsp.mkdir(cacheDir, { recursive: true }); await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
         return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
     }
     async getLatestKeyFindings(taskDirPath, limit = 5, relevanceQuery = null) {

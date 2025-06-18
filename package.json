@@ -30,7 +30,9 @@
     "multer": "^2.0.1",
     "pdfkit": "^0.15.0",
     "tiktoken": "^1.0.21",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "fs-extra": "*",
+    "openai": "*"
   },
   "devDependencies": {
     "playwright": "^1.40.0"

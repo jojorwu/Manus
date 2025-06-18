@@ -1,0 +1,19 @@
+INIT_DONE
+OpenAIService: API key is not provided directly or via OPENAI_API_KEY env var. Service will fail on execution unless key is available then.
+GeminiService: API key is not provided directly or via GEMINI_API_KEY env var. Service may use stubbed responses or fail on client init if key becomes mandatory for SDK.
+INIT_DONE
+UtilityAgent initialized.
+AGENT_LISTENING
+SubTaskQueue: Agent of role 'ResearchAgent' attempting to subscribe.
+SubTaskQueue: Agent subscribed to role 'ResearchAgent'. Total subscribers for role: 1
+UtilityAgent (UtilityAgent) starting to listen for tasks...
+SubTaskQueue: Agent of role 'UtilityAgent' attempting to subscribe.
+SubTaskQueue: Agent subscribed to role 'UtilityAgent'. Total subscribers for role: 1
+[Dependencies] Global instances, AI services, tools, and worker agents initialized.
+Localization: Initializing with os-locale...
+[WebSocket] Server initialized and listening on path /api/chat_ws
+HTTP and WebSocket Server running on http://localhost:3001
+Localization: Could not dynamically import os-locale. Falling back to LANG or default "en". Error: Cannot find package 'os-locale' imported from /app/utils/localization.js
+Localization: Using locale 'C'.
+Localization: Failed to load translations for locale C: Error: ENOENT: no such file or directory, open '/app/locales/C.json'
+Localization: No translations found for detected locale 'C'. Falling back to 'en'.
