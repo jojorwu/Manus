@@ -4,7 +4,12 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx"
+  },
+  "engines": {
+    "node": ">=16.0.0"
   },
   "repository": {
     "type": "git",
@@ -24,14 +29,20 @@
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^16.0.0",
     "express": "^5.1.0",
+    "fs-extra": "*",
     "jsdom": "^24.1.0",
     "mathjs": "^14.5.2",
     "multer": "^2.0.1",
+    "openai": "*",
     "pdfkit": "^0.15.0",
     "tiktoken": "^1.0.21",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "ws": "*"
   },
   "devDependencies": {
+    "eslint": "^8.57.1",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-security": "^1.7.1",
     "playwright": "^1.40.0"
   }
 }

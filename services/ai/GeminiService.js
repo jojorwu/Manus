@@ -1,6 +1,6 @@
 // File: services/ai/GeminiService.js
-import BaseAIService from '../BaseAIService.js'; // Corrected path
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
+const BaseAIService = require('../BaseAIService.js'); // Corrected path
+const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 
 class GeminiService extends BaseAIService {
     /**
@@ -46,7 +46,7 @@ class GeminiService extends BaseAIService {
             this.genAI = new GoogleGenerativeAI(apiKey);
             return true;
         } catch (error) {
-            console.error(\`GeminiService: Failed to initialize GoogleGenerativeAI client. Error: \${error.message}\`);
+            console.error(`GeminiService: Failed to initialize GoogleGenerativeAI client. Error: ${error.message}`);
             this.genAI = null; // Ensure it's null on failure
             // Optional: throw new Error(\`GeminiService client initialization failed: \${error.message}\`);
             return false;
@@ -59,10 +59,20 @@ class GeminiService extends BaseAIService {
     async generateText(promptString, params = {}) {
         if (!this._ensureClient()) {
             console.warn("GeminiService: Client not available. Returning stub for generateText.");
-            return \`GeminiService stub response for: \${promptString.substring(0, 50)}...\`;
+            return `GeminiService stub response for: ${promptString.substring(0, 50)}...`;
         }
 
-        const modelName = params.model || this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Validate model name from params against a list of known/allowed models for this service
+        const allowedModels = ['gemini-1.5-pro-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-vision-latest'];
+        let modelName = this.baseConfig.defaultModel || 'gemini-pro';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                modelName = params.model;
+            } else {
+                console.warn(`GeminiService: Requested model '${params.model}' is not in the allowed list. Using default: ${modelName}`);
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         const maxOutputTokens = params.maxTokens || this.baseConfig.maxTokens; // Let Gemini SDK use its default if undefined
         const stopSequences = params.stopSequences || this.baseConfig.stopSequences;
@@ -110,12 +120,12 @@ class GeminiService extends BaseAIService {
             } else if (response?.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return response.candidates[0].content.parts[0].text;
             } else {
-                console.warn(\`GeminiService (\${modelName}): API response format error. No text found. Response:\`, JSON.stringify(response, null, 2));
+                console.warn(`GeminiService (${modelName}): API response format error. No text found. Response:`, JSON.stringify(response, null, 2));
                 throw new Error("Gemini API response format error: No text content found.");
             }
         } catch (error) {
-            console.error(\`GeminiService (\${modelName}): Error during Gemini API call (generateContent):\`, error.message);
-            throw new Error(\`Gemini API Error: \${error.message}\`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent):`, error.message);
+            throw new Error(`Gemini API Error: ${error.message}`);
         }
     }
 
@@ -128,7 +138,17 @@ class GeminiService extends BaseAIService {
             return "GeminiService stub chat response.";
         }
 
-        const modelName = params.model || this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Validate model name from params (using the same logic as generateText)
+        const allowedModels = ['gemini-1.5-pro-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-vision-latest'];
+        let modelName = this.baseConfig.defaultModel || 'gemini-pro';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                modelName = params.model;
+            } else {
+                console.warn(`GeminiService: Requested model '${params.model}' is not in the allowed list for chat. Using default: ${modelName}`);
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         const maxOutputTokens = params.maxTokens || this.baseConfig.maxTokens;
         const stopSequences = params.stopSequences || this.baseConfig.stopSequences;
@@ -168,8 +188,8 @@ class GeminiService extends BaseAIService {
                 if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
                 throw new Error("Gemini API chat response format error (with cache): No text content found.");
             } catch (error) {
-                console.error(\`GeminiService (\${modelName}): Error during generateContent (with cache for chat):\`, error.message);
-                throw new Error(\`Gemini API Error (with cache for chat): \${error.message}\`);
+                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat):`, error.message);
+                throw new Error(`Gemini API Error (with cache for chat): ${error.message}`);
             }
         }
 
@@ -213,7 +233,7 @@ class GeminiService extends BaseAIService {
             if (messagesForChatSDK.length > 0 && messagesForChatSDK[messagesForChatSDK.length -1].role === 'user') {
                  lastUserMessage = messagesForChatSDK.pop().parts[0].text;
             } else if (messagesForChatSDK.length === 0 && !lastUserMessage && !currentSystemInstruction) {
-                // console.warn(`GeminiService (\${modelName}): completeChat called with no user messages to respond to and no system instruction.`);
+                // console.warn(`GeminiService (${modelName}): completeChat called with no user messages to respond to and no system instruction.`);
                  lastUserMessage = ""; // Allow sending empty message if history is also empty (e.g. to kick off with system prompt)
             }
 
@@ -226,8 +246,8 @@ class GeminiService extends BaseAIService {
             if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
             throw new Error("Gemini API chat response format error: No text content found.");
         } catch (error) {
-            console.error(\`GeminiService (\${modelName}): Error during Gemini API call (sendMessage/startChat):\`, error.message);
-            throw new Error(\`Gemini API Chat Error: \${error.message}\`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat):`, error.message);
+            throw new Error(`Gemini API Chat Error: ${error.message}`);
         }
     }
 
@@ -250,7 +270,10 @@ class GeminiService extends BaseAIService {
      * @override
      */
     getMaxContextTokens() {
-        const model = this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Use the already validated modelName from constructor or default for context window lookup.
+        // Assuming this.baseConfig.defaultModel is from a trusted source (config).
+        // If model could be passed to this function, it would need validation here too.
+        const currentModelForContext = this.baseConfig.defaultModel || 'gemini-pro';
         // Known context windows ( octubre 2023 values, check Gemini docs for updates)
         // Gemini 1.5 Pro: 1M tokens (1,048,576). Effective usable might be less for generation.
         // Gemini 1.0 Pro: 30720 input + 2048 output = 32768 total.
@@ -267,9 +290,10 @@ class GeminiService extends BaseAIService {
             'default': 30720
         };
 
-        let effectiveLimit = modelContextWindows[model] || modelContextWindows['default'];
+        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig (assumed safe) or validated against allowedModels.
+        let effectiveLimit = modelContextWindows[currentModelForContext] || modelContextWindows['default'];
         // For 1.5 models, often a smaller practical limit is used for context assembly due to cost/performance.
-        if (model.startsWith('gemini-1.5')) {
+        if (currentModelForContext.startsWith('gemini-1.5')) {
             effectiveLimit = this.baseConfig?.maxTokensForContext || 131072; // e.g. 128k as a practical limit
         }
         return effectiveLimit;
@@ -309,7 +333,7 @@ class GeminiService extends BaseAIService {
         // but for cache creation, it might need the "models/" prefix.
         // The `createCachedContent` in the previous version of this file used `this.genAI.caches.create`.
         // Let's assume the model name needs the "models/" prefix for cache operations.
-        const fullModelName = modelName.startsWith("models/") ? modelName : \`models/\${modelName}\`;
+        const fullModelName = modelName.startsWith("models/") ? modelName : `models/${modelName}`;
 
         const cacheCreationRequest = {
             model: fullModelName,
@@ -327,7 +351,7 @@ class GeminiService extends BaseAIService {
         }
 
         try {
-            // console.log(\`GeminiService: Creating cached content for model \${fullModelName}. DisplayName: \${displayName || 'N/A'}\`);
+            // console.log(`GeminiService: Creating cached content for model ${fullModelName}. DisplayName: ${displayName || 'N/A'}`);
             // Assuming this.genAI is the top-level GenerativeModel instance from new GoogleGenerativeAI(apiKey)
             // and it has a .cachedContent property or similar for managing caches.
             // The exact SDK call might differ slightly based on version (e.g., this.genAI.cache() or this.genAI.cachedContent())
@@ -339,11 +363,11 @@ class GeminiService extends BaseAIService {
             const modelInstanceForCache = this.genAI.getGenerativeModel({ model: modelName }); // Use plain model name here
             const cachedContentResult = await modelInstanceForCache.createCachedContent(cacheCreationRequest); // Pass the full request
 
-            // console.log(\`GeminiService: Cached content created successfully. Name: \${cachedContentResult.name}\`);
+            // console.log(`GeminiService: Cached content created successfully. Name: ${cachedContentResult.name}`);
             return cachedContentResult; // This is the CachedContent object
         } catch (error) {
-            console.error(\`GeminiService._createOrUpdateCachedContent: Error for model \${fullModelName}:\`, error.message);
-            throw new Error(\`Gemini API Error (_createOrUpdateCachedContent): \${error.message}\`);
+            console.error(`GeminiService._createOrUpdateCachedContent: Error for model ${fullModelName}:`, error.message);
+            throw new Error(`Gemini API Error (_createOrUpdateCachedContent): ${error.message}`);
         }
     }
 
@@ -357,7 +381,7 @@ class GeminiService extends BaseAIService {
         }
 
         const { modelName, systemInstruction, cacheConfig = {} } = options;
-        const { ttlSeconds, displayName, forceRecreate } = cacheConfig; // taskId not directly used for API, but for managing multiple caches if needed by caller
+        const { ttlSeconds, displayName /*, forceRecreate*/ } = cacheConfig; // taskId not directly used for API, but for managing multiple caches if needed by caller // forceRecreate removed
 
         if (!modelName) {
             throw new Error("GeminiService.prepareContextForModel: 'modelName' is required in options.");
@@ -405,12 +429,12 @@ class GeminiService extends BaseAIService {
             }
             return null;
         } catch (error) {
-            console.error(\`GeminiService.prepareContextForModel: Failed to prepare/cache context for model \${modelName}:\`, error.message);
+            console.error(`GeminiService.prepareContextForModel: Failed to prepare/cache context for model ${modelName}:`, error.message);
             // Don't re-throw, allow fallback to non-cached generation if desired by caller
             return null;
         }
     }
 }
 
-// module.exports = GeminiService; // Use ES module export for consistency with BaseAIService
-export default GeminiService;
+module.exports = GeminiService; // Use ES module export for consistency with BaseAIService
+// export default GeminiService;

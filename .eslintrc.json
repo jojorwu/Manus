@@ -1,0 +1,25 @@
+{
+  "env": {
+    "commonjs": true,
+    "es2021": true,
+       "node": true,
+       "jest": true
+  },
+  "extends": [
+    "eslint:recommended",
+    "plugin:node/recommended",
+    "plugin:security/recommended"
+  ],
+  "parserOptions": {
+    "ecmaVersion": 12
+  },
+  "rules": {
+    "node/no-unpublished-require": "off",
+    "node/no-missing-require": "off",
+    "security/detect-object-injection": "warn",
+    "no-prototype-builtins": "warn",
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }]
+    // Добавьте или переопределите правила здесь по мере необходимости
+  },
+  "ignorePatterns": ["frontend/", "docs/", "config/plan_templates/"]
+}

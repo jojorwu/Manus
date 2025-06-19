@@ -15,6 +15,7 @@ class FileSystemTool {
         }
         this.taskWorkspaceDir = path.resolve(taskWorkspaceDir); // Ensure it's an absolute path
         // Create the base workspace directory if it doesn't exist
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- taskWorkspaceDir is resolved from a constructor argument, expected to be a safe base path.
         fsp.mkdir(this.taskWorkspaceDir, { recursive: true })
             .catch(err => console.error(t('FS_ROOT_DIR_CREATION_FAILED_LOG', { componentName: 'FileSystemTool', path: this.taskWorkspaceDir }), err));
     }
@@ -25,14 +26,26 @@ class FileSystemTool {
             // This is a returned error, already Russian.
             throw new Error("FileSystemTool: Внутренняя ошибка - userPath должен быть строкой для _getSafePath.");
         }
-        const normalizedUserPath = path.normalize(userPath);
-        if (normalizedUserPath.split(path.sep).includes('..')) {
+
+        // Sanitize each path component to prevent malicious characters.
+        const sanitizedUserPath = userPath
+            .split(path.sep)
+            .map(part => part.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255))
+            .join(path.sep);
+
+        const normalizedUserPath = path.normalize(sanitizedUserPath);
+
+        // Double check for path traversal components after sanitization and normalization
+        if (normalizedUserPath.includes('..')) {
             // This is a returned error, already Russian.
-            throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены.");
+            throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены, даже после санации.");
         }
+
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
-        if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
-            console.error(t('FS_PATH_TRAVERSAL_ATTEMPT_LOG', { componentName: 'FileSystemTool', workspaceDir: this.taskWorkspaceDir, userPath: userPath, resolvedPath: resolvedPath }));
+
+        // Final check to ensure the path does not escape the workspace directory
+        if (!resolvedPath.startsWith(this.taskWorkspaceDir)) {
+            console.error(t('FS_PATH_TRAVERSAL_ATTEMPT_LOG', { componentName: 'FileSystemTool', workspaceDir: this.taskWorkspaceDir, userPath: userPath, sanitizedUserPath: sanitizedUserPath, resolvedPath: resolvedPath }));
             // This is a returned error, already Russian.
             throw new Error("FileSystemTool: Обнаружена попытка обхода пути.");
         }
@@ -40,6 +53,7 @@ class FileSystemTool {
         let isDirectoryLike = userPath === '' || normalizedUserPath.endsWith(path.sep);
         if (!isDirectoryLike && path.extname(normalizedUserPath) === '') {
             try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- resolvedPath is constructed from sanitized components and validated against workspaceDir.
                 const stats = await fsp.stat(resolvedPath);
                 if (stats.isDirectory()) {
                     isDirectoryLike = true;
@@ -57,6 +71,7 @@ class FileSystemTool {
         } else {
             dirToEnsure = path.dirname(resolvedPath);
         }
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- dirToEnsure is derived from a sanitized and validated path.
         await fsp.mkdir(dirToEnsure, { recursive: true });
         return resolvedPath;
     }
@@ -73,6 +88,7 @@ class FileSystemTool {
         try {
             const safeFilePath = await this._getSafePath(relativeFilePath);
             try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
                     return { result: null, error: `Не удается создать файл, путь '${relativeFilePath}' указывает на существующую директорию.`};
@@ -80,6 +96,7 @@ class FileSystemTool {
             } catch (e) {
                 if (e.code !== 'ENOENT') throw e;
             }
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             await fsp.writeFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
             // Returned result is already Russian.
@@ -100,6 +117,7 @@ class FileSystemTool {
         let safeFilePath;
         try {
             safeFilePath = await this._getSafePath(relativeFilePath);
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             const stats = await fsp.stat(safeFilePath).catch(e => {
                 if (e.code === 'ENOENT') throw e; // Handled by specific ENOENT catch below
                 throw e; // Other stat errors
@@ -108,6 +126,7 @@ class FileSystemTool {
                 // Returned error is already Russian.
                  return { result: null, error: `Не удается прочитать файл, путь '${relativeFilePath}' указывает на директорию.`};
             }
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             const content = await fsp.readFile(safeFilePath, 'utf8');
             return { result: content, error: null };
         } catch (error) {
@@ -136,6 +155,7 @@ class FileSystemTool {
         try {
             const safeFilePath = await this._getSafePath(relativeFilePath);
             try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
                     // Returned error is already Russian.
@@ -144,6 +164,7 @@ class FileSystemTool {
             } catch (e) {
                 if (e.code !== 'ENOENT') throw e; // If it's not ENOENT, throw and let outer catch handle.
             }
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             await fsp.appendFile(safeFilePath, params.content, 'utf8');
             const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
             // Returned result is already Russian.
@@ -161,6 +182,7 @@ class FileSystemTool {
     async _recursiveList(fullDirectoryPath, currentDepth, maxDepth, baseWorkspaceDir) {
         const items = [];
         try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- fullDirectoryPath is recursively built from sanitized initial paths and checked.
             const dirents = await fsp.readdir(fullDirectoryPath, { withFileTypes: true });
             for (const dirent of dirents) {
                 const entryName = dirent.name;
@@ -209,6 +231,7 @@ class FileSystemTool {
             safeTargetDirPath = await this._getSafePath(directory);
 
             try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeTargetDirPath is already sanitized by _getSafePath.
                 const stats = await fsp.stat(safeTargetDirPath);
                 if (!stats.isDirectory()) {
                     const displayPath = path.relative(this.taskWorkspaceDir, safeTargetDirPath).replace(/\\/g, '/');
@@ -236,6 +259,7 @@ class FileSystemTool {
                 return { result: items, error: null };
             } else {
                 // Non-recursive listing
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeTargetDirPath is sanitized by _getSafePath.
                 const dirents = await fsp.readdir(safeTargetDirPath, { withFileTypes: true });
                 const items = [];
                 for (const dirent of dirents) {
@@ -281,6 +305,7 @@ class FileSystemTool {
 
             // Check if safeFilePath points to an existing directory before creating write stream
             try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                 const stats = await fsp.stat(safeFilePath);
                 if (stats.isDirectory()) {
                     // Returned error is already Russian.
@@ -293,13 +318,14 @@ class FileSystemTool {
                 // ENOENT is fine, means file doesn't exist, which is expected for creation.
             }
 
-            return new Promise(async (resolve, reject) => { // Made promise callback async for await fsp.access
+            return new Promise(async (resolve, reject) => { // eslint-disable-line no-async-promise-executor
                 const doc = new PDFDocument({
                     size: 'A4',
                     margins: { top: 50, bottom: 50, left: 72, right: 72 },
                     autoFirstPage: false
                 });
 
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                 const stream = fs.createWriteStream(safeFilePath);
                 doc.pipe(stream);
                 doc.addPage();
@@ -350,6 +376,7 @@ class FileSystemTool {
                 });
                 stream.on('error', (err) => {
                     console.error(t('FS_PDF_STREAM_ERROR_LOG', { componentName: 'FileSystemTool', relativeFilePath: relativeFilePath }), err);
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                     fsp.unlink(safeFilePath).catch(unlinkErr => console.error(t('FS_PDF_UNLINK_ERROR_LOG', { componentName: 'FileSystemTool', safeFilePath: safeFilePath }), unlinkErr));
                     // Returned error is already Russian.
                     reject({ result: null, error: `Не удалось записать PDF на диск: ${err.message}` });

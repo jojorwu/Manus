@@ -3,7 +3,7 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
-const { Writable } = require('stream'); // Not strictly needed for pipe, but good for reference
+// const { Writable } = require('stream'); // Removed as unused
 
 class FileDownloaderTool {
     constructor(taskWorkspaceDir) {
@@ -12,7 +12,9 @@ class FileDownloaderTool {
         }
         this.taskWorkspaceDir = path.resolve(taskWorkspaceDir);
         // Ensure base workspace directory exists (synchronous for constructor is acceptable for this)
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- taskWorkspaceDir is resolved from a constructor argument, expected to be a safe base path.
         if (!fs.existsSync(this.taskWorkspaceDir)) {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- taskWorkspaceDir is resolved from a constructor argument, expected to be a safe base path.
             fs.mkdirSync(this.taskWorkspaceDir, { recursive: true });
         }
     }
@@ -21,17 +23,30 @@ class FileDownloaderTool {
         if (typeof userPath !== 'string') {
             throw new Error("FileDownloaderTool: userPath must be a string.");
         }
-        const normalizedUserPath = path.normalize(userPath);
-        if (normalizedUserPath.split(path.sep).includes('..')) {
-            throw new Error("FileDownloaderTool: Relative path components '..' are not allowed.");
+
+        // Sanitize each path component to prevent malicious characters.
+        const sanitizedUserPath = userPath
+            .split(path.sep)
+            .map(part => part.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255))
+            .join(path.sep);
+
+        const normalizedUserPath = path.normalize(sanitizedUserPath);
+
+        // Double check for path traversal components after sanitization and normalization
+        if (normalizedUserPath.includes('..')) {
+            throw new Error("FileDownloaderTool: Relative path components '..' are not allowed, even after sanitization.");
         }
+
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
-        if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
-            console.error(`FileDownloaderTool: Path traversal attempt. Workspace: '${this.taskWorkspaceDir}', UserPath: '${userPath}', Resolved: '${resolvedPath}'`);
+
+        // Final check to ensure the path does not escape the workspace directory
+        if (!resolvedPath.startsWith(this.taskWorkspaceDir)) {
+            console.error(`FileDownloaderTool: Path traversal attempt. Workspace: '${this.taskWorkspaceDir}', UserPath: '${userPath}', Sanitized: '${sanitizedUserPath}', Resolved: '${resolvedPath}'`);
             throw new Error("FileDownloaderTool: Path traversal attempt detected.");
         }
         // For downloading, we always ensure the directory for the file exists.
         const dirToEnsure = path.dirname(resolvedPath);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- dirToEnsure is derived from a sanitized and validated path.
         await fsp.mkdir(dirToEnsure, { recursive: true });
         return resolvedPath;
     }
@@ -39,8 +54,8 @@ class FileDownloaderTool {
     _sanitizeFilename(filename) {
         if (typeof filename !== 'string') return 'downloaded_file';
         // Remove or replace invalid characters: / \ ? < > : * | " and control characters, limit length
-        let sanitized = filename.replace(/[\0-\x1f\x7f-\x9f]/g, ''); // Control characters
-        sanitized = sanitized.replace(/[/\?<>\:\*\|":\s]/g, '_'); // Common invalid chars and whitespace
+        let sanitized = filename.replace(/[\0-\x1f\x7f-\x9f]/g, ''); // eslint-disable-line no-control-regex
+        sanitized = sanitized.replace(/[/?<>:*|" ":\s]/g, '_'); // Common invalid chars and whitespace (removed unnecessary escape for :)
         sanitized = sanitized.substring(0, 200); // Limit length to prevent overly long filenames
         if (sanitized.trim() === "") return 'downloaded_file';
         return sanitized;
@@ -85,7 +100,7 @@ class FileDownloaderTool {
             // 1. HEAD request (optional, for headers and size check)
             let headResponse;
             let initialContentLength = null;
-            let contentType = null;
+            // let contentType = null; // Ensured removed as unused
 
             try {
                 headResponse = await axios({ method: 'head', url, timeout: 10000 });
@@ -95,7 +110,7 @@ class FileDownloaderTool {
                         return { result: null, error: `File size (${initialContentLength} bytes) exceeds maximum allowed size of ${MAX_FILE_SIZE_BYTES} bytes.` };
                     }
                 }
-                contentType = headResponse.headers['content-type'];
+                // contentType = headResponse.headers['content-type']; // Value is not used
                 if (!finalFilename) {
                     finalFilename = this._extractFilename(url, headResponse.headers);
                 }
@@ -116,12 +131,14 @@ class FileDownloaderTool {
             safeFilePath = await this._getSafePath(path.join(directory, finalFilename));
 
             // Ensure we are not trying to write to a directory path
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             if (safeFilePath.endsWith(path.sep) || (await fsp.stat(safeFilePath).catch(() => null))?.isDirectory()) {
                  const displayPath = path.relative(this.taskWorkspaceDir, safeFilePath);
                  return { result: null, error: `Cannot download file, path '${displayPath}' may refer to a directory or is invalid.`};
             }
 
             // 2. GET request for actual download
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
             const writer = fs.createWriteStream(safeFilePath);
             const response = await axios({
                 method: 'get',
@@ -135,6 +152,7 @@ class FileDownloaderTool {
                 const getContentLength = parseInt(response.headers['content-length'], 10);
                 if (getContentLength > MAX_FILE_SIZE_BYTES) {
                     response.data.destroy(); // Abort stream
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                     try { await fsp.unlink(safeFilePath); } catch (e) { /* ignore cleanup error */ }
                     return { result: null, error: `File size (${getContentLength} bytes) from GET request exceeds maximum allowed size of ${MAX_FILE_SIZE_BYTES} bytes.` };
                 }
@@ -146,6 +164,7 @@ class FileDownloaderTool {
                 if (receivedBytes > MAX_FILE_SIZE_BYTES) {
                     response.data.destroy(); // Abort stream
                     writer.close(() => { // Close writer and then attempt to unlink
+                         // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath
                          fsp.unlink(safeFilePath).catch(e => console.error(`FileDownloaderTool: Failed to clean up oversized file ${safeFilePath}: ${e.message}`));
                     });
                     // Note: The promise might have already resolved or rejected by this point if 'finish' or 'error' on writer happened first.
@@ -155,9 +174,10 @@ class FileDownloaderTool {
 
             return new Promise((resolve, reject) => {
                 response.data.pipe(writer);
-                let error = null;
+                // let error = null; // Removed as unused
                 writer.on('finish', () => {
                     if (receivedBytes > MAX_FILE_SIZE_BYTES) { // Final check after stream finishes
+                        // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                         fsp.unlink(safeFilePath)
                            .then(() => reject({ result: null, error: `Download aborted: File size (${receivedBytes} bytes) exceeded maximum of ${MAX_FILE_SIZE_BYTES} bytes.`}))
                            .catch(unlinkErr => reject({ result: null, error: `Download aborted due to size, and failed to delete partial file: ${unlinkErr.message}`}));
@@ -167,14 +187,16 @@ class FileDownloaderTool {
                     }
                 });
                 writer.on('error', err => {
-                    error = err;
+                    // error = err; // Removed assignment to unused variable
                     writer.close(); // Ensure stream is closed
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                     fsp.unlink(safeFilePath).catch(e => console.error(`FileDownloaderTool: Failed to clean up partially downloaded file ${safeFilePath} after writer error: ${e.message}`));
                     reject({ result: null, error: `Failed to write file to disk: ${err.message}` });
                 });
                 response.data.on('error', err => { // Handle errors from the response stream itself
-                    error = err;
+                    // error = err; // Removed assignment to unused variable
                     writer.close();
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                     fsp.unlink(safeFilePath).catch(e => console.error(`FileDownloaderTool: Failed to clean up partially downloaded file ${safeFilePath} after response error: ${e.message}`));
                     reject({ result: null, error: `Failed to download file, stream error: ${err.message}` });
                 });
@@ -184,6 +206,7 @@ class FileDownloaderTool {
             console.error(`FileDownloaderTool.download_file: General error for URL '${url}':`, error.message);
             // Attempt to clean up if safeFilePath was determined and an error occurred before or during streaming
             if (safeFilePath) {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFilePath is sanitized by _getSafePath.
                 try { await fsp.unlink(safeFilePath); } catch (e) { /* ignore cleanup error */ }
             }
             return { result: null, error: error.message };

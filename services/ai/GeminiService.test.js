@@ -1,6 +1,6 @@
 // File: services/ai/GeminiService.test.js
 const GeminiService = require('./GeminiService');
-const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require('@google/generative-ai');
+const { GoogleGenerativeAI } = require('@google/generative-ai'); // Removed HarmCategory, HarmBlockThreshold
 
 // Мокируем SDK
 jest.mock('@google/generative-ai');

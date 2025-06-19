@@ -1,21 +1,21 @@
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
-const path = require('path'); // path is still needed for savedTasksBaseDir in getTaskDirectoryPath (now in utils)
+// const path = require('path'); // Removed as unused
 const http = require('http');
 // WebSocket related imports are now in websocketHandler.js
 // url module is now used in websocketHandler.js
 // EventEmitter is imported via dependencies.js
 
-// Import local modules using ES module syntax
-import OrchestratorAgent from './agents/OrchestratorAgent.js';
-import { initializeLocalization, t } from './utils/localization.js';
-import initializeApiRoutes from './routes/apiRoutes.js';
-import initializeWebSocketHandler from './core/websocketHandler.js';
-import { getTaskDirectoryPath } from './utils/taskPathUtils.js'; // Import from new util module
+// Import local modules using CommonJS syntax
+const OrchestratorAgent = require('./agents/OrchestratorAgent.js');
+const { initializeLocalization } = require('./utils/localization.js'); // Removed t as unused
+const initializeApiRoutes = require('./routes/apiRoutes.js');
+const initializeWebSocketHandler = require('./core/websocketHandler.js');
+const { getTaskDirectoryPath } = require('./utils/taskPathUtils.js'); // Import from new util module
 
 // Import initialized instances from dependencies.js
-import {
+const {
     globalEventEmitter,
     memoryManager,
     openAIService,
@@ -24,7 +24,7 @@ import {
     resultsQueue,
     savedTasksBaseDir, // Still needed if getTaskDirectoryPath used it directly, but now getTaskDirectoryPath imports it
     agentApiKeysConfig
-} from './core/dependencies.js';
+} = require('./core/dependencies.js');
 
 initializeLocalization();
 
@@ -67,5 +67,5 @@ initializeWebSocketHandler(server, globalEventEmitter, memoryManager, getTaskDir
 
 // --- START SERVER ---
 server.listen(PORT, () => {
-    console.log(\`HTTP and WebSocket Server running on http://localhost:\${PORT}\`);
+    console.log(`HTTP and WebSocket Server running on http://localhost:${PORT}`);
 });

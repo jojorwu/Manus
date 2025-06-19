@@ -1,10 +1,10 @@
 // routes/apiRoutes.js
-import express from 'express';
-import { v4 as uuidv4 } from 'uuid'; // uuidv4 is used in /generate-plan
+const express = require('express');
+const { v4: uuidv4 } = require('uuid'); // uuidv4 is used in /generate-plan
 
 // Note: multer instance ('upload') and getTaskDirectoryPath are passed via dependencies
 
-export default function initializeApiRoutes(dependencies) {
+function initializeApiRoutes(dependencies) {
     const router = express.Router();
     const {
         OrchestratorAgent, // Class
@@ -26,19 +26,19 @@ export default function initializeApiRoutes(dependencies) {
 
         // Validation logic (ensure this is comprehensive as needed)
         if ((effectiveMode === "EXECUTE_FULL_PLAN" || effectiveMode === "PLAN_ONLY") && (!task || typeof task !== 'string' || task.trim() === "")) {
-            return res.status(400).json({ success: false, message: \`'task' is required for \${effectiveMode} mode.\` });
+            return res.status(400).json({ success: false, message: `'task' is required for ${effectiveMode} mode.` });
         }
         if ((effectiveMode === "SYNTHESIZE_ONLY" || effectiveMode === "EXECUTE_PLANNED_TASK") && (!taskIdToLoad || typeof taskIdToLoad !== 'string' || taskIdToLoad.trim() === "")) {
-            return res.status(400).json({ success: false, message: \`'taskIdToLoad' is required for \${effectiveMode} mode.\` });
+            return res.status(400).json({ success: false, message: `'taskIdToLoad' is required for ${effectiveMode} mode.` });
         }
         if (!["EXECUTE_FULL_PLAN", "PLAN_ONLY", "SYNTHESIZE_ONLY", "EXECUTE_PLANNED_TASK"].includes(effectiveMode)) {
-            return res.status(400).json({ success: false, message: \`Unknown mode '\${effectiveMode}'.\` });
+            return res.status(400).json({ success: false, message: `Unknown mode '${effectiveMode}'.` });
         }
 
         const parentTaskId = uuidv4(); // For tracking this specific request session
 
         try {
-            console.log(\`[API /generate-plan] Mode: \${effectiveMode}, TaskIdToLoad: \${taskIdToLoad || 'N/A'}, AgentId: \${agentId || 'default'}, ParentTaskId: \${parentTaskId}\`);
+            console.log(`[API /generate-plan] Mode: ${effectiveMode}, TaskIdToLoad: ${taskIdToLoad || 'N/A'}, AgentId: ${agentId || 'default'}, ParentTaskId: ${parentTaskId}`);
 
             let activeAIService;
             const serviceIdentifier = agentId || requestedService;
@@ -47,7 +47,7 @@ export default function initializeApiRoutes(dependencies) {
             } else { // Default to OpenAI
                 activeAIService = openAIService;
             }
-            console.log(\`Request \${parentTaskId}: Using AI Service: \${activeAIService.getServiceName()} for orchestrator.\`);
+            console.log(`Request ${parentTaskId}: Using AI Service: ${activeAIService.getServiceName()} for orchestrator.`);
 
             // OrchestratorAgent expects memoryManager and savedTasksBaseDir to be passed
             const orchestratorAgent = new OrchestratorAgent(
@@ -63,8 +63,8 @@ export default function initializeApiRoutes(dependencies) {
             const result = await orchestratorAgent.handleUserTask(task, uploadedFileObjects, parentTaskId, taskIdToLoad, effectiveMode);
             res.json(result);
         } catch (error) {
-            console.error(\`Error in /api/generate-plan (parentTaskId: \${parentTaskId}):\`, error.stack);
-            res.status(500).json({ success: false, message: \`Internal server error: \${error.message.substring(0,100)}\`, parentTaskId });
+            console.error(`Error in /api/generate-plan (parentTaskId: ${parentTaskId}):`, error.stack);
+            res.status(500).json({ success: false, message: `Internal server error: ${error.message.substring(0,100)}`, parentTaskId });
         }
     });
 
@@ -95,7 +95,7 @@ export default function initializeApiRoutes(dependencies) {
             taskDirPath = getTaskDirectoryPath(rawTaskId); // Using helper from dependencies
             await memoryManager.initializeTaskMemory(taskDirPath);
         } catch (pathError) {
-            console.error(\`[API /tasks/:taskId/chat POST] Error resolving taskDirPath for \${rawTaskId}: \${pathError.message}\`);
+            console.error(`[API /tasks/:taskId/chat POST] Error resolving taskDirPath for ${rawTaskId}: ${pathError.message}`);
             return res.status(404).json({ error: 'Task not found or path could not be determined.' });
         }
 
@@ -108,7 +108,7 @@ export default function initializeApiRoutes(dependencies) {
                 relatedToMessageId
             };
             const savedMessage = await memoryManager.addChatMessage(taskDirPath, messageDataToSave);
-            console.log(\`[API /tasks/:taskId/chat POST] Message saved for task \${rawTaskId} with server ID \${savedMessage.id}. Event emitted.\`);
+            console.log(`[API /tasks/:taskId/chat POST] Message saved for task ${rawTaskId} with server ID ${savedMessage.id}. Event emitted.`);
 
             // The 'newMessage' event handled by WebSocket server in index.js will broadcast.
             // OrchestratorAgent processing for this message would be triggered by WebSocket handler in index.js.
@@ -123,7 +123,7 @@ export default function initializeApiRoutes(dependencies) {
                 content: savedMessage.content
             });
         } catch (error) {
-            console.error(\`[API /tasks/:taskId/chat POST] Error processing message for task \${rawTaskId}: \${error.stack}\`);
+            console.error(`[API /tasks/:taskId/chat POST] Error processing message for task ${rawTaskId}: ${error.stack}`);
             res.status(500).json({ error: 'Failed to save or process chat message.' });
         }
     });
@@ -133,13 +133,13 @@ export default function initializeApiRoutes(dependencies) {
         const { taskId: rawTaskId } = req.params;
         const { since_timestamp, limit = "20", sort_order = 'asc' } = req.query;
 
-        console.log(\`[API /tasks/:taskId/chat GET] Received GET for \${rawTaskId}. Query: \`, { since_timestamp, limit, sort_order });
+        console.log(`[API /tasks/:taskId/chat GET] Received GET for ${rawTaskId}. Query: `, { since_timestamp, limit, sort_order });
 
         let taskDirPath;
         try {
             taskDirPath = getTaskDirectoryPath(rawTaskId); // Using helper from dependencies
         } catch (pathError) {
-            console.error(\`[API /tasks/:taskId/chat GET] Error resolving taskDirPath for \${rawTaskId}: \${pathError.message}\`);
+            console.error(`[API /tasks/:taskId/chat GET] Error resolving taskDirPath for ${rawTaskId}: ${pathError.message}`);
             return res.status(404).json({ error: 'Task not found or path could not be determined for chat history.' });
         }
 
@@ -165,10 +165,12 @@ export default function initializeApiRoutes(dependencies) {
                 lastTimestamp: lastTimestampInResponse
             });
         } catch (error) {
-            console.error(\`[API /tasks/:taskId/chat GET] Error fetching chat history for task \${rawTaskId}: \${error.stack}\`);
+            console.error(`[API /tasks/:taskId/chat GET] Error fetching chat history for task ${rawTaskId}: ${error.stack}`);
             res.status(500).json({ error: 'Failed to fetch chat history.' });
         }
     });
 
     return router;
 }
+
+module.exports = initializeApiRoutes;

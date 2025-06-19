@@ -1,23 +1,23 @@
 // core/dependencies.js
-import path from 'path';
-import EventEmitter from 'events';
+const path = require('path');
+const EventEmitter = require('events');
 
-// Import local modules using ES module syntax
-import ResearchAgent from '../agents/ResearchAgent.js';
-import UtilityAgent from '../agents/UtilityAgent.js';
-import SubTaskQueue from './SubTaskQueue.js'; // Assuming these are in 'core' relative to 'core'
-import ResultsQueue from './ResultsQueue.js'; // Adjust paths if they are elsewhere
-import MemoryManager from './MemoryManager.js';
+// Import local modules using CommonJS syntax
+const ResearchAgent = require('../agents/ResearchAgent.js');
+const UtilityAgent = require('../agents/UtilityAgent.js');
+const SubTaskQueue = require('./SubTaskQueue.js'); // Assuming these are in 'core' relative to 'core'
+const ResultsQueue = require('./ResultsQueue.js'); // Adjust paths if they are elsewhere
+const MemoryManager = require('./MemoryManager.js');
 
-import WebSearchTool from '../tools/WebSearchTool.js';
-import ReadWebpageTool from '../tools/ReadWebpageTool.js';
-import CalculatorTool from '../tools/CalculatorTool.js';
-import Context7Client from '../services/Context7Client.js';
-import Context7DocumentationTool from '../tools/Context7DocumentationTool.js';
+const WebSearchTool = require('../tools/WebSearchTool.js');
+const ReadWebpageTool = require('../tools/ReadWebpageTool.js');
+const CalculatorTool = require('../tools/CalculatorTool.js');
+const Context7Client = require('../services/Context7Client.js');
+const Context7DocumentationTool = require('../tools/Context7DocumentationTool.js');
 
-import GeminiService from '../services/ai/GeminiService.js';
-import OpenAIService from '../services/ai/OpenAIService.js';
-// import AnthropicAPIService from '../services/ai/AnthropicAPIService.js'; // Example
+const GeminiService = require('../services/ai/GeminiService.js');
+const OpenAIService = require('../services/ai/OpenAIService.js');
+// const AnthropicAPIService = require('../services/ai/AnthropicAPIService.js'); // Example
 
 // --- GLOBAL EVENT EMITTER ---
 const globalEventEmitter = new EventEmitter();
@@ -86,7 +86,7 @@ utilityAgent.startListening();
 
 console.log('[Dependencies] Global instances, AI services, tools, and worker agents initialized.');
 
-export {
+module.exports = {
     globalEventEmitter,
     subTaskQueue,
     resultsQueue,

@@ -1,8 +1,8 @@
 // utils/taskPathUtils.js
-import path from 'path';
+const path = require('path');
 // Import savedTasksBaseDir from core/dependencies.js
 // The path is relative from 'utils' up to root, then down to 'core'
-import { savedTasksBaseDir } from '../core/dependencies.js';
+const { savedTasksBaseDir } = require('../core/dependencies.js');
 
 /**
  * Constructs the full directory path for a given task ID.
@@ -11,7 +11,7 @@ import { savedTasksBaseDir } from '../core/dependencies.js';
  * @returns {string} The full path to the task's directory.
  * @throws {Error} If taskId is invalid.
  */
-export function getTaskDirectoryPath(taskId) {
+function getTaskDirectoryPath(taskId) {
     const today = new Date().toISOString().split('T')[0];
 
     if (!taskId || typeof taskId !== 'string' || taskId.trim() === '') {
@@ -23,5 +23,9 @@ export function getTaskDirectoryPath(taskId) {
     // TODO: This date-based folder structure assumes tasks are always created/accessed under "today".
     // For loading older tasks or more robust task path resolution, a metadata store or
     // a different directory structure (e.g., based on full taskId without date folders) would be needed.
-    return path.join(savedTasksBaseDir, today, taskId.startsWith('task_') ? taskId : \`task_\${taskId}\`);
+    return path.join(savedTasksBaseDir, today, taskId.startsWith('task_') ? taskId : `task_${taskId}`);
 }
+
+module.exports = {
+    getTaskDirectoryPath
+};
