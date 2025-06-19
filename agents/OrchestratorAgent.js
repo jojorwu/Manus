@@ -224,33 +224,96 @@
         async _summarizeAndPresentSearchResults(_taskState, _searchQuery) { /* ... no change from Turn 43 ... */ }
         async _handleSynthesizeOnlyMode(_taskState) { /* ... no change ... */ }
         async _handleExecutePlannedTaskMode(_taskState) { /* ... no change ... */ }
-    async _performPlanningPhase(taskState, isRevision = false) { // Added isRevision here
+    async _performPlanningPhase(taskState, isRevision = false) {
         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_PHASE_STARTED", `Starting planning phase. Is revision: ${isRevision}`));
-        // ... (existing logic for memoryContext, cwcForPlanning, etc.)
-        // The existing logic for preparing memoryContext, cwcForPlanning, executionContextForPlanning,
-        // remainingPlanForRevision, latestKeyFindingsForPlanning, latestErrorsForPlanning
-        // should remain here or be called before this point.
-        // For brevity, I'm assuming these are prepared as they were before.
 
-        let memoryContext = { /* ... */ }; // Assume populated as before
+        const planningModelName = taskState.aiService.baseConfig?.planningModel ||
+                                  taskState.aiService.baseConfig?.defaultModel ||
+                                  (taskState.aiService.getServiceName() === 'GeminiService' ? 'gemini-pro' : 'gpt-3.5-turbo');
+
+        const tokenizerForPlanning = taskState.aiService.getTokenizer(planningModelName);
+        const modelMaxTokens = taskState.aiService.getMaxContextTokens(planningModelName);
+        const maxTokensForMegaContext = Math.floor(modelMaxTokens * 0.8); // Reserve 20% for plan output and overhead
+
+        let memoryContext = {}; // Initialize memoryContext for planManager
+
+        // Assemble megaContext
+        const contextSpecification = {
+            systemPrompt: "You are a meticulous planning AI. Your goal is to create a robust, step-by-step plan to achieve the user's task.",
+            includeTaskDefinition: true,
+            uploadedFilePaths: taskState.uploadedFilePaths.map(p => ({ relativePath: p, type: 'file' })),
+            maxLatestKeyFindings: 5,
+            chatHistory: await this.memoryManager.getChatHistory(taskState.taskDirPath, { limit: taskState.CHAT_HISTORY_LIMIT || 10, sort_order: 'desc' }), // Get recent, descending for relevance
+            maxTokenLimit: maxTokensForMegaContext,
+            originalUserTask: taskState.currentOriginalTask,
+            currentWorkingContext: taskState.currentWorkingContext,
+            // enableMegaContextCache: true, // Default is true in MemoryManager
+            // megaContextCacheTTLSeconds: taskState.DEFAULT_MEGA_CONTEXT_TTL, // Default is null in MemoryManager
+        };
+
+        try {
+            const megaContextResult = await this.memoryManager.assembleMegaContext(
+                taskState.taskDirPath,
+                contextSpecification,
+                tokenizerForPlanning
+            );
+
+            if (megaContextResult && megaContextResult.success) {
+                memoryContext.megaContext = megaContextResult.contextString;
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLED", `MegaContext assembled. Tokens: ${megaContextResult.tokenCount}. From Cache: ${megaContextResult.fromCache}`));
+
+                if (taskState.aiService.getServiceName() === 'GeminiService' &&
+                    megaContextResult.contextString && // Ensure there's content to cache
+                    megaContextResult.tokenCount > (taskState.MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE || 1024)) { // MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE from taskState
+
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_STARTED", `Preparing Gemini cache for planning model: ${planningModelName}. MegaContext tokens: ${megaContextResult.tokenCount}`));
+
+                    // Gemini's prepareContextForModel expects an array of "Content" objects or a simple string.
+                    // assembleMegaContext returns a single string, so we might need to wrap it if the service expects structured content.
+                    // For now, assume it can take the string directly, or that prepareContextForModel handles it.
+                    const preparedGeminiContext = await taskState.aiService.prepareContextForModel(
+                        megaContextResult.contextString,
+                        {
+                            modelName: planningModelName,
+                            cacheConfig: {
+                                ttlSeconds: taskState.DEFAULT_GEMINI_CACHED_CONTENT_TTL, // from taskState
+                                displayName: `plan_ctx_${taskState.taskId}`
+                             }
+                        }
+                    );
+                    if (preparedGeminiContext && preparedGeminiContext.cacheName) {
+                        memoryContext.isMegaContextCachedByGemini = true;
+                        memoryContext.geminiCachedContentName = preparedGeminiContext.cacheName;
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_SUCCESS", `Gemini cache prepared. Name: ${preparedGeminiContext.cacheName}`));
+                    } else {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_SKIPPED_OR_FAILED", "Gemini cache not created or no name returned."));
+                    }
+                }
+            } else {
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILED", `Failed to assemble MegaContext: ${megaContextResult?.error || 'Unknown error'}`));
+            }
+        } catch (megaContextError) {
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_ERROR", `Error during MegaContext assembly: ${megaContextError.message}`));
+            console.error(`OrchestratorAgent._performPlanningPhase: Error assembling megaContext: ${megaContextError.stack}`);
+            // Decide if we should proceed without megaContext or fail planning
+        }
+
+        // Prepare other context pieces for planManager.getPlan
         let cwcForPlanning = taskState.currentWorkingContext;
         let executionContextForPlanning = taskState.lastExecutionContext;
         let remainingPlanForRevision = isRevision ? taskState.planStages : null;
-
-        // Simplified fetching for example, replace with actual calls if different
         const latestKeyFindingsForPlanning = await this.memoryManager.getLatestKeyFindings(taskState.taskDirPath, 5);
-        const latestErrorsForPlanning = taskState.replanHistory ? taskState.replanHistory.slice(-3) : [];
-
+        const latestErrorsForPlanningNonCycle = isRevision && taskState.lastError ? [taskState.lastError] : []; // General last error for context
 
         let replanErrorHistoryForPrompt = null;
         if (isRevision && taskState.replanHistory && taskState.currentReplanningCycleId) {
             replanErrorHistoryForPrompt = taskState.replanHistory
                 .filter(entry => entry.cycleId === taskState.currentReplanningCycleId)
-                .slice(-3) // Последние 3 попытки в текущем цикле
+                .slice(-3)
                 .map(entry => ({
                     attemptInCycle: entry.attemptInCycle,
                     failedStepNarrative: entry.failedStepNarrative,
-                    errorMessage: entry.errorMessage.substring(0, 200) // Ограничить длину сообщения
+                    errorMessage: entry.errorMessage.substring(0, 200)
                 }));
         }
 
@@ -261,33 +324,30 @@
                 acc[agent.role] = agent.tools.map(tool => tool.name);
                 return acc;
             }, {}),
-            memoryContext,
+            memoryContext, // Contains megaContext and Gemini cache info
             cwcForPlanning,
             executionContextForPlanning,
-            isRevision ? taskState.lastError : null, // Pass lastError only if it's a revision
+            isRevision ? taskState.lastError : null,
             remainingPlanForRevision,
             isRevision,
-            taskState.totalReplanAttempts, // This is revisionAttemptNumber
+            taskState.totalReplanAttempts,
             latestKeyFindingsForPlanning,
-            latestErrorsForPlanning,
-            replanErrorHistoryForPrompt // New parameter
+            latestErrorsForPlanningNonCycle, // Use the general last error here
+            replanErrorHistoryForPrompt
         );
 
-        // ... (rest of the _performPlanningPhase logic from previous state)
         if (!planResult.success) {
             taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { rawResponse: planResult.rawResponse }));
-            // Handle error or decide to ask for clarification
             if (planResult.message && planResult.message.toLowerCase().includes("clarification needed")) {
                  taskState.needsUserInput = true;
-                 // taskState.pendingQuestionId = ... (if LLM can provide a question ID)
-                 taskState.responseMessage = planResult.message; // Or a more structured question
+                 taskState.responseMessage = planResult.message;
             }
             return { success: false, message: planResult.message, rawResponse: planResult.rawResponse };
         }
         taskState.planStages = planResult.plan;
         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SUCCESSFUL", `Plan created successfully. Source: ${planResult.source}. Plan has ${planResult.plan.length} stages.`));
         await this.memoryManager.overwriteMemory(taskState.taskDirPath, 'plan.json', taskState.planStages, { isJson: true });
-        taskState.lastError = null; // Clear last error after successful planning/replanning
+        taskState.lastError = null;
         return { success: true };
     }
         async _performExecutionPhase(_taskState) { /* ... no change ... */ }

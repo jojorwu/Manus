@@ -26,10 +26,8 @@ class BaseAIService {
      * Subclasses should override this with more accurate, model-specific tokenizers if available.
      * @returns {Function} A function that takes a string and returns an estimated number of tokens.
      */
-    getTokenizer() {
-        // TODO: Implement actual tokenizer for each service
-        console.warn("Using placeholder tokenizer in BaseAIService. Implement for specific service.");
-        return (text) => text ? Math.ceil(text.length / 4) : 0; // Simple approximation
+    getTokenizer(modelName = null) {
+        throw new Error("Method 'getTokenizer(modelName = null)' must be implemented by subclasses.");
     }
 
     /**
@@ -40,16 +38,7 @@ class BaseAIService {
      * @returns {number} The maximum number of context tokens.
      */
     getMaxContextTokens() {
-        // TODO: Implement actual max context tokens for each service based on model
-        console.warn("Using placeholder maxContextTokens in BaseAIService. Implement for specific service.");
-        // Attempt to get from baseConfig, otherwise a general default
-        // This structure allows specific models to have their limits defined in config.
-        const modelMaxTokens = this.baseConfig?.modelMaxTokens || { default: 4096 }; // Example structure from subtask
-        const currentModel = this.baseConfig?.defaultModel || 'default'; // Get current model from config
-
-        // Use specific model's limit if available, else fallback to default in config, then hardcoded default.
-        // eslint-disable-next-line security/detect-object-injection -- currentModel is from baseConfig, assumed to be safe. modelMaxTokens is also from baseConfig.
-        return modelMaxTokens[currentModel] || modelMaxTokens['default'] || 4096;
+        throw new Error("Method 'getMaxContextTokens()' must be implemented by subclasses.");
     }
 
     // Utility methods, if any, could be added here
