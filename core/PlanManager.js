@@ -281,9 +281,12 @@ class PlanManager {
         }
     }
 
-    _buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber) {
-        let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`;
-        revisionContext += `Original User Task: '${userTaskString}'\n\n`;
+    _buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber, replanErrorHistory = null) {
+        let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`; // This line is updated by the new instructions, but we keep it as a base
+        revisionContext = ""; // Start fresh for the new instruction format
+
+        // The new instruction format incorporates revisionAttemptNumber directly.
+        // revisionContext += `Original User Task: '${userTaskString}'\n\n`; // Original task is part of the new instructions
 
         if (currentCWC) { // currentCWC no longer has keyFindings or errorsEncountered directly
             revisionContext += "Current Working Context (CWC) Summary:\n";
@@ -331,13 +334,46 @@ ${JSON.stringify(latestErrors, null, 2)}
             } catch (e) { console.warn("PlanManager: Could not stringify executionContextSoFar for revision prompt."); }
         }
 
-        revisionContext += `Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using LLMStepExecutor with isFinalAnswer: true.
-Твой новый план должен:
-а) Учитывать причину предыдущего сбоя (из 'Information about the failed step').
-б) Предложить конкретные изменения или альтернативные шаги для обхода проблемы.
-в) Если проблема не в конкретном шаге, а в общей стратегии, пересмотреть стратегию.
-г) Если предыдущие шаги (из 'Recent execution context') дали полезные результаты, старайся их использовать в новом плане, чтобы не делать лишнюю работу.
-д) Если задача действительно невыполнима даже после нескольких попыток, четко объясни это в финальном шаге через \`LLMStepExecutor\` с \`isFinalAnswer: true\`. Не зацикливайся на создании неработающих планов.`;
+        if (replanErrorHistory && replanErrorHistory.length > 0) {
+            revisionContext += "History of attempts in the current replanning cycle:\n";
+            for (const attempt of replanErrorHistory) {
+                revisionContext += `- Attempt ${attempt.attemptInCycle}: Failed on step "${attempt.failedStepNarrative}" with error "${attempt.errorMessage}"\n`;
+            }
+            revisionContext += "---\n";
+        }
+
+        revisionContext += `Instruction: This is replanning attempt number ${revisionAttemptNumber}.
+    You are provided with:
+    1. The original user task.
+    2. Available agent capabilities and tools.
+    3. Information about the most recent failed step ('Information about the failed step').
+    4. History of attempts in the current replanning cycle (if any, under 'History of attempts in the current replanning cycle'). This shows recent errors for the same underlying issue.
+    5. Broader execution context and previously successful steps (under 'Recent execution context').
+    6. Potentially, parts of the plan that were remaining before this failure.
+
+    Your goal is to generate a revised plan to achieve the original user task.
+
+    CRITICAL CONSIDERATIONS FOR REPLANNING:
+    - Analyze the 'Information about the failed step' and the 'History of attempts in the current replanning cycle' very carefully.
+    - If the same step or similar errors are repeating in the current cycle, DO NOT simply retry the same action. You MUST propose a significantly different approach to overcome the obstacle OR determine if the task is unachievable.
+    - If you've tried different approaches for the same obstacle and it's still failing (as shown in the history), it's highly likely the task is unachievable with the current capabilities.
+
+    ACTIONS TO TAKE:
+    A. If you can devise a NEW, genuinely different strategy to overcome the specific error(s) encountered:
+        - Generate a new plan (or modify the remaining plan).
+        - Ensure your new plan explicitly addresses the reason for the previous failure(s).
+        - Leverage any useful results from 'Recent execution context'.
+    B. If, after considering the failure history (especially repeated failures on the same step/issue), you determine the task is unachievable or cannot be reliably fixed:
+        - Return an empty JSON array: []
+        - Alternatively, return a plan with a single step using 'LLMStepExecutor' with 'isFinalAnswer: true'. The prompt for this step should clearly explain to the user why the task is considered unachievable, referencing the persistent errors. Example: { "prompt": "The task cannot be completed because attempts to process X consistently fail due to Y. All available methods have been exhausted.", "isFinalAnswer": true }.
+
+    Твой новый план должен (если ты не выбираешь вариант B):
+    а) Учитывать причину предыдущего сбоя (из 'Information about the failed step' и 'History of attempts...').
+    б) Предложить конкретные изменения или АЛЬТЕРНАТИВНЫЕ шаги для обхода проблемы. Не повторяй слепо предыдущие неудачные действия.
+    в) Если проблема не в конкретном шаге, а в общей стратегии, ПЕРЕСМОТРЕТЬ СТРАТЕГИЮ.
+    г) Если предыдущие шаги (из 'Recent execution context') дали полезные результаты, старайся их ИСПОЛЬЗОВАТЬ в новом плане, чтобы не делать лишнюю работу.
+    д) НЕ ЗАЦИКЛИВАЙСЯ на создании неработающих планов. Если после ${revisionAttemptNumber} попыток (и особенно если история текущего цикла показывает повторы) задача не решается, признай ее невыполнимой (вариант B).
+    `;
         return revisionContext;
     }
 
@@ -402,7 +438,8 @@ Based on the cached context and the user task, generate a plan.`;
         isRevision = false,
         revisionAttemptNumber = 0,
         latestKeyFindings = [], // New parameter
-        latestErrors = []      // New parameter
+        latestErrors = [],      // New parameter
+        replanErrorHistory = null // New parameter
     ) {
         let initialPromptSection = `User task: '${userTaskString}'.`;
         if (memoryContext && memoryContext.taskDefinition && memoryContext.taskDefinition !== userTaskString) {
@@ -608,7 +645,7 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 `;
 
         if (isRevision) {
-            const revisionPromptSection = this._buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber);
+            const revisionPromptSection = this._buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber, replanErrorHistory);
             let fullRevisionPromptBase;
 
             if (memoryContext && memoryContext.megaContext && typeof memoryContext.megaContext === 'string' && memoryContext.megaContext.trim() !== '') {

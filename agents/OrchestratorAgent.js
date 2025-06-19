@@ -12,7 +12,10 @@
     // const MemoryManager = require('../core/MemoryManager.js'); // Removed as memoryManager instance is injected
     // const ConfigManager = require('../core/ConfigManager.js'); // Commented out due to missing file
     const { loadTaskState } = require('../utils/taskStateUtil.js');
-    // const { v4: uuidv4 } = require('uuid'); // Removed as unused
+    const { v4: uuidv4 } = require('uuid'); // Added for replan cycle ID
+
+    const MAX_TOTAL_REPLAN_ATTEMPTS = 5;
+    const MAX_REPLAN_ATTEMPTS_PER_CYCLE = 2;
 
     class OrchestratorAgent {
         constructor(activeAIService, taskQueue, memoryManager, reportGenerator, agentCapabilities, resultsQueue, savedTasksBaseDir) {
@@ -87,6 +90,10 @@
                 responseMessage = existingState.responseMessage || '';
                 currentWebSearchResults = existingState.currentWebSearchResults || null;
                 lastError = existingState.lastError || null;
+                // Replanning history fields
+                taskState.replanHistory = existingState.replanHistory || [];
+                taskState.currentReplanningCycleId = existingState.currentReplanningCycleId || null;
+                taskState.totalReplanAttempts = existingState.totalReplanAttempts || 0;
             } else {
                 taskId = taskIdToLoad ? taskIdToLoad.split('_')[1] : Date.now().toString();
                 const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
@@ -103,6 +110,10 @@
                 uploadedFilePaths = []; planStages = null; lastExecutionContext = null;
                 needsUserInput = false; pendingQuestionId = null; responseMessage = '';
                 currentWebSearchResults = null; lastError = null;
+                // Replanning history fields
+                taskState.replanHistory = [];
+                taskState.currentReplanningCycleId = null;
+                taskState.totalReplanAttempts = 0;
 
                 if (taskIdToLoad && executionMode !== EXECUTE_FULL_PLAN && executionMode !== PLAN_ONLY) {
                     const loadTaskDir = path.join(baseTaskDir, new Date().toISOString().split('T')[0], `task_${taskIdToLoad.split('_')[1]}`);
@@ -213,7 +224,72 @@
         async _summarizeAndPresentSearchResults(_taskState, _searchQuery) { /* ... no change from Turn 43 ... */ }
         async _handleSynthesizeOnlyMode(_taskState) { /* ... no change ... */ }
         async _handleExecutePlannedTaskMode(_taskState) { /* ... no change ... */ }
-        async _performPlanningPhase(_taskState) { /* ... no change ... */ }
+    async _performPlanningPhase(taskState, isRevision = false) { // Added isRevision here
+        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_PHASE_STARTED", `Starting planning phase. Is revision: ${isRevision}`));
+        // ... (existing logic for memoryContext, cwcForPlanning, etc.)
+        // The existing logic for preparing memoryContext, cwcForPlanning, executionContextForPlanning,
+        // remainingPlanForRevision, latestKeyFindingsForPlanning, latestErrorsForPlanning
+        // should remain here or be called before this point.
+        // For brevity, I'm assuming these are prepared as they were before.
+
+        let memoryContext = { /* ... */ }; // Assume populated as before
+        let cwcForPlanning = taskState.currentWorkingContext;
+        let executionContextForPlanning = taskState.lastExecutionContext;
+        let remainingPlanForRevision = isRevision ? taskState.planStages : null;
+
+        // Simplified fetching for example, replace with actual calls if different
+        const latestKeyFindingsForPlanning = await this.memoryManager.getLatestKeyFindings(taskState.taskDirPath, 5);
+        const latestErrorsForPlanning = taskState.replanHistory ? taskState.replanHistory.slice(-3) : [];
+
+
+        let replanErrorHistoryForPrompt = null;
+        if (isRevision && taskState.replanHistory && taskState.currentReplanningCycleId) {
+            replanErrorHistoryForPrompt = taskState.replanHistory
+                .filter(entry => entry.cycleId === taskState.currentReplanningCycleId)
+                .slice(-3) // Последние 3 попытки в текущем цикле
+                .map(entry => ({
+                    attemptInCycle: entry.attemptInCycle,
+                    failedStepNarrative: entry.failedStepNarrative,
+                    errorMessage: entry.errorMessage.substring(0, 200) // Ограничить длину сообщения
+                }));
+        }
+
+        const planResult = await this.planManager.getPlan(
+            taskState.currentOriginalTask,
+            taskState.workerAgentCapabilities.map(agent => agent.role),
+            taskState.workerAgentCapabilities.reduce((acc, agent) => {
+                acc[agent.role] = agent.tools.map(tool => tool.name);
+                return acc;
+            }, {}),
+            memoryContext,
+            cwcForPlanning,
+            executionContextForPlanning,
+            isRevision ? taskState.lastError : null, // Pass lastError only if it's a revision
+            remainingPlanForRevision,
+            isRevision,
+            taskState.totalReplanAttempts, // This is revisionAttemptNumber
+            latestKeyFindingsForPlanning,
+            latestErrorsForPlanning,
+            replanErrorHistoryForPrompt // New parameter
+        );
+
+        // ... (rest of the _performPlanningPhase logic from previous state)
+        if (!planResult.success) {
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { rawResponse: planResult.rawResponse }));
+            // Handle error or decide to ask for clarification
+            if (planResult.message && planResult.message.toLowerCase().includes("clarification needed")) {
+                 taskState.needsUserInput = true;
+                 // taskState.pendingQuestionId = ... (if LLM can provide a question ID)
+                 taskState.responseMessage = planResult.message; // Or a more structured question
+            }
+            return { success: false, message: planResult.message, rawResponse: planResult.rawResponse };
+        }
+        taskState.planStages = planResult.plan;
+        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SUCCESSFUL", `Plan created successfully. Source: ${planResult.source}. Plan has ${planResult.plan.length} stages.`));
+        await this.memoryManager.overwriteMemory(taskState.taskDirPath, 'plan.json', taskState.planStages, { isJson: true });
+        taskState.lastError = null; // Clear last error after successful planning/replanning
+        return { success: true };
+    }
         async _performExecutionPhase(_taskState) { /* ... no change ... */ }
         async _performCwcUpdateLLM(_taskState) { /* ... no change ... */ }
         async _performFinalSynthesis(_taskState) { /* ... no change ... */ }
@@ -315,7 +391,55 @@
                     }
 
                     if (taskState.executionMode === PLAN_ONLY || (taskState.executionMode === EXECUTE_FULL_PLAN && (!taskState.planStages?.length) )) {
-                        const planningOutcome = await this._performPlanningPhase(taskState);
+                        // Check replan limits BEFORE attempting a new planning phase (initial or revision)
+                        if (taskState.lastError) { // Indicates a previous execution attempt failed
+                            taskState.totalReplanAttempts = (taskState.totalReplanAttempts || 0) + 1;
+                            const lastFailedStepId = taskState.lastError.stepId || taskState.lastError.sub_task_id;
+                            const lastErrorMessage = taskState.lastError.error_details?.message || taskState.lastError.message || 'Unknown error';
+                            let currentAttemptInCycle = 1;
+                            const lastCycleEntry = taskState.replanHistory && taskState.replanHistory.length > 0 ?
+                                taskState.replanHistory[taskState.replanHistory.length - 1] : null;
+                            const SIMILARITY_THRESHOLD = 50;
+                            const isSimilarError = lastCycleEntry &&
+                                                   lastCycleEntry.cycleId === taskState.currentReplanningCycleId &&
+                                                   lastCycleEntry.failedStepId === lastFailedStepId &&
+                                                   lastCycleEntry.errorMessage?.substring(0, SIMILARITY_THRESHOLD) === lastErrorMessage.substring(0, SIMILARITY_THRESHOLD);
+
+                            if (taskState.currentReplanningCycleId && isSimilarError) {
+                                currentAttemptInCycle = (lastCycleEntry.attemptInCycle || 0) + 1;
+                            } else {
+                                taskState.currentReplanningCycleId = `cycle_${uuidv4()}`;
+                                currentAttemptInCycle = 1;
+                            }
+
+                            taskState.replanHistory.push({
+                                cycleId: taskState.currentReplanningCycleId,
+                                attemptInCycle: currentAttemptInCycle,
+                                failedStepId: lastFailedStepId,
+                                failedStepNarrative: taskState.lastError.narrative_step || 'N/A',
+                                errorMessage: lastErrorMessage,
+                                timestamp: new Date().toISOString()
+                            });
+
+                            if (currentAttemptInCycle > MAX_REPLAN_ATTEMPTS_PER_CYCLE) {
+                                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLAN_CYCLE_LIMIT_EXCEEDED", `Max attempts (${MAX_REPLAN_ATTEMPTS_PER_CYCLE}) for similar error on step ${lastFailedStepId} exceeded. Task failed.`));
+                                taskState.overallSuccess = false;
+                                taskState.responseMessage = `Задача не может быть выполнена: ошибка на шаге "${taskState.lastError.narrative_step || lastFailedStepId}" повторяется (${lastErrorMessage.substring(0,100)}...).`;
+                                console.log(`[OrchestratorAgent] REPLAN_CYCLE_LIMIT_EXCEEDED for task ${taskState.taskId}`);
+                                taskState.executionMode = 'ABORTED_REPLAN_CYCLE_LIMIT';
+                                throw new Error(`Replanning cycle limit exceeded for step ${lastFailedStepId}.`);
+                            }
+                            if (taskState.totalReplanAttempts > MAX_TOTAL_REPLAN_ATTEMPTS) {
+                                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLAN_TOTAL_LIMIT_EXCEEDED", `Total replan attempts (${MAX_TOTAL_REPLAN_ATTEMPTS}) exceeded. Task failed.`));
+                                taskState.overallSuccess = false;
+                                taskState.responseMessage = `Задача не может быть выполнена: превышено общее количество попыток перепланирования.`;
+                                console.log(`[OrchestratorAgent] REPLAN_TOTAL_LIMIT_EXCEEDED for task ${taskState.taskId}`);
+                                taskState.executionMode = 'ABORTED_REPLAN_TOTAL_LIMIT';
+                                throw new Error(`Total replanning attempts limit exceeded.`);
+                            }
+                        }
+                        // Pass isRevision based on whether lastError exists (signifying a prior failed execution)
+                        const planningOutcome = await this._performPlanningPhase(taskState, !!taskState.lastError);
                         if (planningOutcome.needsUserInput) { return; } // This will go to finally
                         if (!planningOutcome.success) {
                             taskState.overallSuccess = false; taskState.responseMessage = planningOutcome.message || "Planning failed.";
