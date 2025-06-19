@@ -53,6 +53,43 @@ class BaseAIService {
     }
 
     // Utility methods, if any, could be added here
+
+    async _executeRequestWithRetry(requestFn, maxRetries = 3, initialDelayMs = 1000, serviceName = 'AIService') {
+        let attempts = 0;
+        let currentDelayMs = initialDelayMs;
+        while (attempts < maxRetries) {
+            try {
+                return await requestFn();
+            } catch (error) {
+                attempts++;
+                const statusCode = error.status || error.response?.status; // OpenAI SDK uses error.status, axios uses error.response.status
+                const retryableStatusCodes = [429, 500, 502, 503, 504];
+
+                // Логируем ошибку более подробно
+                const errorMessage = error.message || 'Unknown error';
+                let errorDetailsToLog = `Error during ${serviceName} API call (Attempt ${attempts}/${maxRetries}): Status ${statusCode || 'N/A'}, Message: ${errorMessage}`;
+                if (error.response?.data) { // Axios-like error structure
+                    errorDetailsToLog += `, Data: ${JSON.stringify(error.response.data)}`;
+                } else if (error.error) { // OpenAI SDK error structure
+                     errorDetailsToLog += `, Details: ${JSON.stringify(error.error)}`;
+                }
+                console.error(errorDetailsToLog);
+
+
+                if (retryableStatusCodes.includes(statusCode) && attempts < maxRetries) {
+                    console.log(`${serviceName}: Retrying in ${currentDelayMs}ms... (Attempt ${attempts}/${maxRetries}) for status ${statusCode}`);
+                    await new Promise(resolve => setTimeout(resolve, currentDelayMs));
+                    currentDelayMs *= 2; // Exponential backoff
+                } else {
+                    // If not a retryable status code or max retries reached, re-throw the last error
+                    // Enrich the error slightly if possible, or rethrow as is
+                    error.message = `Failed ${serviceName} API call after ${attempts} attempts: ${errorMessage}`;
+                    if (statusCode) error.finalStatusCode = statusCode; // Add final status code to the error object
+                    throw error;
+                }
+            }
+        }
+    }
 }
 
 module.exports = BaseAIService;

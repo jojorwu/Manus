@@ -109,7 +109,25 @@ class MemoryManager {
             const content = await fsp.readFile(filePath, 'utf8');
             return isJson ? JSON.parse(content) : content;
         } catch (error) {
-            if (error.code === 'ENOENT') return defaultValue;
+            const filePathForLog = filePath || path.join(this._getTaskMemoryBankPath(taskDirPath), memoryCategoryFileName); // На случай если filePath не успел определиться
+            if (error.code === 'ENOENT') {
+                // console.warn(`MemoryManager.loadMemory: File not found '${filePathForLog}'. Returning default value.`); // Можно добавить, если нужно часто видеть
+                return defaultValue;
+            } else if (['EACCES', 'EPERM'].includes(error.code)) {
+                console.error(`MemoryManager.loadMemory: Permission denied for file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'ENOSPC') {
+                console.error(`MemoryManager.loadMemory: No space left on device for file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'EMFILE') {
+                console.error(`MemoryManager.loadMemory: Too many open files when trying to access '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'EIO') {
+                console.error(`MemoryManager.loadMemory: I/O error accessing file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            }
+            // Для остальных ошибок - пробрасываем дальше
+            console.error(`MemoryManager.loadMemory: Unhandled FS error for file '${filePathForLog}'. Code: ${error.code || 'N/A'}. Rethrowing.`);
             throw error;
         }
     }
@@ -117,13 +135,36 @@ class MemoryManager {
     async overwriteMemory(taskDirPath, memoryCategoryFileName, newContent, options = {}) {
         const { isJson = false } = options;
         if (newContent === undefined) return;
+
         const memoryBankPath = this._getTaskMemoryBankPath(taskDirPath);
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
-        await fsp.mkdir(memoryBankPath, { recursive: true });
-        const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName);
-        const contentToWrite = isJson ? JSON.stringify(newContent, null, 2) : String(newContent);
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
-        await fsp.writeFile(filePath, contentToWrite, 'utf8');
+        const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName); // Define filePath before try block
+
+        try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
+            await fsp.mkdir(memoryBankPath, { recursive: true });
+            const contentToWrite = isJson ? JSON.stringify(newContent, null, 2) : String(newContent);
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
+            await fsp.writeFile(filePath, contentToWrite, 'utf8');
+        } catch (error) {
+            const filePathForLog = filePath || path.join(this._getTaskMemoryBankPath(taskDirPath), memoryCategoryFileName);
+            let errorMessage = `MemoryManager.overwriteMemory: Failed to write to file '${filePathForLog}'.`;
+
+            if (error.code === 'EACCES' || error.code === 'EPERM') {
+                errorMessage += ` Permission denied. Code: ${error.code}.`;
+            } else if (error.code === 'ENOSPC') {
+                errorMessage += ` No space left on device. Code: ${error.code}.`;
+            } else if (error.code === 'EMFILE') {
+                errorMessage += ` Too many open files. Code: ${error.code}.`;
+            } else if (error.code === 'EIO') {
+                errorMessage += ` I/O error. Code: ${error.code}.`;
+            } else {
+                errorMessage += ` Unhandled FS error. Code: ${error.code || 'N/A'}.`;
+            }
+            // Логируем оригинальную ошибку для полной трассировки
+            console.error(errorMessage, error);
+            // Пробрасываем новую ошибку с более контекстным сообщением
+            throw new Error(errorMessage);
+        }
     }
 
     async addChatMessage(taskDirPath, messageData) {

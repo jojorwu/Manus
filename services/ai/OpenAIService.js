@@ -139,7 +139,13 @@ class OpenAIService extends BaseAIService {
             if (stopSequences !== undefined) requestPayload.stop = stopSequences;
             // Add other OpenAI specific parameters from params if needed
 
-            const completion = await this.openai.chat.completions.create(requestPayload);
+            const requestFn = () => this.openai.chat.completions.create(requestPayload);
+            const completion = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
 
             if (completion.choices && completion.choices.length > 0) {
                 const choice = completion.choices[0];
@@ -147,12 +153,16 @@ class OpenAIService extends BaseAIService {
                     return choice.message.content.trim();
                 }
             }
-            console.warn("OpenAIService API response warning: No content found or unexpected format.", completion);
-            throw new Error("OpenAI API response error: No message content found.");
+            console.warn("OpenAIService API response warning: No content found or unexpected format (after retries).", completion);
+            throw new Error("OpenAI API response error: No message content found (after retries).");
         } catch (error) {
-            const errorDetail = error.response?.data?.error?.message || error.error?.message || error.message;
-            console.error(`OpenAIService: Error during chat completion for model ${model}:`, errorDetail, error.stack);
-            throw new Error(`OpenAI API Error: ${errorDetail}`);
+            // error.message should already be enriched by _executeRequestWithRetry
+            const errorDetail = error.finalStatusCode ? `Status ${error.finalStatusCode}: ${error.message}` : (error.response?.data?.error?.message || error.error?.message || error.message);
+            console.error(`OpenAIService: Error during chat completion for model ${model} (after retries):`, errorDetail, error.stack);
+            // If _executeRequestWithRetry threw, error.message is already "Failed AIService API call after X attempts: original_message"
+            // So, we might not need to prepend "OpenAI API Error (after retries):" if error.message is already descriptive.
+            // However, to be explicit about the source:
+            throw new Error(`OpenAI API Error (after retries): ${error.message}`);
         }
     }
 

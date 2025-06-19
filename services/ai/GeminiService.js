@@ -112,20 +112,27 @@ class GeminiService extends BaseAIService {
 
         try {
             const modelInstance = this.genAI.getGenerativeModel({ model: modelName });
-            const result = await modelInstance.generateContent(requestPayload);
-            const response = result.response; // await not needed here as per SDK v0.8.0
+
+            const requestFn = () => modelInstance.generateContent(requestPayload);
+            const result = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
+            const response = result.response;
 
             if (response && typeof response.text === 'function') {
                 return response.text();
             } else if (response?.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return response.candidates[0].content.parts[0].text;
             } else {
-                console.warn(`GeminiService (${modelName}): API response format error. No text found. Response:`, JSON.stringify(response, null, 2));
-                throw new Error("Gemini API response format error: No text content found.");
+                console.warn(`GeminiService (${modelName}): API response format error (after retries). No text found. Response:`, JSON.stringify(response, null, 2));
+                throw new Error("Gemini API response format error (after retries): No text content found.");
             }
         } catch (error) {
-            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent):`, error.message);
-            throw new Error(`Gemini API Error: ${error.message}`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent after retries):`, error.message, error.stack);
+            throw new Error(`Gemini API Error (after retries): ${error.message}`);
         }
     }
 
@@ -182,14 +189,20 @@ class GeminiService extends BaseAIService {
 
             try {
                 const modelInstance = this.genAI.getGenerativeModel({ model: modelName });
-                const result = await modelInstance.generateContent(requestPayload);
+                const requestFn = () => modelInstance.generateContent(requestPayload);
+                const result = await this._executeRequestWithRetry(
+                    requestFn,
+                    this.baseConfig.maxRetries || 3,
+                    this.baseConfig.initialRetryDelayMs || 1000,
+                    this.getServiceName()
+                );
                 const response = result.response;
                 if (response && typeof response.text === 'function') return response.text();
                 if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
-                throw new Error("Gemini API chat response format error (with cache): No text content found.");
+                throw new Error("Gemini API chat response format error (with cache, after retries): No text content found.");
             } catch (error) {
-                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat):`, error.message);
-                throw new Error(`Gemini API Error (with cache for chat): ${error.message}`);
+                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat, after retries):`, error.message, error.stack);
+                throw new Error(`Gemini API Error (with cache for chat, after retries): ${error.message}`);
             }
         }
 
@@ -239,15 +252,22 @@ class GeminiService extends BaseAIService {
 
 
             const chat = modelInstance.startChat({ history: messagesForChatSDK });
-            const result = await chat.sendMessage(lastUserMessage);
+
+            const requestFn = () => chat.sendMessage(lastUserMessage);
+            const result = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
             const response = result.response;
 
             if (response && typeof response.text === 'function') return response.text();
             if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
-            throw new Error("Gemini API chat response format error: No text content found.");
+            throw new Error("Gemini API chat response format error (after retries): No text content found.");
         } catch (error) {
-            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat):`, error.message);
-            throw new Error(`Gemini API Chat Error: ${error.message}`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat, after retries):`, error.message, error.stack);
+            throw new Error(`Gemini API Chat Error (after retries): ${error.message}`);
         }
     }
 

@@ -3,6 +3,8 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
+const urlModule = require('url');
+const net = require('net');
 // const { Writable } = require('stream'); // Removed as unused
 
 class FileDownloaderTool {
@@ -87,9 +89,72 @@ class FileDownloaderTool {
         return this._sanitizeFilename(filename);
     }
 
+    _isValidPublicHttpUrl(urlString) {
+        try {
+            const parsedUrl = new urlModule.URL(urlString);
+
+            // 1. Проверка протокола
+            if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
+                console.warn(`FileDownloaderTool: Заблокирован URL с невалидным протоколом: ${urlString}`);
+                return false;
+            }
+
+            const hostname = parsedUrl.hostname;
+
+            // 2. Проверка, является ли hostname IP-адресом
+            if (net.isIP(hostname)) {
+                // 3. Проверка на loopback
+                if (net.isIPv4(hostname) && hostname.startsWith('127.')) {
+                    console.warn(`FileDownloaderTool: Заблокирован Loopback IP URL: ${urlString}`);
+                    return false;
+                }
+                if (net.isIPv6(hostname) && (hostname === '::1' || hostname.toLowerCase() === '0:0:0:0:0:0:0:1')) {
+                     console.warn(`FileDownloaderTool: Заблокирован Loopback IP URL: ${urlString}`);
+                    return false;
+                }
+
+                // 4. Проверка на приватные диапазоны IPv4
+                // 10.0.0.0/8
+                if (hostname.startsWith('10.')) {
+                    console.warn(`FileDownloaderTool: Заблокирован приватный IP URL (10.x.x.x): ${urlString}`);
+                    return false;
+                }
+                // 172.16.0.0/12
+                if (hostname.startsWith('172.')) {
+                    const parts = hostname.split('.');
+                    const secondOctet = parseInt(parts[1], 10);
+                    if (secondOctet >= 16 && secondOctet <= 31) {
+                        console.warn(`FileDownloaderTool: Заблокирован приватный IP URL (172.16-31.x.x): ${urlString}`);
+                        return false;
+                    }
+                }
+                // 192.168.0.0/16
+                if (hostname.startsWith('192.168.')) {
+                    console.warn(`FileDownloaderTool: Заблокирован приватный IP URL (192.168.x.x): ${urlString}`);
+                    return false;
+                }
+
+                // 5. Проверка на link-local
+                if (hostname.startsWith('169.254.')) {
+                    console.warn(`FileDownloaderTool: Заблокирован Link-local IP URL: ${urlString}`);
+                    return false;
+                }
+            }
+            // Примечание: Проверка DNS для разрешения hostname в IP и последующая проверка этого IP
+            // здесь не реализована для простоты первого шага. Если hostname не IP, он считается допустимым на этом этапе.
+            return true;
+        } catch (e) {
+            console.warn(`FileDownloaderTool: Ошибка парсинга URL "${urlString}": ${e.message}`);
+            return false; // Ошибка парсинга означает невалидный URL
+        }
+    }
+
     async download_file(params) {
         if (!params || typeof params.url !== 'string' || params.url.trim() === "") {
             return { result: null, error: "Invalid input: 'url' is required and must be a non-empty string." };
+        }
+        if (!this._isValidPublicHttpUrl(params.url)) {
+            return { result: null, error: "Недопустимый URL. Разрешены только публичные HTTP/HTTPS URL." };
         }
 
         const { url, directory = '', filename: userSpecifiedFilename } = params;
