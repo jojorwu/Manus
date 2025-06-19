@@ -1,0 +1,16 @@
+[
+  {
+    "name": "weather_query",
+    "fileName": "weather_query_template.json",
+    "regexString": "^(?:what is the )?weather (?:in )?(.+)",
+    "regexFlags": "i",
+    "paramMapping": { "CITY_NAME": 1 }
+  },
+  {
+    "name": "calculator",
+    "fileName": "calculator_template.json",
+    "regexString": "^(?:calculate|what is) ([\\d\\s+\\-*\\/().^%]+)",
+    "regexFlags": "i",
+    "paramMapping": { "EXPRESSION": 1 }
+  }
+]
