@@ -14,7 +14,7 @@ async function initializeLocalization() {
     try {
         // Dynamically import os-locale
         // os-locale uses a default export for its CommonJS version when imported like this.
-        const osLocaleModule = await import('os-locale');
+        const osLocaleModule = await import('os-locale'); // eslint-disable-line node/no-unsupported-features/es-syntax, node/no-missing-import
         osLocaleSyncFunction = osLocaleModule.osLocaleSync || (osLocaleModule.default ? osLocaleModule.default.osLocaleSync : null);
 
         if (osLocaleSyncFunction) {
@@ -30,7 +30,10 @@ async function initializeLocalization() {
         currentLocale = process.env.LANG ? process.env.LANG.split('.')[0] : 'en';
     }
 
-    currentLocale = currentLocale.split('_')[0]; // Use base language (e.g., 'en' from 'en_US')
+    // Sanitize locale to prevent path traversal or unexpected characters
+    currentLocale = (currentLocale.split('_')[0] || 'en').replace(/[^a-zA-Z-]/g, '').substring(0, 5);
+    if (!currentLocale) currentLocale = 'en'; // Fallback if sanitization results in empty string
+
     console.log(`Localization: Using locale '${currentLocale}'.`); // Non-localized
 
     await loadTranslations(currentLocale);
@@ -63,17 +66,32 @@ async function loadTranslations(locale) {
 
 function t(key, args) {
     const langSpecificTranslations = translations[currentLocale] || translations['en'] || {};
-    let message = langSpecificTranslations[key] || key; // Fallback to key if not found
+    let message = key; // Default to key
+    if (Object.prototype.hasOwnProperty.call(langSpecificTranslations, key)) {
+        message = langSpecificTranslations[key];
+    } else {
+        // Optional: Log if key is not found in either current locale or fallback 'en'
+        // if (!translations['en'] || !Object.prototype.hasOwnProperty.call(translations['en'], key)) {
+        //     console.warn(`Localization: Translation key "${key}" not found.`);
+        // }
+    }
 
     if (typeof args === 'string') { // Simple case: t('KEY', 'ComponentName')
         message = message.replace(/{componentName}/g, args);
     } else if (typeof args === 'object' && args !== null) {
         for (const argKey in args) {
-            const placeholder = new RegExp(`{${argKey}}`, 'g');
-            message = message.replace(placeholder, String(args[argKey]));
+            // Security: Ensure only own properties of args are used for replacement.
+            if (Object.prototype.hasOwnProperty.call(args, argKey)) {
+                // Security: Sanitize argKey for use in RegExp if it could contain special characters.
+                // However, typically argKey is a known, safe placeholder name from the code.
+                // If argKey could come from untrusted input, it would need sanitization.
+                const sanitizedArgKey = escapeRegExp(argKey); // Use the new escape function
+                const placeholder = new RegExp(`{${sanitizedArgKey}}`, 'g');
+                message = message.replace(placeholder, String(args[argKey]));
+            }
         }
         // If componentName is a common replacement and not explicitly in args, try to replace it
-        if (!args.componentName && message.includes('{componentName}')) {
+        if (!Object.prototype.hasOwnProperty.call(args, 'componentName') && message.includes('{componentName}')) {
              message = message.replace(/{componentName}/g, ''); // Or some default like 'System'
         }
     }
@@ -84,9 +102,16 @@ function t(key, args) {
     return message;
 }
 
+// Security: Function to escape characters for use in regular expressions.
+function escapeRegExp(string) {
+    if (typeof string !== 'string') return '';
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); // $& means the whole matched string
+}
+
 module.exports = {
     initializeLocalization,
     t,
     // For testing or specific needs, though not used by t() directly after init
-    getCurrentLocale: () => currentLocale
+    getCurrentLocale: () => currentLocale,
+    escapeRegExp
 };

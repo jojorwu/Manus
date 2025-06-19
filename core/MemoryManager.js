@@ -20,7 +20,12 @@ class MemoryManager {
 
     _calculateObjectHash(obj) {
         const orderedObj = {};
-        Object.keys(obj).sort().forEach(key => { orderedObj[key] = obj[key]; });
+        // Security: Ensure only own properties are accessed to prevent prototype pollution.
+        Object.keys(obj).sort().forEach(key => {
+            if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                orderedObj[key] = obj[key];
+            }
+        });
         const str = JSON.stringify(orderedObj);
         return crypto.createHash('sha256').update(str).digest('hex');
     }
@@ -56,8 +61,26 @@ class MemoryManager {
         if (!memoryCategoryFileName || typeof memoryCategoryFileName !== 'string' || memoryCategoryFileName.trim() === '') {
              throw new Error("MemoryManager: memoryCategoryFileName must be a non-empty string.");
         }
+        // Sanitize memoryCategoryFileName to prevent path traversal or use of unsafe characters.
+        // This is a basic sanitization; more complex rules might be needed depending on expected inputs.
+        // It aims to allow typical filenames, including those with extensions and subdirectories (e.g., 'uploaded_files/image.png').
+        const sanitizedFileName = memoryCategoryFileName
+            .split('/') // Split by directory separator
+            .map(part => part.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255)) // Sanitize each part
+            .join('/'); // Rejoin
+
+        if (sanitizedFileName !== memoryCategoryFileName) {
+            console.warn(`MemoryManager: memoryCategoryFileName was sanitized from "${memoryCategoryFileName}" to "${sanitizedFileName}".`);
+        }
+
         const memoryBankPath = this._getTaskMemoryBankPath(taskDirPath);
-        return path.join(memoryBankPath, memoryCategoryFileName);
+        const finalPath = path.join(memoryBankPath, sanitizedFileName);
+
+        // Final check to ensure the path does not escape the memoryBankPath
+        if (!finalPath.startsWith(memoryBankPath)) {
+            throw new Error(`MemoryManager: Invalid memoryCategoryFileName "${memoryCategoryFileName}" results in path traversal attempt.`);
+        }
+        return finalPath;
     }
 
     async initializeTaskMemory(taskDirPath) {
@@ -103,7 +126,7 @@ class MemoryManager {
             throw new Error("Invalid messageData: senderId and content.text are required.");
         }
         await this.initializeTaskMemory(taskDirPath);
-        const history = await this.loadMemory(taskDirPath, CHAT_HISTORY_FILENAME, { isJson: true, defaultValue: [] });
+        let history = await this.loadMemory(taskDirPath, CHAT_HISTORY_FILENAME, { isJson: true, defaultValue: [] });
         if (!Array.isArray(history)) {
             console.warn(`MemoryManager.addChatMessage: Chat history for ${taskDirPath} was not an array. Resetting.`);
             history = [];
@@ -203,7 +226,30 @@ class MemoryManager {
         const contextParts = []; let currentTokenCount = 0; const countTokens = (text) => text ? tokenizerCompatibleWithLLM(text) : 0;
         const addPartToContext = (partContent, isCritical = false) => { if (!partContent || typeof partContent !== 'string' || !partContent.trim()) return true; const partTokens = countTokens(partContent); if (currentTokenCount + partTokens <= remainingTokenBudget) { contextParts.push(partContent); currentTokenCount += partTokens; return true; } else if (isCritical) throw new Error(`Critical context part too large: ${partContent.substring(0,50)}...`); return false; };
         let remainingTokenBudget = maxTokenLimit - countTokens(customPreamble) - countTokens(customPostamble) - countTokens(recordSeparator)*(priorityOrder.length-1);
-        for (const contentType of priorityOrder) { if (remainingTokenBudget <= 0) break; let contentToAdd = ""; switch (contentType) { case 'systemPrompt': if (systemPrompt) contentToAdd = systemPrompt; break; case 'originalUserTask': if(originalUserTask) contentToAdd = `Original User Task:\n${originalUserTask}`; break; case 'currentWorkingContext': if(contextSpecification.currentWorkingContext) contentToAdd = `Current Working Context:\n${contextSpecification.currentWorkingContext}`; break; case 'taskDefinition': if (includeTaskDefinition) contentToAdd = await this.loadMemory(taskDirPath, 'task_definition.md', {defaultValue: ''}); if (contentToAdd) contentToAdd = `Task Definition:\n${contentToAdd}`; break; case 'chatHistory': if (chatHistory?.length) contentToAdd = "Chat History (newest first):\n" + chatHistory.map(m => `${m.role}: ${m.content}`).join('\n---\n'); break; case 'uploadedFilePaths': if (uploadedFilePaths?.length) { let filesContent = ""; for (const relPath of uploadedFilePaths) { try { filesContent += `Document: ${path.basename(relPath)}\nContent:\n${await this.loadMemory(taskDirPath, relPath, {defaultValue: '(empty)'})}\n\n`; } catch(e){ console.warn(`Failed to load uploaded file ${relPath}`); }} contentToAdd = filesContent.trim(); } break; case 'keyFindings': if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') { const findings = await this.getLatestKeyFindings(taskDirPath, maxLatestKeyFindings, keyFindingsRelevanceQuery); if (findings?.length) contentToAdd = "Key Findings:\n" + findings.map(f => `${f.sourceStepNarrative}: ${JSON.stringify(f.data)}`).join(findingSeparator); } break; } if (!addPartToContext(contentToAdd, contentType === 'systemPrompt')) break; }
+
+        // Security: Define allowed content types to prevent injection if priorityOrder is manipulated.
+        const allowedContentTypes = new Set(['systemPrompt', 'originalUserTask', 'currentWorkingContext', 'taskDefinition', 'chatHistory', 'uploadedFilePaths', 'keyFindings']);
+
+        for (const contentType of priorityOrder) {
+            if (!allowedContentTypes.has(contentType)) {
+                console.warn(`MemoryManager.assembleMegaContext: Skipping disallowed contentType "${contentType}" in priorityOrder.`);
+                continue;
+            }
+            if (remainingTokenBudget <= 0) break;
+            let contentToAdd = "";
+            switch (contentType) {
+                 case 'systemPrompt': if (systemPrompt) contentToAdd = systemPrompt; break;
+                 case 'originalUserTask': if(originalUserTask) contentToAdd = `Original User Task:\n${originalUserTask}`; break;
+                 // Ensure contextSpecification itself is not from untrusted source or validate its keys if necessary.
+                 // Assuming contextSpecification.currentWorkingContext is safe for now.
+                 case 'currentWorkingContext': if(contextSpecification && Object.prototype.hasOwnProperty.call(contextSpecification, 'currentWorkingContext') && contextSpecification.currentWorkingContext) contentToAdd = `Current Working Context:\n${contextSpecification.currentWorkingContext}`; break;
+                 case 'taskDefinition': if (includeTaskDefinition) contentToAdd = await this.loadMemory(taskDirPath, 'task_definition.md', {defaultValue: ''}); if (contentToAdd) contentToAdd = `Task Definition:\n${contentToAdd}`; break;
+                 case 'chatHistory': if (chatHistory?.length) contentToAdd = "Chat History (newest first):\n" + chatHistory.map(m => `${m.role}: ${m.content}`).join('\n---\n'); break;
+                 case 'uploadedFilePaths': if (uploadedFilePaths?.length) { let filesContent = ""; for (const relPath of uploadedFilePaths) { try { filesContent += `Document: ${path.basename(relPath)}\nContent:\n${await this.loadMemory(taskDirPath, relPath, {defaultValue: '(empty)'})}\n\n`; } catch(e){ console.warn(`Failed to load uploaded file ${relPath}`); }} contentToAdd = filesContent.trim(); } break;
+                 case 'keyFindings': if (maxLatestKeyFindings > 0 && typeof this.getLatestKeyFindings === 'function') { const findings = await this.getLatestKeyFindings(taskDirPath, maxLatestKeyFindings, keyFindingsRelevanceQuery); if (findings?.length) contentToAdd = "Key Findings:\n" + findings.map(f => `${f.sourceStepNarrative}: ${JSON.stringify(f.data)}`).join(findingSeparator); } break;
+            }
+            if (!addPartToContext(contentToAdd, contentType === 'systemPrompt')) break;
+        }
         let finalContextString = customPreamble + "\n" + contextParts.join(recordSeparator) + "\n" + customPostamble;
         const finalTokenCount = countTokens(finalContextString);
         if (finalTokenCount > maxTokenLimit) return { success: false, error: "Assembled context exceeds token limit.", tokenCount: finalTokenCount };

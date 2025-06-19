@@ -91,7 +91,28 @@ class OpenAIService extends BaseAIService {
     async completeChat(messagesArray, params = {}) {
         this._ensureClient();
 
-        const model = params.model || this.baseConfig.defaultModel || 'gpt-3.5-turbo';
+        // Security: Validate model name from params against a list of known/allowed models for this service
+        const allowedModels = [
+            'gpt-4-turbo', 'gpt-4-turbo-2024-04-09', 'gpt-4-turbo-preview', 'gpt-4-0125-preview', 'gpt-4-1106-preview', 'gpt-4-vision-preview',
+            'gpt-4', 'gpt-4-0613', 'gpt-4-32k', 'gpt-4-32k-0613',
+            'gpt-3.5-turbo-0125', 'gpt-3.5-turbo', 'gpt-3.5-turbo-1106', 'gpt-3.5-turbo-instruct', 'gpt-3.5-turbo-0613', 'gpt-3.5-turbo-16k', 'gpt-3.5-turbo-16k-0613'
+        ];
+        let model = this.baseConfig.defaultModel || 'gpt-3.5-turbo';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                model = params.model;
+            } else {
+                // Attempt to match base model (e.g. gpt-4 from gpt-4-0125-preview)
+                const baseModel = params.model.split('-').slice(0, 2).join('-');
+                if (allowedModels.includes(baseModel)) {
+                    model = params.model; // Allow if base model is known, actual sub-version might work
+                     console.warn(`OpenAIService: Requested model '${params.model}' is not in the primary allowed list, but its base '${baseModel}' is known. Proceeding.`);
+                } else {
+                    console.warn(`OpenAIService: Requested model '${params.model}' is not in the allowed list. Using default: ${model}`);
+                }
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         const maxTokens = params.max_tokens || params.maxTokens || this.baseConfig.maxTokens; // OpenAI uses max_tokens
         const topP = params.top_p || params.topP || this.baseConfig.topP;
@@ -150,7 +171,9 @@ class OpenAIService extends BaseAIService {
      * @override
      */
     getMaxContextTokens() {
-        const model = params.model || this.baseConfig.defaultModel || 'gpt-3.5-turbo'; // Use params.model if provided for specific call context
+        // Security: Use the already validated model name from constructor or default for context window lookup.
+        // Assuming this.baseConfig.defaultModel is from a trusted source (config).
+        const currentModelForContext = this.baseConfig.defaultModel || 'gpt-3.5-turbo';
         // Source: https://platform.openai.com/docs/models (Context window column)
         // Values as of late 2023 / early 2024. Always verify with OpenAI documentation.
         const modelContextWindows = {
@@ -182,15 +205,15 @@ class OpenAIService extends BaseAIService {
             'default': 4096 // Default fallback
         };
 
-        let contextSize = modelContextWindows[model];
+        let contextSize = modelContextWindows[currentModelForContext];
         if (!contextSize) {
             // Try to find a base model if versioned e.g. gpt-4-0125-preview -> gpt-4
-            const baseModel = model.split('-').slice(0, 2).join('-');
+            const baseModel = currentModelForContext.split('-').slice(0, 2).join('-');
             contextSize = modelContextWindows[baseModel];
-            if (!contextSize && model.startsWith('gpt-4')) contextSize = modelContextWindows['gpt-4'];
-            else if (!contextSize && model.startsWith('gpt-3.5-turbo')) contextSize = modelContextWindows['gpt-3.5-turbo'];
+            if (!contextSize && currentModelForContext.startsWith('gpt-4')) contextSize = modelContextWindows['gpt-4'];
+            else if (!contextSize && currentModelForContext.startsWith('gpt-3.5-turbo')) contextSize = modelContextWindows['gpt-3.5-turbo'];
             else contextSize = modelContextWindows['default'];
-            // console.warn(\`OpenAIService.getMaxContextTokens: Model '\${model}' not found in known list. Using inferred \${contextSize} tokens.\`);
+            // console.warn(`OpenAIService.getMaxContextTokens: Model '${currentModelForContext}' not found in known list. Using inferred ${contextSize} tokens.`);
         }
         return contextSize;
     }

@@ -30,10 +30,15 @@ class ResearchAgent {
     outcome = { result: null, error: `ResearchAgent: Неизвестный инструмент '${tool_name}' или неверные входные данные.` };
     let status = "FAILED"; // Default status
 
-    const selectedTool = this.toolsMap[tool_name];
-
-    if (selectedTool) {
-      try {
+    // Security: Validate tool_name against known tools to prevent object injection.
+    if (!Object.prototype.hasOwnProperty.call(this.toolsMap, tool_name)) {
+        console.error(t('AGENT_TOOL_NOT_FOUND', { agentName: 'ResearchAgent', toolName: tool_name, subTaskId: sub_task_id }));
+        // outcome is already set to the Russian version of "Unknown tool..."
+        // Ensure the error message clearly states the tool is not recognized/allowed.
+        outcome = { result: null, error: `ResearchAgent: Инструмент '${tool_name}' не распознан или не разрешен.` };
+    } else {
+        const selectedTool = this.toolsMap[tool_name];
+        try {
         let validInput = false;
         let executionPromise = null;
 
@@ -87,10 +92,7 @@ class ResearchAgent {
         outcome = { result: null, error: errorMessage };
         // status remains "FAILED" (as initialized)
       }
-    } else {
-        console.error(t('AGENT_TOOL_NOT_FOUND', { agentName: 'ResearchAgent', toolName: tool_name, subTaskId: sub_task_id }));
-        // outcome is already set to the Russian version of "Unknown tool..."
-    }
+    } // This closes the 'else' for the validated tool_name
 
     const resultMessage = {
       sub_task_id: sub_task_id,

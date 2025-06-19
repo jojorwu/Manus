@@ -14,10 +14,11 @@ const EventEmitter = require('events');
 
        // Check for one-time subscriber interested in this parent_task_id
        // A more robust implementation might look for sub_task_id or a composite key
-       if (this.subscribers[resultMessage.parent_task_id]) {
+       // Security: Use hasOwnProperty to prevent accessing prototype properties.
+       if (Object.prototype.hasOwnProperty.call(this.subscribers, resultMessage.parent_task_id)) {
          const callbackDetails = this.subscribers[resultMessage.parent_task_id];
          // If specific sub_task_id is expected by subscriber, check it here
-         if (!callbackDetails.sub_task_id || callbackDetails.sub_task_id === resultMessage.sub_task_id) {
+         if (callbackDetails && (!callbackDetails.sub_task_id || callbackDetails.sub_task_id === resultMessage.sub_task_id)) {
             delete this.subscribers[resultMessage.parent_task_id]; // Remove after firing
             callbackDetails.callback(null, resultMessage);
          }
@@ -59,12 +60,17 @@ const EventEmitter = require('events');
          // Этот колбэк вызывается только по таймауту.
          // Проверяем, существует ли подписчик и относится ли он к текущему sub_task_id,
          // чтобы избежать удаления "не того" подписчика, если ключ (parentTaskId) был переиспользован.
-         const currentSubscriber = this.subscribers[resultKey];
-         if (currentSubscriber && currentSubscriber.sub_task_id === sub_task_id) {
-            delete this.subscribers[resultKey]; // Удаляем подписчика
-            const timeoutError = new Error(`Timeout waiting for result of parent_task_id ${parentTaskId}` + (sub_task_id ? ` sub_task_id ${sub_task_id}` : ''));
-            console.error(timeoutError.message);
-            callback(timeoutError, null); // Вызываем оригинальный коллбэк с ошибкой таймаута
+         // Security: Use hasOwnProperty to prevent accessing prototype properties.
+         if (Object.prototype.hasOwnProperty.call(this.subscribers, resultKey)) {
+            const currentSubscriber = this.subscribers[resultKey];
+            if (currentSubscriber && currentSubscriber.sub_task_id === sub_task_id) {
+               delete this.subscribers[resultKey]; // Удаляем подписчика
+               const timeoutError = new Error(`Timeout waiting for result of parent_task_id ${parentTaskId}` + (sub_task_id ? ` sub_task_id ${sub_task_id}` : ''));
+               console.error(timeoutError.message);
+               callback(timeoutError, null); // Вызываем оригинальный коллбэк с ошибкой таймаута
+            }
+         } else {
+            // If the subscriber does not exist at timeout (already processed or removed), do nothing.
          }
        }, timeout);
 

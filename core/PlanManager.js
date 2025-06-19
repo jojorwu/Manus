@@ -1,6 +1,33 @@
 // core/PlanManager.js
 const fs = require('fs');
 const path = require('path');
+const { escapeRegExp } = require('../utils/localization'); // Import the escape function
+
+// Helper function moved to module scope
+function findInvalidOutputReferences(input, currentStepId, outputRefRegex) {
+    if (typeof input === 'string') {
+        const potentialRefs = input.match(/@{outputs\.([^}]+)}/g);
+        if (potentialRefs) {
+            for (const ref of potentialRefs) {
+                outputRefRegex.lastIndex = 0;
+                if (!outputRefRegex.test(ref)) {
+                    return `Invalid output reference syntax in: "${ref}" for stepId '${currentStepId}'. Must be @{outputs.ID.result_data} or @{outputs.ID.processed_result_data}.`;
+                }
+            }
+        }
+    } else if (Array.isArray(input)) {
+        for (const item of input) {
+            const error = findInvalidOutputReferences(item, currentStepId, outputRefRegex);
+            if (error) return error;
+        }
+    } else if (typeof input === 'object' && input !== null) {
+        for (const key in input) {
+            const error = findInvalidOutputReferences(input[key], currentStepId, outputRefRegex);
+            if (error) return error;
+        }
+    }
+    return null; // No error
+}
 
 class PlanManager {
     constructor(aiService, agentCapabilities, planTemplatesPath) { // Changed llmService to aiService
@@ -23,7 +50,7 @@ class PlanManager {
             // These definitions might need to be passed in or made more generic if they change often
             const templateDefinitions = [
                 { name: "weather_query", fileName: "weather_query_template.json", regex: /^(?:what is the )?weather (?:in )?(.+)/i, paramMapping: { CITY_NAME: 1 } },
-                { name: "calculator", fileName: "calculator_template.json", regex: /^(?:calculate|what is) ([\d\s\+\-\*\/\(\)\.^%]+)/i, paramMapping: { EXPRESSION: 1 } }
+                { name: "calculator", fileName: "calculator_template.json", regex: /^(?:calculate|what is) ([\d\s+\-*/().^%]+)/i, paramMapping: { EXPRESSION: 1 } }
             ];
             for (const def of templateDefinitions) {
                 const filePath = path.join(templatesDir, def.fileName);
@@ -50,9 +77,13 @@ class PlanManager {
                 console.log(`PlanManager: Matched plan template '${templateInfo.name}' for task.`);
                 let populatedTemplateString = JSON.stringify(templateInfo.template);
                 for (const placeholder in templateInfo.paramMapping) {
-                    const groupIndex = templateInfo.paramMapping[placeholder];
-                    const value = match[groupIndex] ? match[groupIndex].trim() : "";
-                    populatedTemplateString = populatedTemplateString.replace(new RegExp(`{{${placeholder}}}`, 'g'), value);
+                    if (Object.prototype.hasOwnProperty.call(templateInfo.paramMapping, placeholder)) {
+                        const groupIndex = templateInfo.paramMapping[placeholder];
+                        const value = match[groupIndex] ? match[groupIndex].trim() : "";
+                        // Security: Sanitize placeholder for use in RegExp.
+                        const sanitizedPlaceholder = escapeRegExp(placeholder);
+                        populatedTemplateString = populatedTemplateString.replace(new RegExp(`{{${sanitizedPlaceholder}}}`, 'g'), value);
+                    }
                 }
                 try {
                     return JSON.parse(populatedTemplateString);
@@ -103,35 +134,6 @@ class PlanManager {
             const allStepIds = new Set();
             let totalSteps = 0;
             const outputRefRegex = /@{outputs\.([a-zA-Z0-9_.-]+)\.(result_data|processed_result_data)}/g; // g for multiple matches in one string
-
-            // Helper function to recursively validate output references in sub_task_input
-            function findInvalidOutputReferences(input, currentStepId) {
-                if (typeof input === 'string') {
-                    // Check for @{outputs...} parts that DON'T match the full valid regex
-                    // This catches malformed references.
-                    const potentialRefs = input.match(/@{outputs\.([^}]+)}/g);
-                    if (potentialRefs) {
-                        for (const ref of potentialRefs) {
-                            outputRefRegex.lastIndex = 0; // Reset regex state for each test
-                            if (!outputRefRegex.test(ref)) {
-                                return `Invalid output reference syntax in: "${ref}" for stepId '${currentStepId}'. Must be @{outputs.ID.result_data} or @{outputs.ID.processed_result_data}.`;
-                            }
-                        }
-                    }
-                } else if (Array.isArray(input)) {
-                    for (const item of input) {
-                        const error = findInvalidOutputReferences(item, currentStepId);
-                        if (error) return error;
-                    }
-                } else if (typeof input === 'object' && input !== null) {
-                    for (const key in input) {
-                        const error = findInvalidOutputReferences(input[key], currentStepId);
-                        if (error) return error;
-                    }
-                }
-                return null; // No error
-            }
-
 
             for (const stage of parsedStages) {
                 if (!Array.isArray(stage)) {
@@ -251,7 +253,7 @@ class PlanManager {
                     }
 
                     // Validate output reference syntax within sub_task_input
-                    const refValidationError = findInvalidOutputReferences(subTask.sub_task_input, subTask.stepId);
+                    const refValidationError = findInvalidOutputReferences(subTask.sub_task_input, subTask.stepId, outputRefRegex);
                     if (refValidationError) {
                         return { success: false, message: refValidationError, rawResponse: cleanedString, stages: [] };
                     }

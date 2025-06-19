@@ -62,7 +62,17 @@ class GeminiService extends BaseAIService {
             return `GeminiService stub response for: ${promptString.substring(0, 50)}...`;
         }
 
-        const modelName = params.model || this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Validate model name from params against a list of known/allowed models for this service
+        const allowedModels = ['gemini-1.5-pro-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-vision-latest'];
+        let modelName = this.baseConfig.defaultModel || 'gemini-pro';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                modelName = params.model;
+            } else {
+                console.warn(`GeminiService: Requested model '${params.model}' is not in the allowed list. Using default: ${modelName}`);
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         const maxOutputTokens = params.maxTokens || this.baseConfig.maxTokens; // Let Gemini SDK use its default if undefined
         const stopSequences = params.stopSequences || this.baseConfig.stopSequences;
@@ -128,7 +138,17 @@ class GeminiService extends BaseAIService {
             return "GeminiService stub chat response.";
         }
 
-        const modelName = params.model || this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Validate model name from params (using the same logic as generateText)
+        const allowedModels = ['gemini-1.5-pro-latest', 'gemini-1.5-pro', 'gemini-1.5-flash-latest', 'gemini-1.5-flash', 'gemini-pro', 'gemini-1.0-pro', 'gemini-1.0-pro-vision-latest'];
+        let modelName = this.baseConfig.defaultModel || 'gemini-pro';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                modelName = params.model;
+            } else {
+                console.warn(`GeminiService: Requested model '${params.model}' is not in the allowed list for chat. Using default: ${modelName}`);
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         const maxOutputTokens = params.maxTokens || this.baseConfig.maxTokens;
         const stopSequences = params.stopSequences || this.baseConfig.stopSequences;
@@ -250,7 +270,10 @@ class GeminiService extends BaseAIService {
      * @override
      */
     getMaxContextTokens() {
-        const model = this.baseConfig.defaultModel || 'gemini-pro';
+        // Security: Use the already validated modelName from constructor or default for context window lookup.
+        // Assuming this.baseConfig.defaultModel is from a trusted source (config).
+        // If model could be passed to this function, it would need validation here too.
+        const currentModelForContext = this.baseConfig.defaultModel || 'gemini-pro';
         // Known context windows ( octubre 2023 values, check Gemini docs for updates)
         // Gemini 1.5 Pro: 1M tokens (1,048,576). Effective usable might be less for generation.
         // Gemini 1.0 Pro: 30720 input + 2048 output = 32768 total.
@@ -267,9 +290,9 @@ class GeminiService extends BaseAIService {
             'default': 30720
         };
 
-        let effectiveLimit = modelContextWindows[model] || modelContextWindows['default'];
+        let effectiveLimit = modelContextWindows[currentModelForContext] || modelContextWindows['default'];
         // For 1.5 models, often a smaller practical limit is used for context assembly due to cost/performance.
-        if (model.startsWith('gemini-1.5')) {
+        if (currentModelForContext.startsWith('gemini-1.5')) {
             effectiveLimit = this.baseConfig?.maxTokensForContext || 131072; // e.g. 128k as a practical limit
         }
         return effectiveLimit;

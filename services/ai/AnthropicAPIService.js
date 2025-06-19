@@ -37,9 +37,9 @@ class AnthropicAPIService extends BaseAIService {
             this.anthropic = new Anthropic({ apiKey });
             return true;
         } catch (error) {
-            console.error(\`AnthropicAPIService: Failed to initialize Anthropic client. Error: \${error.message}\`);
+            console.error(`AnthropicAPIService: Failed to initialize Anthropic client. Error: ${error.message}`);
             this.anthropic = null;
-            throw new Error(\`AnthropicAPIService client initialization failed: \${error.message}\`);
+            throw new Error(`AnthropicAPIService client initialization failed: ${error.message}`);
         }
     }
 
@@ -68,7 +68,17 @@ class AnthropicAPIService extends BaseAIService {
     async completeChat(messagesArray, params = {}) {
         this._ensureClient();
 
-        const model = params.model || this.baseConfig.defaultModel || 'claude-3-sonnet-20240229';
+        // Security: Validate model name from params against a list of known/allowed models for this service
+        const allowedModels = ['claude-3-opus-20240229', 'claude-3-sonnet-20240229', 'claude-3-haiku-20240307', 'claude-2.1', 'claude-2.0', 'claude-instant-1.2'];
+        let model = this.baseConfig.defaultModel || 'claude-3-sonnet-20240229';
+        if (params.model) {
+            if (allowedModels.includes(params.model)) {
+                model = params.model;
+            } else {
+                console.warn(`AnthropicAPIService: Requested model '${params.model}' is not in the allowed list. Using default: ${model}`);
+            }
+        }
+
         const temperature = params.temperature !== undefined ? params.temperature : this.baseConfig.temperature;
         // Anthropic Messages API uses 'max_tokens'. Older text completions used 'max_tokens_to_sample'.
         const maxTokens = params.max_tokens || params.maxTokens || this.baseConfig.maxTokens || 2048;
@@ -90,8 +100,8 @@ class AnthropicAPIService extends BaseAIService {
                 continue; // System messages are not part of the 'messages' array for Anthropic API
             }
             if (msg.role !== 'user' && msg.role !== 'assistant') {
-                console.warn(\`AnthropicAPIService: Invalid role '\${msg.role}' converted to 'user'.\`);
-                anthropicMessages.push({ role: 'user', content: \`[\${msg.role} message]: \${msg.content}\` });
+                console.warn(`AnthropicAPIService: Invalid role '${msg.role}' converted to 'user'.`);
+                anthropicMessages.push({ role: 'user', content: `[${msg.role} message]: ${msg.content}` });
             } else {
                 anthropicMessages.push({ role: msg.role, content: msg.content });
             }
@@ -106,7 +116,7 @@ class AnthropicAPIService extends BaseAIService {
         // If the last message is 'assistant', the model will continue that assistant's turn.
         // This behavior is generally fine for the `completeChat` abstraction.
 
-        // console.log(\`AnthropicAPIService: Calling Messages API. Model: \${model}, Messages: \${anthropicMessages.length}\`);
+        // console.log(`AnthropicAPIService: Calling Messages API. Model: ${model}, Messages: ${anthropicMessages.length}`);
         try {
             const requestPayload = {
                 model: model,
@@ -130,8 +140,8 @@ class AnthropicAPIService extends BaseAIService {
             throw new Error("Anthropic API response error: No message content found.");
         } catch (error) {
             const errorDetail = error.response?.data?.error?.message || error.error?.message || error.message;
-            console.error(\`AnthropicAPIService: Error during Messages API call for model \${model}:\`, errorDetail, error.stack);
-            throw new Error(\`Anthropic API Error: \${errorDetail}\`);
+            console.error(`AnthropicAPIService: Error during Messages API call for model ${model}:`, errorDetail, error.stack);
+            throw new Error(`Anthropic API Error: ${errorDetail}`);
         }
     }
 
@@ -157,7 +167,8 @@ class AnthropicAPIService extends BaseAIService {
         // Older models like Claude 2.1 also had 200K, Claude 2.0 had 100K.
         // The actual number of tokens the API will *accept* might be slightly less than advertised
         // to leave room for the response. It's safest to aim a bit lower for input.
-        const model = params.model || this.baseConfig.defaultModel || 'claude-3-sonnet-20240229';
+        // Security: Model name for context window lookup should also be validated or use the already validated 'model' variable.
+        const currentModelForContext = this.baseConfig.defaultModel || 'claude-3-sonnet-20240229'; // Use model from baseConfig
         const modelContextWindows = {
             // Claude 3 Series (all list 200K context window)
             'claude-3-opus-20240229': 200000,
@@ -172,13 +183,13 @@ class AnthropicAPIService extends BaseAIService {
             'default': 100000 // Fallback for older or unknown models
         };
 
-        let contextSize = modelContextWindows[model];
+        let contextSize = modelContextWindows[currentModelForContext];
         if (!contextSize) {
             // Basic fallback for unlisted variants
-            if (model.includes('claude-3')) contextSize = 200000;
-            else if (model.includes('claude-2')) contextSize = 100000; // Defaulting to 100K for Claude 2 variants
+            if (currentModelForContext.includes('claude-3')) contextSize = 200000;
+            else if (currentModelForContext.includes('claude-2')) contextSize = 100000; // Defaulting to 100K for Claude 2 variants
             else contextSize = modelContextWindows['default'];
-            // console.warn(\`AnthropicAPIService.getMaxContextTokens: Model '\${model}' not in known list. Using inferred \${contextSize} tokens.\`);
+            // console.warn(`AnthropicAPIService.getMaxContextTokens: Model '${currentModelForContext}' not in known list. Using inferred ${contextSize} tokens.`);
         }
         // It's good practice to use a fraction of this for input, e.g., 90-95%
         return Math.floor(contextSize * 0.95);
@@ -212,8 +223,8 @@ class AnthropicAPIService extends BaseAIService {
                 } else if (part.role === 'user' || part.role === 'assistant') {
                     messages.push(part);
                 } else {
-                    console.warn(\`AnthropicAPIService.prepareContextForModel: Unknown role '\${part.role}' encountered. Treating as user message.\`);
-                    messages.push({ role: 'user', content: \`[\${part.role}]: \${part.content}\`});
+                    console.warn(`AnthropicAPIService.prepareContextForModel: Unknown role '${part.role}' encountered. Treating as user message.`);
+                    messages.push({ role: 'user', content: `[${part.role}]: ${part.content}`});
                 }
             }
         } else if (contextParts === null || contextParts === undefined) {

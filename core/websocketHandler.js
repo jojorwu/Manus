@@ -40,8 +40,11 @@ function initializeWebSocketHandler(
         let taskId; // Defined here to be available in all event handlers for this ws connection
 
         try {
-            const requestUrl = url.parse(req.url, true);
-            taskId = requestUrl.query.taskId;
+            // const requestUrl = url.parse(req.url, true); // Deprecated
+            // taskId = requestUrl.query.taskId;
+            const requestUrl = new URL(req.url, `http://${req.headers.host}`);
+            taskId = requestUrl.searchParams.get('taskId');
+
 
             if (!taskId || typeof taskId !== 'string' || taskId.trim() === '') {
                 console.log(`[WebSocket] Connection attempt from ${clientIp} without valid taskId. Path: ${req.url}. Closing.`);

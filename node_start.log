@@ -12,7 +12,7 @@ SubTaskQueue: Agent subscribed to role 'UtilityAgent'. Total subscribers for rol
 [Dependencies] Global instances, AI services, tools, and worker agents initialized.
 Localization: Initializing with os-locale...
 [WebSocket] Server initialized and listening on path /api/chat_ws
-HTTP and WebSocket Server running on http://localhost:3001
+HTTP and WebSocket Server running on http://localhost:3002
 Localization: Could not dynamically import os-locale. Falling back to LANG or default "en". Error: Cannot find package 'os-locale' imported from /app/utils/localization.js
 Localization: Using locale 'C'.
 Localization: Failed to load translations for locale C: Error: ENOENT: no such file or directory, open '/app/locales/C.json'

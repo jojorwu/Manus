@@ -2,6 +2,7 @@
 const { v4: uuidv4 } = require('uuid');
 const path = require('path'); // Added for workspace path construction
 const fsp = require('fs').promises; // Added for mkdir
+const { escapeRegExp } = require('../utils/localization'); // Import the escape function
 
 const ReadWebpageTool = require('../tools/ReadWebpageTool');
 const FileSystemTool = require('../tools/FileSystemTool'); // Added
@@ -28,11 +29,18 @@ class PlanExecutor {
             const match = data.match(referenceRegex);
             if (match) {
                 const sourceStepId = match[1];
-                const requestedFieldName = match[2]; // Use a different name to avoid confusion with actual field in stepOutputs
+                const requestedFieldName = match[2];
 
-                if (!stepOutputs[sourceStepId]) {
+                // Security: Validate sourceStepId and requestedFieldName
+                // sourceStepId should be an existing key in stepOutputs
+                if (!Object.prototype.hasOwnProperty.call(stepOutputs, sourceStepId)) {
                     throw new Error(`Unresolved reference: Step ID '${sourceStepId}' not found in outputs (referenced by step ${currentStepIdForLog}).`);
                 }
+                const allowedFieldNames = ['result_data', 'processed_result_data'];
+                if (!allowedFieldNames.includes(requestedFieldName)) {
+                    throw new Error(`Unresolved reference: Invalid field name '${requestedFieldName}' for step '${sourceStepId}' (referenced by step ${currentStepIdForLog}).`);
+                }
+
                 // Strict check for COMPLETED status
                 if (stepOutputs[sourceStepId].status !== "COMPLETED") {
                      throw new Error(`Referenced step '${sourceStepId}' did not complete successfully. Status: ${stepOutputs[sourceStepId].status} (referenced by step ${currentStepIdForLog}). Cannot use its output.`);
@@ -246,10 +254,13 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         } else if (promptTemplate) {
             promptInput = promptTemplate;
             for (const key in promptParams) {
-                const placeholder = new RegExp(`{{\\s*${key}\\s*}}`, 'g');
-                let valueToInject = promptParams[key];
-                if (valueToInject === "{previous_step_output}") {
-                    if (executionContext.length > 0) {
+                // Security: Ensure only own properties of promptParams are accessed.
+                if (Object.prototype.hasOwnProperty.call(promptParams, key)) {
+                    const sanitizedKey = escapeRegExp(key); // Sanitize key for RegExp
+                    const placeholder = new RegExp(`{{\\s*${sanitizedKey}\\s*}}`, 'g');
+                    let valueToInject = promptParams[key];
+                    if (valueToInject === "{previous_step_output}") {
+                        if (executionContext.length > 0) {
                         const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                         valueToInject = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
                     } else {
@@ -257,8 +268,11 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     }
                 }
                 promptInput = promptInput.replace(placeholder, String(valueToInject));
-            }
-            if (promptInput.includes("{{previous_step_output}}")) { // Fallback
+              } // Closing for: if (Object.prototype.hasOwnProperty.call(promptParams, key))
+            } // Closing for: for (const key in promptParams)
+
+            // Fallback for {{previous_step_output}} should be applied after all other placeholders are processed
+            if (promptInput.includes("{{previous_step_output}}")) {
                 if (executionContext.length > 0) {
                     const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput));
@@ -266,13 +280,17 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), "No data from previous steps.");
                 }
             }
-        } else if (typeof promptInput !== 'string' && !Array.isArray(promptInput)) { // if prompt was not set via template or messages
-             promptInput = ""; // Default to empty if not a string or array already
+        } // Closing for: else if (promptTemplate)
+        // This else if correctly follows the `else if (promptTemplate)`
+        else if (typeof promptInput !== 'string' && !Array.isArray(promptInput)) {
+             promptInput = "";
         }
 
         // Legacy support for data_from_previous_step if no other prompt/message source
-        if ((!promptInput || (typeof promptInput === 'string' && !promptInput.trim())) && !Array.isArray(promptInput) && resolvedSubTaskInput?.data_from_previous_step === true) {
-             if (executionContext.length > 0) {
+        if ((!promptInput || (typeof promptInput === 'string' && !promptInput.trim())) &&
+            !Array.isArray(promptInput) &&
+            resolvedSubTaskInput?.data_from_previous_step === true) {
+            if (executionContext.length > 0) {
                 const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                 promptInput = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
             } else {
@@ -397,8 +415,10 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                                 const operation = resolvedSubTaskInput.operation;
                                 const opParams = resolvedSubTaskInput.params;
 
-                                if (typeof tool[operation] !== 'function') {
-                                    throw new Error(`Operation '${operation}' not found on tool '${subTaskDefinition.tool_name}'.`);
+                                // Security: Validate the operation name before attempting to call it.
+                                const allowedOperations = Object.getOwnPropertyNames(Object.getPrototypeOf(tool)).filter(prop => typeof tool[prop] === 'function' && !prop.startsWith('_') && prop !== 'constructor');
+                                if (typeof tool[operation] !== 'function' || !allowedOperations.includes(operation) ) {
+                                    throw new Error(`Operation '${operation}' not found or not allowed on tool '${subTaskDefinition.tool_name}'.`);
                                 }
 
                                 const toolResult = await tool[operation](opParams);
@@ -515,7 +535,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
                 if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
                     (resultOfSubTask.assigned_agent_role !== "Orchestrator" ||
-                     (resultOfSubTask.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "ExploreSearchResults"))) { // Only summarize for worker agents or ExploreSearchResults
+                     (resultOfSubTask.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "ExploreSearchResults"))) { // eslint-disable-line no-undef
                     journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, summarizationLogDetails));
                     const originalDataForPreview = resultOfSubTask.result_data;
                     try {
@@ -669,8 +689,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
             if (stageFailed) {
                 const reason = firstFailedStepErrorDetails ?
-                               `Step ${firstFailedStepErrorDetails.sub_task_id || originalSubTaskDef.sub_task_id} ("${firstFailedStepErrorDetails.narrative_step || originalSubTaskDef.narrative_step}") failed: ${firstFailedStepErrorDetails.message || 'Unknown error'}` :
-                               "A step in the stage failed.";
+                               `Step ${firstFailedStepErrorDetails.sub_task_id || originalSubTaskDef.sub_task_id} ("${firstFailedStepErrorDetails.narrative_step || originalSubTaskDef.narrative_step}") failed: ${firstFailedStepErrorDetails.message || 'Unknown error'}` : // eslint-disable-line no-undef
+                               "A step in the stage failed."; // eslint-disable-line no-undef
                 journalEntries.push(this._createJournalEntry("EXECUTION_STAGE_FAILED", `Stage ${stageIndex} failed. Reason: ${reason}. Halting plan execution.`, { parentTaskId, stageIndex, reason: firstFailedStepErrorDetails }));
                 break;
             } else {

@@ -21,13 +21,25 @@ class FileDownloaderTool {
         if (typeof userPath !== 'string') {
             throw new Error("FileDownloaderTool: userPath must be a string.");
         }
-        const normalizedUserPath = path.normalize(userPath);
-        if (normalizedUserPath.split(path.sep).includes('..')) {
-            throw new Error("FileDownloaderTool: Relative path components '..' are not allowed.");
+
+        // Sanitize each path component to prevent malicious characters.
+        const sanitizedUserPath = userPath
+            .split(path.sep)
+            .map(part => part.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255))
+            .join(path.sep);
+
+        const normalizedUserPath = path.normalize(sanitizedUserPath);
+
+        // Double check for path traversal components after sanitization and normalization
+        if (normalizedUserPath.includes('..')) {
+            throw new Error("FileDownloaderTool: Relative path components '..' are not allowed, even after sanitization.");
         }
+
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
-        if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
-            console.error(`FileDownloaderTool: Path traversal attempt. Workspace: '${this.taskWorkspaceDir}', UserPath: '${userPath}', Resolved: '${resolvedPath}'`);
+
+        // Final check to ensure the path does not escape the workspace directory
+        if (!resolvedPath.startsWith(this.taskWorkspaceDir)) {
+            console.error(`FileDownloaderTool: Path traversal attempt. Workspace: '${this.taskWorkspaceDir}', UserPath: '${userPath}', Sanitized: '${sanitizedUserPath}', Resolved: '${resolvedPath}'`);
             throw new Error("FileDownloaderTool: Path traversal attempt detected.");
         }
         // For downloading, we always ensure the directory for the file exists.
@@ -39,8 +51,8 @@ class FileDownloaderTool {
     _sanitizeFilename(filename) {
         if (typeof filename !== 'string') return 'downloaded_file';
         // Remove or replace invalid characters: / \ ? < > : * | " and control characters, limit length
-        let sanitized = filename.replace(/[\0-\x1f\x7f-\x9f]/g, ''); // Control characters
-        sanitized = sanitized.replace(/[/\?<>\:\*\|":\s]/g, '_'); // Common invalid chars and whitespace
+        let sanitized = filename.replace(/[\0-\x1f\x7f-\x9f]/g, ''); // eslint-disable-line no-control-regex
+        sanitized = sanitized.replace(/[/?<>:*|" ":\s]/g, '_'); // Common invalid chars and whitespace (removed unnecessary escape for :)
         sanitized = sanitized.substring(0, 200); // Limit length to prevent overly long filenames
         if (sanitized.trim() === "") return 'downloaded_file';
         return sanitized;

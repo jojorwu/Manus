@@ -22,10 +22,13 @@ class UtilityAgent {
     let outcome = { result: null, error: `Unknown tool '${tool_name}' for UtilityAgent.` }; // Default to error
     let status = "FAILED"; // Default status
 
-    const selectedTool = this.toolsMap[tool_name];
-
-    if (selectedTool) {
-      try {
+    // Security: Validate tool_name against known tools to prevent object injection.
+    if (!Object.prototype.hasOwnProperty.call(this.toolsMap, tool_name)) {
+        console.error(`UtilityAgent: Tool '${tool_name}' not found or not allowed for task ${sub_task_id}.`);
+        outcome = { result: null, error: `UtilityAgent: Инструмент '${tool_name}' не распознан или не разрешен.` };
+    } else {
+        const selectedTool = this.toolsMap[tool_name];
+        try {
         let validInput = false;
         let executionPromise = null;
 
@@ -65,10 +68,7 @@ class UtilityAgent {
         outcome = { result: null, error: e.message || "An unexpected error occurred during tool execution or timeout." };
         // status remains "FAILED" (as initialized)
       }
-    } else {
-        console.error(`UtilityAgent: Tool '${tool_name}' not found in toolsMap for task ${sub_task_id}.`);
-        // outcome is already set to "Unknown tool..."
-    }
+    } // This closes the 'else' for the validated tool_name
 
     const resultMessage = {
       sub_task_id: sub_task_id,

@@ -149,7 +149,10 @@
                 taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("SAVING_UPLOADED_FILES", `Saving ${uploadedFiles.length} files.`));
                 for (const file of uploadedFiles) {
                     try {
-                        const safeFileName = path.basename(file.name);
+                        // Sanitize the original filename before using it to form a path
+                        // This removes potentially harmful characters and path traversal attempts from the filename itself.
+                        const sanitizedOriginalName = (file.name || 'unknown_file').replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255);
+                        const safeFileName = path.basename(sanitizedOriginalName); // path.basename further ensures it's just a filename
                         const absoluteFilePath = path.join(uploadedFilesDir, safeFileName);
                         await fs.writeFile(absoluteFilePath, file.content);
                         taskState.uploadedFilePaths.push(path.join('uploaded_files', safeFileName));

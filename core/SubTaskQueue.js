@@ -11,7 +11,8 @@ const EventEmitter = require('events');
       console.log(`SubTaskQueue: Enqueuing task for role ${taskMessage.assigned_agent_role}, ID: ${taskMessage.sub_task_id}`);
       const role = taskMessage.assigned_agent_role;
       // Проверяем, есть ли активные подписчики для этой роли
-      if (this.roleSubscribers[role] && this.roleSubscribers[role].length > 0) {
+       // Security: Use hasOwnProperty to prevent accessing prototype properties.
+       if (Object.prototype.hasOwnProperty.call(this.roleSubscribers, role) && this.roleSubscribers[role] && this.roleSubscribers[role].length > 0) {
         // Если есть, отправляем задачу напрямую через событие
         // Предполагается, что агент-подписчик сам решит, может ли он обработать задачу
         console.log(`SubTaskQueue: Emitting task ID ${taskMessage.sub_task_id} directly to subscribed role ${role}`);
@@ -27,7 +28,8 @@ const EventEmitter = require('events');
      // Subscribe to tasks for a specific role. Worker agents will use this.
      subscribe(agentRole, callback) {
       console.log(`SubTaskQueue: Agent of role '${agentRole}' attempting to subscribe.`);
-      if (!this.roleSubscribers[agentRole]) {
+       // Security: Use hasOwnProperty before accessing or creating the property.
+       if (!Object.prototype.hasOwnProperty.call(this.roleSubscribers, agentRole)) {
           this.roleSubscribers[agentRole] = [];
       }
 
@@ -38,7 +40,9 @@ const EventEmitter = require('events');
       }
 
       this.roleSubscribers[agentRole].push(callback);
-      console.log(`SubTaskQueue: Agent subscribed to role '${agentRole}'. Total subscribers for role: ${this.roleSubscribers[agentRole].length}`);
+      // Security: Check property existence before accessing length.
+      const subscriberCount = Object.prototype.hasOwnProperty.call(this.roleSubscribers, agentRole) ? this.roleSubscribers[agentRole].length : 0;
+      console.log(`SubTaskQueue: Agent subscribed to role '${agentRole}'. Total subscribers for role: ${subscriberCount}`);
 
       // Устанавливаем обработчик событий для этого конкретного подписчика
       // Теперь каждый подписчик имеет свой собственный обработчик this.on()

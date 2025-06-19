@@ -25,14 +25,26 @@ class FileSystemTool {
             // This is a returned error, already Russian.
             throw new Error("FileSystemTool: Внутренняя ошибка - userPath должен быть строкой для _getSafePath.");
         }
-        const normalizedUserPath = path.normalize(userPath);
-        if (normalizedUserPath.split(path.sep).includes('..')) {
+
+        // Sanitize each path component to prevent malicious characters.
+        const sanitizedUserPath = userPath
+            .split(path.sep)
+            .map(part => part.replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255))
+            .join(path.sep);
+
+        const normalizedUserPath = path.normalize(sanitizedUserPath);
+
+        // Double check for path traversal components after sanitization and normalization
+        if (normalizedUserPath.includes('..')) {
             // This is a returned error, already Russian.
-            throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены.");
+            throw new Error("FileSystemTool: Относительные компоненты пути '..' не разрешены, даже после санации.");
         }
+
         const resolvedPath = path.join(this.taskWorkspaceDir, normalizedUserPath);
-        if (!resolvedPath.startsWith(this.taskWorkspaceDir) && resolvedPath !== this.taskWorkspaceDir) {
-            console.error(t('FS_PATH_TRAVERSAL_ATTEMPT_LOG', { componentName: 'FileSystemTool', workspaceDir: this.taskWorkspaceDir, userPath: userPath, resolvedPath: resolvedPath }));
+
+        // Final check to ensure the path does not escape the workspace directory
+        if (!resolvedPath.startsWith(this.taskWorkspaceDir)) {
+            console.error(t('FS_PATH_TRAVERSAL_ATTEMPT_LOG', { componentName: 'FileSystemTool', workspaceDir: this.taskWorkspaceDir, userPath: userPath, sanitizedUserPath: sanitizedUserPath, resolvedPath: resolvedPath }));
             // This is a returned error, already Russian.
             throw new Error("FileSystemTool: Обнаружена попытка обхода пути.");
         }
@@ -293,7 +305,7 @@ class FileSystemTool {
                 // ENOENT is fine, means file doesn't exist, which is expected for creation.
             }
 
-            return new Promise(async (resolve, reject) => { // Made promise callback async for await fsp.access
+            return new Promise(async (resolve, reject) => { // eslint-disable-line no-async-promise-executor
                 const doc = new PDFDocument({
                     size: 'A4',
                     margins: { top: 50, bottom: 50, left: 72, right: 72 },
