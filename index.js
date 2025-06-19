@@ -63,7 +63,18 @@ app.get('/', (req, res) => {
 });
 
 // --- INITIALIZE WEBSOCKET HANDLER ---
-initializeWebSocketHandler(server, globalEventEmitter, memoryManager, getTaskDirectoryPath);
+const webSocketHandlerDependencies = {
+    OrchestratorAgent, // Class
+    openAIService,     // Instance
+    geminiService,       // Instance
+    subTaskQueue,        // Instance
+    resultsQueue,        // Instance
+    memoryManager,       // Instance
+    savedTasksBaseDir,   // String/path
+    agentApiKeysConfig,  // Object
+    getTaskDirectoryPath // Function
+};
+initializeWebSocketHandler(server, globalEventEmitter, webSocketHandlerDependencies);
 
 // --- START SERVER ---
 server.listen(PORT, () => {

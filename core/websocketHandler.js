@@ -7,11 +7,20 @@ const activeTaskSockets = new Map(); // Key: taskId (string), Value: Set<WebSock
 
 function initializeWebSocketHandler(
     httpServer,
-    eventEmitter,
-    memoryManager,
-    getTaskDirectoryPath
-    // TODO: Potentially pass OrchestratorAgent class or a factory function if direct agent interaction is needed here
+    eventEmitter, // Используется для подписки на 'newMessage'
+    dependencies  // Объект с остальными зависимостями
 ) {
+    const {
+        OrchestratorAgent,
+        openAIService,
+        geminiService,
+        subTaskQueue,
+        resultsQueue,
+        memoryManager, // memoryManager также есть в dependencies
+        savedTasksBaseDir,
+        agentApiKeysConfig,
+        getTaskDirectoryPath // getTaskDirectoryPath также в dependencies
+    } = dependencies;
 
     const wss = new WebSocketServer({ server: httpServer, path: CHAT_WEBSOCKET_PATH });
     console.log(`[WebSocket] Server initialized and listening on path ${CHAT_WEBSOCKET_PATH}`);
@@ -109,17 +118,62 @@ function initializeWebSocketHandler(
                 const savedMsg = await memoryManager.addChatMessage(taskDirPath, messageDataToSave);
                 console.log(`[WebSocket] Message from ${clientIp} (Task: ${taskId}) saved (ID: ${savedMsg.id}), event emitted for broadcast.`);
 
-                if (parsedMessage.senderId !== 'agent' && parsedMessage.messageContent.type === 'text') {
-                     console.log(`[WebSocketHandler] TODO: Trigger OrchestratorAgent for taskId: ${taskId} with new message: "${parsedMessage.messageContent.text}" (clientMessageId: ${parsedMessage.clientMessageId})`);
-                    // This is where OrchestratorAgent would be invoked.
-                    // Example:
-                    // const orchestrator = new OrchestratorAgent(...dependenciesForAgent...);
-                    // await orchestrator.handleUserTask(parsedMessage.messageContent.text, [], null, taskId, 'CONTINUE_CHAT');
-                    // The result of this (agent's response messages) would then also be saved via memoryManager.addChatMessage,
-                    // which would trigger broadcast via EventEmitter.
+                if (parsedMessage.senderId !== 'agent' && parsedMessage.senderId !== 'system' && parsedMessage.messageContent.type === 'text') {
+                    console.log(`[WebSocketHandler] Attempting to trigger OrchestratorAgent for taskId: ${taskId} with new message: "${parsedMessage.messageContent.text.substring(0, 50)}..."`);
+
+                    let activeAIService = openAIService; // Default to OpenAI
+                    if (parsedMessage.aiService === 'gemini' || parsedMessage.agentId === 'gemini') {
+                        activeAIService = geminiService;
+                    }
+                    // console.log(`[WebSocketHandler] Using AI Service: ${activeAIService.getServiceName()} for orchestrator.`);
+
+                    try {
+                        const orchestrator = new OrchestratorAgent(
+                            activeAIService,
+                            subTaskQueue,
+                            memoryManager,
+                            null, // reportGenerator
+                            agentApiKeysConfig,
+                            resultsQueue,
+                            savedTasksBaseDir
+                        );
+
+                        orchestrator.handleUserTask(
+                            parsedMessage.messageContent.text,
+                            [], // uploadedFiles
+                            parsedMessage.clientMessageId || `ws_interaction_${Date.now()}`, // parentTaskId
+                            taskId, // taskIdToLoad
+                            'EXECUTE_FULL_PLAN'
+                        ).then(result => {
+                            console.log(`[WebSocketHandler] OrchestratorAgent.handleUserTask for taskId ${taskId} (triggered by WS) completed. Success: ${result.success}, Message: ${result.message}`);
+                        }).catch(error => {
+                            console.error(`[WebSocketHandler] Error in OrchestratorAgent.handleUserTask for taskId ${taskId} (triggered by WS):`, error);
+                            try {
+                                ws.send(JSON.stringify({
+                                    type: 'error',
+                                    content: { text: `Error processing your message via Orchestrator: ${error.message}` },
+                                    senderId: 'system',
+                                    timestamp: new Date().toISOString()
+                                }));
+                            } catch (sendErr) { console.error("WS Send Error (orchestrator error):", sendErr); }
+                        });
+
+                        console.log(`[WebSocketHandler] OrchestratorAgent.handleUserTask for taskId ${taskId} initiated in background.`);
+
+                    } catch (orchestratorError) {
+                        console.error(`[WebSocketHandler] Failed to instantiate or start OrchestratorAgent for taskId ${taskId}:`, orchestratorError);
+                        try {
+                            ws.send(JSON.stringify({
+                                type: 'error',
+                                content: { text: `Server error: Could not initiate agent processing. ${orchestratorError.message}` },
+                                senderId: 'system',
+                                timestamp: new Date().toISOString()
+                            }));
+                        } catch (sendErr) { console.error("WS Send Error (orchestrator instantiation error):", sendErr); }
+                    }
                 }
             } catch (error) {
-                console.error(`[WebSocket] Error during message persistence for ${clientIp} (Task: ${taskId}):`, error);
+                console.error(`[WebSocket] Error during message persistence or agent trigger for ${clientIp} (Task: ${taskId}):`, error);
                 try { ws.send(JSON.stringify({ type: 'error', content: { text: 'Error processing message server-side.' }, senderId: 'system', timestamp: new Date().toISOString() })); } catch (sendErr) { console.error("WS Send Error:", sendErr); }
             }
         });
