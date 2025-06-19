@@ -319,9 +319,9 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             let resultData;
             const stepModel = resolvedSubTaskInput?.model || (this.aiService.baseConfig && this.aiService.baseConfig.defaultLLMStepModel) || 'gpt-3.5-turbo';
             const stepParams = { model: stepModel };
-            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, assigning known 'temperature' property to a fresh 'stepParams' object.
+            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, accessing known 'temperature' property for assignment.
             if (resolvedSubTaskInput?.temperature !== undefined) stepParams.temperature = resolvedSubTaskInput.temperature;
-            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, assigning known 'maxTokens' property to a fresh 'stepParams' object.
+            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, accessing known 'maxTokens' property for assignment.
             if (resolvedSubTaskInput?.maxTokens !== undefined) stepParams.maxTokens = resolvedSubTaskInput.maxTokens;
 
             if (Array.isArray(promptInput)) {
@@ -451,7 +451,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                                     error_details: toolResult.error ? { message: toolResult.error } : null
                                 };
                             } catch (err) {
-                                // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput.operation is from plan data, used here for logging purposes only.
+                                // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput.operation is from plan data, used here for logging purposes only in error message.
                                 console.error(`PlanExecutor: Error executing Orchestrator tool ${subTaskDefinition.tool_name}, operation ${resolvedSubTaskInput.operation} (StepID: ${stepId}): ${err.message}`);
                                 return {
                                     sub_task_id: sub_task_id_for_orchestrator_step,
@@ -731,16 +731,16 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             const lastStepContext = executionContext[executionContext.length - 1];
             // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'status' property.
             if (lastStepContext.status === "COMPLETED" &&
-            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'assigned_agent_role' property.
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'assigned_agent_role' property.
                 lastStepContext.assigned_agent_role === "Orchestrator" &&
-            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'tool_name' property.
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'tool_name' property.
                 lastStepContext.tool_name === "LLMStepExecutor" && // Changed from GeminiStepExecutor
-            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input' property.
-                lastStepContext.sub_task_input && // original sub_task_input
-            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input.isFinalAnswer' property.
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input' property.
+                lastStepContext.sub_task_input &&
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input.isFinalAnswer' property.
                 lastStepContext.sub_task_input.isFinalAnswer === true) { // Check on original input
 
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known properties.
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known properties 'processed_result_data' and 'raw_result_data'.
                 finalAnswerOutput = lastStepContext.processed_result_data || lastStepContext.raw_result_data;
                 finalAnswerWasSynthesized = true;
 
