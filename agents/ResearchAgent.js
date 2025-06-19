@@ -37,6 +37,7 @@ class ResearchAgent {
         // Ensure the error message clearly states the tool is not recognized/allowed.
         outcome = { result: null, error: `ResearchAgent: Инструмент '${tool_name}' не распознан или не разрешен.` };
     } else {
+        // eslint-disable-next-line security/detect-object-injection -- tool_name is validated by Object.prototype.hasOwnProperty.call against toolsMap prior to this access.
         const selectedTool = this.toolsMap[tool_name];
         try {
         let validInput = false;

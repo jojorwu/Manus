@@ -38,14 +38,17 @@ async function initializeLocalization() {
 
     await loadTranslations(currentLocale);
 
+    // eslint-disable-next-line security/detect-object-injection -- currentLocale is sanitized.
     if (!translations[currentLocale] && currentLocale !== 'en') {
         console.warn(`Localization: No translations found for detected locale '${currentLocale}'. Falling back to 'en'.`); // Non-localized
         currentLocale = 'en'; // Fallback to English
         await loadTranslations(currentLocale);
     }
 
+    // eslint-disable-next-line security/detect-object-injection -- currentLocale is sanitized.
     if (!translations[currentLocale]) { // Specifically check if 'en' (or fallback) failed
          console.error("Localization: Default 'en' translations could not be loaded. Logging will be non-localized."); // Non-localized
+         // eslint-disable-next-line security/detect-object-injection -- currentLocale is sanitized.
          translations[currentLocale] = {}; // Ensure it's an object to prevent errors in t()
     }
 }
@@ -53,21 +56,26 @@ async function initializeLocalization() {
 async function loadTranslations(locale) {
     try {
         const filePath = path.join(__dirname, '..', 'locales', `${locale}.json`);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- locale component is sanitized in initializeLocalization.
         const data = await fs.readFile(filePath, 'utf8');
+        // eslint-disable-next-line security/detect-object-injection -- locale is a sanitized string.
         translations[locale] = JSON.parse(data);
     } catch (error) {
         // This log might appear if a locale file is missing (e.g. fr.json)
         // It will be followed by a fallback message if currentLocale's translations aren't loaded.
         // If it's 'en.json' that fails, a more severe non-localized error is logged by initializeLocalization.
         console.warn(`Localization: Failed to load translations for locale ${locale}: ${error}`); // Non-localized
+        // eslint-disable-next-line security/detect-object-injection -- locale is a sanitized string.
         translations[locale] = null; // Mark as failed to load
     }
 }
 
 function t(key, args) {
+    // eslint-disable-next-line security/detect-object-injection -- currentLocale is sanitized; 'en' is a string literal.
     const langSpecificTranslations = translations[currentLocale] || translations['en'] || {};
     let message = key; // Default to key
     if (Object.prototype.hasOwnProperty.call(langSpecificTranslations, key)) {
+        // eslint-disable-next-line security/detect-object-injection -- key is a developer-provided string literal. langSpecificTranslations is from a controlled source.
         message = langSpecificTranslations[key];
     } else {
         // Optional: Log if key is not found in either current locale or fallback 'en'
@@ -87,6 +95,7 @@ function t(key, args) {
                 // If argKey could come from untrusted input, it would need sanitization.
                 const sanitizedArgKey = escapeRegExp(argKey); // Use the new escape function
                 const placeholder = new RegExp(`{${sanitizedArgKey}}`, 'g'); // eslint-disable-line security/detect-non-literal-regexp
+                // eslint-disable-next-line security/detect-object-injection -- 'argKey' is from 'args' object, existence checked by hasOwnProperty. Value used for string replacement.
                 message = message.replace(placeholder, String(args[argKey]));
             }
         }

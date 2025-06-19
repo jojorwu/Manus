@@ -205,10 +205,12 @@ class OpenAIService extends BaseAIService {
             'default': 4096 // Default fallback
         };
 
+        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig (assumed safe) or validated against allowedModels.
         let contextSize = modelContextWindows[currentModelForContext];
         if (!contextSize) {
             // Try to find a base model if versioned e.g. gpt-4-0125-preview -> gpt-4
             const baseModel = currentModelForContext.split('-').slice(0, 2).join('-');
+            // eslint-disable-next-line security/detect-object-injection -- baseModel is derived from currentModelForContext (which is validated/safe) and used to access a known map.
             contextSize = modelContextWindows[baseModel];
             if (!contextSize && currentModelForContext.startsWith('gpt-4')) contextSize = modelContextWindows['gpt-4'];
             else if (!contextSize && currentModelForContext.startsWith('gpt-3.5-turbo')) contextSize = modelContextWindows['gpt-3.5-turbo'];

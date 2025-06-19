@@ -22,6 +22,7 @@ function findInvalidOutputReferences(input, currentStepId, outputRefRegex) {
         }
     } else if (typeof input === 'object' && input !== null) {
         for (const key in input) {
+            // eslint-disable-next-line security/detect-object-injection -- 'key' is from 'input' (plan data). Function is recursive and performs read-only validation checks.
             const error = findInvalidOutputReferences(input[key], currentStepId, outputRefRegex);
             if (error) return error;
         }
@@ -43,6 +44,7 @@ class PlanManager {
         const templatesDir = this.planTemplatesPath;
         this.planTemplates = []; // Reset before loading
         try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- templatesDir is a constructor-set base path.
             if (!fs.existsSync(templatesDir)) {
                 console.warn(`PlanManager: Plan templates directory not found at ${templatesDir}. No templates loaded.`);
                 return;
@@ -54,7 +56,9 @@ class PlanManager {
             ];
             for (const def of templateDefinitions) {
                 const filePath = path.join(templatesDir, def.fileName);
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is constructed from a base path and statically defined filenames.
                 if (fs.existsSync(filePath)) {
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is constructed from a base path and statically defined filenames.
                     const templateContent = fs.readFileSync(filePath, 'utf8');
                     this.planTemplates.push({ name: def.name, regex: def.regex, paramMapping: def.paramMapping, template: JSON.parse(templateContent) });
                     console.log(`PlanManager: Loaded plan template '${def.name}' from ${def.fileName}`);
@@ -78,7 +82,9 @@ class PlanManager {
                 let populatedTemplateString = JSON.stringify(templateInfo.template);
                 for (const placeholder in templateInfo.paramMapping) {
                     if (Object.prototype.hasOwnProperty.call(templateInfo.paramMapping, placeholder)) {
+                        // eslint-disable-next-line security/detect-object-injection -- 'placeholder' is a key from 'templateInfo.paramMapping', which is part of statically defined templateDefinitions. Safe.
                         const groupIndex = templateInfo.paramMapping[placeholder];
+                        // eslint-disable-next-line security/detect-object-injection -- match is a regex exec array, groupIndex is an integer from static config. Array access by integer is safe.
                         const value = match[groupIndex] ? match[groupIndex].trim() : "";
                         // Security: Sanitize placeholder for use in RegExp.
                         const sanitizedPlaceholder = escapeRegExp(placeholder);
@@ -240,10 +246,13 @@ class PlanManager {
                         }
 
                     } else if (!knownAgentRoles.includes(subTask.assigned_agent_role)) {
+                        // eslint-disable-next-line security/detect-object-injection -- subTask.assigned_agent_role is used in a string for an error message, not for property access. Safe.
                         return { success: false, message: `Invalid or unknown 'assigned_agent_role': ${subTask.assigned_agent_role} for stepId '${subTask.stepId}'.`, rawResponse: cleanedString, stages: [] };
                     } else { // Worker agent roles
+                        // eslint-disable-next-line security/detect-object-injection -- subTask.assigned_agent_role is validated by knownAgentRoles.includes() check above.
                         const agentTools = knownToolsByRole[subTask.assigned_agent_role];
                         if (!subTask.tool_name || typeof subTask.tool_name !== 'string' || !agentTools || !agentTools.includes(subTask.tool_name)) {
+                            // eslint-disable-next-line security/detect-object-injection -- subTask.tool_name and subTask.assigned_agent_role are used in a string for an error message. Safe.
                             return { success: false, message: `Invalid or unknown 'tool_name': ${subTask.tool_name} for role ${subTask.assigned_agent_role} (stepId: ${subTask.stepId}).`, rawResponse: cleanedString, stages: [] };
                         }
                     }

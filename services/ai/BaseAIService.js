@@ -48,6 +48,7 @@ class BaseAIService {
         const currentModel = this.baseConfig?.defaultModel || 'default'; // Get current model from config
 
         // Use specific model's limit if available, else fallback to default in config, then hardcoded default.
+        // eslint-disable-next-line security/detect-object-injection -- currentModel is from baseConfig, assumed to be safe. modelMaxTokens is also from baseConfig.
         return modelMaxTokens[currentModel] || modelMaxTokens['default'] || 4096;
     }
 

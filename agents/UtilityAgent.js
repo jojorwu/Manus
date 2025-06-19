@@ -27,6 +27,7 @@ class UtilityAgent {
         console.error(`UtilityAgent: Tool '${tool_name}' not found or not allowed for task ${sub_task_id}.`);
         outcome = { result: null, error: `UtilityAgent: Инструмент '${tool_name}' не распознан или не разрешен.` };
     } else {
+        // eslint-disable-next-line security/detect-object-injection -- tool_name is validated by Object.prototype.hasOwnProperty.call against toolsMap prior to this access.
         const selectedTool = this.toolsMap[tool_name];
         try {
         let validInput = false;

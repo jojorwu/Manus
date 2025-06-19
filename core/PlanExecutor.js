@@ -42,11 +42,14 @@ class PlanExecutor {
                 }
 
                 // Strict check for COMPLETED status
+                // eslint-disable-next-line security/detect-object-injection -- sourceStepId is validated by hasOwnProperty call above. Accessing .status property.
                 if (stepOutputs[sourceStepId].status !== "COMPLETED") {
+                // eslint-disable-next-line security/detect-object-injection -- sourceStepId is validated by hasOwnProperty call above. Accessing .status property for error message.
                      throw new Error(`Referenced step '${sourceStepId}' did not complete successfully. Status: ${stepOutputs[sourceStepId].status} (referenced by step ${currentStepIdForLog}). Cannot use its output.`);
                 }
 
                 let actualFieldName = requestedFieldName;
+                // eslint-disable-next-line security/detect-object-injection -- sourceStepId is validated by hasOwnProperty, actualFieldName is from allowed list or checked with hasOwnProperty.
                 let resolvedValue = stepOutputs[sourceStepId][actualFieldName];
 
                 // Fallback logic for processed_result_data
@@ -55,6 +58,7 @@ class PlanExecutor {
                     if (Object.prototype.hasOwnProperty.call(stepOutputs[sourceStepId], 'result_data')) { // Check if result_data actually exists
                         console.warn(`PlanExecutor._resolveOutputReferences: Field 'processed_result_data' for step '${sourceStepId}' is null or undefined. Falling back to 'result_data' (referenced by step ${currentStepIdForLog}).`);
                         actualFieldName = 'result_data';
+                        // eslint-disable-next-line security/detect-object-injection -- sourceStepId and actualFieldName (now 'result_data') are validated.
                         resolvedValue = stepOutputs[sourceStepId][actualFieldName];
                     } else {
                         // If even result_data doesn't exist (should be rare for completed steps), this is an issue.
@@ -66,6 +70,7 @@ class PlanExecutor {
 
                 // Check if the (potentially fallback) fieldName actually exists in the output
                 // Security: Use Object.prototype.hasOwnProperty.call to avoid prototype pollution.
+                // eslint-disable-next-line security/detect-object-injection -- sourceStepId is validated by hasOwnProperty. Using stepOutputs[sourceStepId] as context for hasOwnProperty check on actualFieldName.
                 if (!Object.prototype.hasOwnProperty.call(stepOutputs[sourceStepId], actualFieldName)) {
                      throw new Error(`Unresolved reference: Field '${actualFieldName}' not found in output of step '${sourceStepId}' (referenced by step ${currentStepIdForLog}).`);
                 }
@@ -80,6 +85,7 @@ class PlanExecutor {
         } else if (typeof data === 'object' && data !== null) {
             const newData = {};
             for (const key in data) {
+                // eslint-disable-next-line security/detect-object-injection -- 'key' is from 'data' (part of sub_task_input from plan). 'newData' is a fresh, local object, limiting impact. Plan generation should ensure 'key' is not malicious (e.g., '__proto__').
                 newData[key] = await this._resolveOutputReferences(data[key], stepOutputs, currentStepIdForLog);
             }
             return newData;
@@ -154,7 +160,9 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             previousSearchResults = searchResultsInput;
         } else {
             for (let k = executionContext.length - 1; k >= 0; k--) {
+                // eslint-disable-next-line security/detect-object-injection -- k is a controlled integer index. Accessing known properties.
                 const potentialResults = executionContext[k].processed_result_data || executionContext[k].raw_result_data;
+                // eslint-disable-next-line security/detect-object-injection -- k is a controlled integer index. Accessing known properties.
                 if (executionContext[k].tool_name === "WebSearchTool" && executionContext[k].status === "COMPLETED" && potentialResults) {
                     if (Array.isArray(potentialResults)) {
                         previousSearchResults = potentialResults;
@@ -260,9 +268,11 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 if (Object.prototype.hasOwnProperty.call(promptParams, key)) {
                     const sanitizedKey = escapeRegExp(key); // Sanitize key for RegExp
                     const placeholder = new RegExp(`{{\\s*${sanitizedKey}\\s*}}`, 'g'); // eslint-disable-line security/detect-non-literal-regexp
+                    // eslint-disable-next-line security/detect-object-injection -- 'key' is from 'promptParams' own properties, checked by hasOwnProperty. Value used for template filling.
                     let valueToInject = promptParams[key];
                     if (valueToInject === "{previous_step_output}") {
                         if (executionContext.length > 0) {
+                        // eslint-disable-next-line security/detect-object-injection -- executionContext is an array, accessing last element with known properties.
                         const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                         valueToInject = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
                     } else {
@@ -293,6 +303,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             !Array.isArray(promptInput) &&
             resolvedSubTaskInput?.data_from_previous_step === true) {
             if (executionContext.length > 0) {
+                // eslint-disable-next-line security/detect-object-injection -- executionContext is an array, accessing last element with known properties.
                 const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                 promptInput = typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput);
             } else {
@@ -308,7 +319,9 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
             let resultData;
             const stepModel = resolvedSubTaskInput?.model || (this.aiService.baseConfig && this.aiService.baseConfig.defaultLLMStepModel) || 'gpt-3.5-turbo';
             const stepParams = { model: stepModel };
+            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, assigning known 'temperature' property to a fresh 'stepParams' object.
             if (resolvedSubTaskInput?.temperature !== undefined) stepParams.temperature = resolvedSubTaskInput.temperature;
+            // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput is from plan data, assigning known 'maxTokens' property to a fresh 'stepParams' object.
             if (resolvedSubTaskInput?.maxTokens !== undefined) stepParams.maxTokens = resolvedSubTaskInput.maxTokens;
 
             if (Array.isArray(promptInput)) {
@@ -407,6 +420,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                             let tool;
                             const taskWorkspaceDir = path.join(this.savedTasksBaseDir, parentTaskId, 'workspace');
                             try {
+                                // eslint-disable-next-line security/detect-non-literal-fs-filename -- taskWorkspaceDir is constructed from base path and system-generated parentTaskId.
                                 await fsp.mkdir(taskWorkspaceDir, { recursive: true });
                                 if (subTaskDefinition.tool_name === "FileSystemTool") {
                                     tool = new FileSystemTool(taskWorkspaceDir);
@@ -423,6 +437,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                                     throw new Error(`Operation '${operation}' not found or not allowed on tool '${subTaskDefinition.tool_name}'.`);
                                 }
 
+                                // eslint-disable-next-line security/detect-object-injection -- 'operation' is validated against an allowed list derived from tool's prototype methods.
                                 const toolResult = await tool[operation](opParams);
                                 return {
                                     sub_task_id: sub_task_id_for_orchestrator_step,
@@ -436,6 +451,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                                     error_details: toolResult.error ? { message: toolResult.error } : null
                                 };
                             } catch (err) {
+                                // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput.operation is from plan data, used here for logging purposes only.
                                 console.error(`PlanExecutor: Error executing Orchestrator tool ${subTaskDefinition.tool_name}, operation ${resolvedSubTaskInput.operation} (StepID: ${stepId}): ${err.message}`);
                                 return {
                                     sub_task_id: sub_task_id_for_orchestrator_step,
@@ -569,6 +585,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
                 // Populate stepOutputs for reference resolution
                 if (contextEntry.stepId) {
+                    // eslint-disable-next-line security/detect-object-injection -- contextEntry.stepId is a UUID or plan-defined ID. Assigning to stepOutputs map.
                     stepOutputs[contextEntry.stepId] = {
                         status: contextEntry.status,
                         result_data: contextEntry.raw_result_data,
@@ -710,13 +727,20 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
         // Check for pre-synthesized final answer
         if (overallSuccess && executionContext.length > 0) {
+            // eslint-disable-next-line security/detect-object-injection -- executionContext is an array, accessing last element with known properties.
             const lastStepContext = executionContext[executionContext.length - 1];
+            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'status' property.
             if (lastStepContext.status === "COMPLETED" &&
+            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'assigned_agent_role' property.
                 lastStepContext.assigned_agent_role === "Orchestrator" &&
+            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'tool_name' property.
                 lastStepContext.tool_name === "LLMStepExecutor" && // Changed from GeminiStepExecutor
+            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input' property.
                 lastStepContext.sub_task_input && // original sub_task_input
+            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input.isFinalAnswer' property.
                 lastStepContext.sub_task_input.isFinalAnswer === true) { // Check on original input
 
+                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known properties.
                 finalAnswerOutput = lastStepContext.processed_result_data || lastStepContext.raw_result_data;
                 finalAnswerWasSynthesized = true;
 

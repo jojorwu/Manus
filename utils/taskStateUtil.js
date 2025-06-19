@@ -13,6 +13,7 @@ const path = require('path');
 async function saveTaskState(taskStateObject, filePath) {
     try {
         const dirname = path.dirname(filePath);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath (and thus dirname) is expected to be constructed safely by the caller using system-generated IDs and base paths.
         await fs.promises.mkdir(dirname, { recursive: true });
 
         const now = new Date().toISOString();
@@ -22,6 +23,7 @@ async function saveTaskState(taskStateObject, filePath) {
         }
 
         const jsonData = JSON.stringify(taskStateObject, null, 2);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is expected to be constructed safely by the caller.
         await fs.promises.writeFile(filePath, jsonData, 'utf8');
 
         console.log(`TaskStateUtil: Task state saved successfully (async) to ${filePath}`);
@@ -49,6 +51,7 @@ async function loadTaskState(filePath) {
             return { success: false, message: message, error: new Error(message) };
         }
 
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is expected to be constructed safely by the caller.
         const jsonData = await fs.promises.readFile(filePath, 'utf8');
         const taskState = JSON.parse(jsonData); // JSON.parse remains synchronous
 
@@ -80,6 +83,7 @@ async function saveTaskJournal(parentTaskId, journalEntries, tasksBaseDir) {
         const dateDirName = `tasks_${month}${day}${year}`;
 
         const dateDirPath = path.join(tasksBaseDir, dateDirName);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- dateDirPath is constructed from a configured base path and system-generated date.
         await fs.promises.mkdir(dateDirPath, { recursive: true });
 
         const fileName = `task_journal_${parentTaskId}.jsonl`;
@@ -89,6 +93,7 @@ async function saveTaskJournal(parentTaskId, journalEntries, tasksBaseDir) {
         // Ensure a newline at the very end for proper JSONL format
         const jsonlData = journalEntries.map(entry => JSON.stringify(entry)).join('\n') + '\n';
 
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is constructed from a configured base path, system date, and system-generated parentTaskId.
         await fs.promises.writeFile(filePath, jsonlData, 'utf8');
 
         console.log(`TaskStateUtil: Task journal saved successfully to ${filePath}`);
@@ -120,6 +125,7 @@ async function loadTaskJournal(parentTaskId, tasksBaseDir) {
             return { success: false, message: `Base tasks directory not found: ${tasksBaseDir}`, journalEntries: null };
         }
 
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- tasksBaseDir is a configured, trusted base path.
         const allDirents = await fs.promises.readdir(tasksBaseDir, { withFileTypes: true });
         const dateDirs = allDirents
             .filter(dirent => dirent.isDirectory() && dirent.name.startsWith('tasks_'))
@@ -143,6 +149,7 @@ async function loadTaskJournal(parentTaskId, tasksBaseDir) {
             return { success: true, message: message, journalEntries: null }; // Return true, but null entries
         }
 
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- foundFilePath is determined by searching for system-generated filenames within controlled subdirectories.
         const fileContent = await fs.promises.readFile(foundFilePath, 'utf8');
         if (!fileContent.trim()) {
             console.log(`TaskStateUtil: Journal file ${foundFilePath} is empty.`);

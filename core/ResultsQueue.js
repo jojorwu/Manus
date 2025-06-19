@@ -16,9 +16,11 @@ const EventEmitter = require('events');
        // A more robust implementation might look for sub_task_id or a composite key
        // Security: Use hasOwnProperty to prevent accessing prototype properties.
        if (Object.prototype.hasOwnProperty.call(this.subscribers, resultMessage.parent_task_id)) {
+           // eslint-disable-next-line security/detect-object-injection -- resultMessage.parent_task_id is a system-generated UUID, used as a key.
          const callbackDetails = this.subscribers[resultMessage.parent_task_id];
          // If specific sub_task_id is expected by subscriber, check it here
          if (callbackDetails && (!callbackDetails.sub_task_id || callbackDetails.sub_task_id === resultMessage.sub_task_id)) {
+              // eslint-disable-next-line security/detect-object-injection -- resultMessage.parent_task_id is a system-generated UUID, used as a key for deletion.
             delete this.subscribers[resultMessage.parent_task_id]; // Remove after firing
             callbackDetails.callback(null, resultMessage);
          }
@@ -62,8 +64,10 @@ const EventEmitter = require('events');
          // чтобы избежать удаления "не того" подписчика, если ключ (parentTaskId) был переиспользован.
          // Security: Use hasOwnProperty to prevent accessing prototype properties.
          if (Object.prototype.hasOwnProperty.call(this.subscribers, resultKey)) {
+            // eslint-disable-next-line security/detect-object-injection -- resultKey is parentTaskId (a system-generated UUID).
             const currentSubscriber = this.subscribers[resultKey];
             if (currentSubscriber && currentSubscriber.sub_task_id === sub_task_id) {
+               // eslint-disable-next-line security/detect-object-injection -- resultKey is parentTaskId (a system-generated UUID), used for deletion.
                delete this.subscribers[resultKey]; // Удаляем подписчика
                const timeoutError = new Error(`Timeout waiting for result of parent_task_id ${parentTaskId}` + (sub_task_id ? ` sub_task_id ${sub_task_id}` : ''));
                console.error(timeoutError.message);
@@ -75,6 +79,7 @@ const EventEmitter = require('events');
        }, timeout);
 
        // Сохраняем подписчика. Его колбэк будет вызван, когда результат поступит через enqueueResult.
+       // eslint-disable-next-line security/detect-object-injection -- resultKey is parentTaskId (a system-generated UUID).
        this.subscribers[resultKey] = {
            callback: (err, resultMessage) => {
                clearTimeout(timer); // Очищаем таймер, так как результат пришел до таймаута

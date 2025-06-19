@@ -290,6 +290,7 @@ class GeminiService extends BaseAIService {
             'default': 30720
         };
 
+        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig (assumed safe) or validated against allowedModels.
         let effectiveLimit = modelContextWindows[currentModelForContext] || modelContextWindows['default'];
         // For 1.5 models, often a smaller practical limit is used for context assembly due to cost/performance.
         if (currentModelForContext.startsWith('gemini-1.5')) {

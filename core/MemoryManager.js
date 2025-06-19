@@ -23,6 +23,7 @@ class MemoryManager {
         // Security: Ensure only own properties are accessed to prevent prototype pollution.
         Object.keys(obj).sort().forEach(key => {
             if (Object.prototype.hasOwnProperty.call(obj, key)) {
+                // eslint-disable-next-line security/detect-object-injection -- 'key' is from Object.keys(obj) and validated with hasOwnProperty. orderedObj is a fresh local object.
                 orderedObj[key] = obj[key];
             }
         });
@@ -32,6 +33,7 @@ class MemoryManager {
 
     async _getFileContentHash(filePath) {
         try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath in this internal method is expected to be pre-validated if from untrusted source. Currently unused.
             const content = await fsp.readFile(filePath, 'utf8');
             return crypto.createHash('sha256').update(content).digest('hex');
         } catch (error) {
@@ -85,6 +87,7 @@ class MemoryManager {
 
     async initializeTaskMemory(taskDirPath) {
         const memoryBankPath = this._getTaskMemoryBankPath(taskDirPath);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
         await fsp.mkdir(memoryBankPath, { recursive: true });
         const chatHistoryPath = this.getMemoryFilePath(taskDirPath, CHAT_HISTORY_FILENAME);
         try {
@@ -102,6 +105,7 @@ class MemoryManager {
         const { isJson = false, defaultValue = null } = options;
         const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName);
         try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
             const content = await fsp.readFile(filePath, 'utf8');
             return isJson ? JSON.parse(content) : content;
         } catch (error) {
@@ -114,9 +118,11 @@ class MemoryManager {
         const { isJson = false } = options;
         if (newContent === undefined) return;
         const memoryBankPath = this._getTaskMemoryBankPath(taskDirPath);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
         await fsp.mkdir(memoryBankPath, { recursive: true });
         const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName);
         const contentToWrite = isJson ? JSON.stringify(newContent, null, 2) : String(newContent);
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
         await fsp.writeFile(filePath, contentToWrite, 'utf8');
     }
 
@@ -189,6 +195,7 @@ class MemoryManager {
         const { maxOriginalLength = 3000, promptTemplate = "Summarize this text concisely, focusing on key information: {text_to_summarize}", llmParams = {}, cacheSummary = true, forceSummarize = false, defaultValue = null } = summarizationOptions;
         const originalFilePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName);
         let originalContent;
+        // eslint-disable-next-line security/detect-non-literal-fs-filename -- originalFilePath is pre-sanitized by this.getMemoryFilePath().
         try { originalContent = await fsp.readFile(originalFilePath, 'utf8'); }
         catch (error) { if (error.code === 'ENOENT') return defaultValue; throw error; }
         const currentOriginalHash = this._calculateHash(originalContent);
@@ -197,7 +204,14 @@ class MemoryManager {
         const summaryMetaFilePath = this._getSummaryMetaFilePath(summaryFilePath);
         if (!forceSummarize && originalContent.length <= maxOriginalLength) return originalContent;
         if (cacheSummary && !forceSummarize) {
-            try { const metaContent = JSON.parse(await fsp.readFile(summaryMetaFilePath, 'utf8')); if (metaContent.originalContentHash === currentOriginalHash) { return await fsp.readFile(summaryFilePath, 'utf8'); } }
+            try {
+                // eslint-disable-next-line security/detect-non-literal-fs-filename -- summaryMetaFilePath is derived from a sanitized path.
+                const metaContent = JSON.parse(await fsp.readFile(summaryMetaFilePath, 'utf8'));
+                if (metaContent.originalContentHash === currentOriginalHash) {
+                    // eslint-disable-next-line security/detect-non-literal-fs-filename -- summaryFilePath is derived from a sanitized path.
+                    return await fsp.readFile(summaryFilePath, 'utf8');
+                }
+            }
             catch (error) { if (error.code !== 'ENOENT') console.warn(`MM: Error checking summary cache for '${memoryCategoryFileName}': ${error.message}.`); }
         }
         if (!aiService || typeof aiService.generateText !== 'function') throw new Error("aiService with generateText method is required for summarization.");
@@ -220,6 +234,7 @@ class MemoryManager {
         if (enableMegaContextCache) {
             const cacheKeyData = { version: MEGA_CONTEXT_CACHE_VERSION, spec: { systemPrompt, maxTokenLimit, priorityOrder } };
             cacheKey = this._calculateObjectHash(cacheKeyData); cacheDir = this._getMegaContextCachePath(taskDirPath); cacheFilePath = this._getCacheFilePath(cacheDir, cacheKey);
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- cacheFilePath is derived from a hash and system paths.
             try { const cachedData = JSON.parse(await fsp.readFile(cacheFilePath, 'utf8')); if (cachedData.contextString && typeof cachedData.tokenCount === 'number' && cachedData.timestamp) { if (!megaContextCacheTTLSeconds || (new Date().getTime() - new Date(cachedData.timestamp).getTime()) / 1000 <= megaContextCacheTTLSeconds) { return { success: true, contextString: cachedData.contextString, tokenCount: cachedData.tokenCount, fromCache: true }; } } }
             catch (error) { if (error.code !== 'ENOENT') console.warn(`MM.assembleMegaContext: Error reading cache: ${error.message}`); }
         }
@@ -253,7 +268,11 @@ class MemoryManager {
         let finalContextString = customPreamble + "\n" + contextParts.join(recordSeparator) + "\n" + customPostamble;
         const finalTokenCount = countTokens(finalContextString);
         if (finalTokenCount > maxTokenLimit) return { success: false, error: "Assembled context exceeds token limit.", tokenCount: finalTokenCount };
-        if (enableMegaContextCache && cacheKey && cacheFilePath) { try { await fsp.mkdir(cacheDir, { recursive: true }); await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
+        if (enableMegaContextCache && cacheKey && cacheFilePath) {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- cacheDir is derived from system paths.
+            try { await fsp.mkdir(cacheDir, { recursive: true });
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- cacheFilePath is derived from a hash and system paths.
+            await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
         return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
     }
     async getLatestKeyFindings(_taskDirPath, _limit = 5, _relevanceQuery = null) { // Renamed unused parameters

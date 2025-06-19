@@ -183,6 +183,7 @@ class AnthropicAPIService extends BaseAIService {
             'default': 100000 // Fallback for older or unknown models
         };
 
+        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig or validated against allowedModels.
         let contextSize = modelContextWindows[currentModelForContext];
         if (!contextSize) {
             // Basic fallback for unlisted variants

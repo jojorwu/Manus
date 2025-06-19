@@ -154,6 +154,7 @@
                         const sanitizedOriginalName = (file.name || 'unknown_file').replace(/[^a-zA-Z0-9_.-]/g, '_').substring(0, 255);
                         const safeFileName = path.basename(sanitizedOriginalName); // path.basename further ensures it's just a filename
                         const absoluteFilePath = path.join(uploadedFilesDir, safeFileName);
+                        // eslint-disable-next-line security/detect-non-literal-fs-filename -- safeFileName is sanitized, path.basename is used, and uploadedFilesDir is a system-controlled path within the task's workspace.
                         await fs.writeFile(absoluteFilePath, file.content);
                         taskState.uploadedFilePaths.push(path.join('uploaded_files', safeFileName));
                         taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("FILE_SAVE_SUCCESS", `Saved: ${safeFileName}`));
