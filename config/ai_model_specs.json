@@ -1,0 +1,30 @@
+{
+  "openai": {
+    "gpt-4o": { "contextWindow": 128000, "tokenizer": "cl100k_base", "planningPriority": 1, "synthesisPriority": 1, "cwcUpdatePriority": 1, "fastPriority": 2 },
+    "gpt-4-turbo": { "contextWindow": 128000, "tokenizer": "cl100k_base", "planningPriority": 2, "synthesisPriority": 2 },
+    "gpt-4-turbo-2024-04-09": { "contextWindow": 128000, "tokenizer": "cl100k_base" },
+    "gpt-4-turbo-preview": { "contextWindow": 128000, "tokenizer": "cl100k_base" },
+    "gpt-4-0125-preview": { "contextWindow": 128000, "tokenizer": "cl100k_base" },
+    "gpt-4-1106-preview": { "contextWindow": 128000, "tokenizer": "cl100k_base" },
+    "gpt-4-vision-preview": { "contextWindow": 128000, "tokenizer": "cl100k_base" },
+    "gpt-4": { "contextWindow": 8192, "tokenizer": "cl100k_base", "planningPriority": 3, "synthesisPriority": 3 },
+    "gpt-4-0613": { "contextWindow": 8192, "tokenizer": "cl100k_base" },
+    "gpt-4-32k": { "contextWindow": 32768, "tokenizer": "cl100k_base" },
+    "gpt-4-32k-0613": { "contextWindow": 32768, "tokenizer": "cl100k_base" },
+    "gpt-3.5-turbo-0125": { "contextWindow": 16385, "tokenizer": "cl100k_base" },
+    "gpt-3.5-turbo": { "contextWindow": 16385, "tokenizer": "cl100k_base", "summarizationPriority": 1, "fastPriority": 1 },
+    "gpt-3.5-turbo-1106": { "contextWindow": 16385, "tokenizer": "cl100k_base" },
+    "gpt-3.5-turbo-instruct": { "contextWindow": 4096, "tokenizer": "cl100k_base" },
+    "default": { "contextWindow": 4096, "tokenizer": "cl100k_base", "planningPriority": 99, "synthesisPriority": 99, "cwcUpdatePriority": 99, "summarizationPriority": 99, "fastPriority": 99 }
+  },
+  "gemini": {
+    "gemini-1.5-pro-latest": { "contextWindow": 1048576, "effectiveContextWindow": 131072, "planningPriority": 1, "synthesisPriority": 1 },
+    "gemini-1.5-pro": { "contextWindow": 1048576, "effectiveContextWindow": 131072 },
+    "gemini-1.5-flash-latest": { "contextWindow": 1048576, "effectiveContextWindow": 262144, "cwcUpdatePriority": 1, "summarizationPriority": 1, "fastPriority": 1 },
+    "gemini-1.5-flash": { "contextWindow": 1048576, "effectiveContextWindow": 262144 },
+    "gemini-pro": { "contextWindow": 32768 , "planningPriority": 2, "synthesisPriority": 2},
+    "gemini-1.0-pro": { "contextWindow": 32768 },
+    "gemini-1.0-pro-vision-latest": { "contextWindow": 12288 },
+    "default": { "contextWindow": 32768, "effectiveContextWindow": 32768, "planningPriority": 99, "synthesisPriority": 99, "cwcUpdatePriority": 99, "summarizationPriority": 99, "fastPriority": 99 }
+  }
+}

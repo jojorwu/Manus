@@ -9,6 +9,7 @@ const MEMORY_BANK_DIR_NAME = 'memory_bank';
 const MEGA_CONTEXT_CACHE_DIR_NAME = 'mega_context_cache';
 const MEGA_CONTEXT_CACHE_VERSION = 'mcc-v1';
 const CHAT_HISTORY_FILENAME = 'chat_messages.json';
+const KEY_FINDINGS_FILENAME = 'key_findings.jsonl';
 
 class MemoryManager {
     /**
@@ -109,7 +110,25 @@ class MemoryManager {
             const content = await fsp.readFile(filePath, 'utf8');
             return isJson ? JSON.parse(content) : content;
         } catch (error) {
-            if (error.code === 'ENOENT') return defaultValue;
+            const filePathForLog = filePath || path.join(this._getTaskMemoryBankPath(taskDirPath), memoryCategoryFileName); // На случай если filePath не успел определиться
+            if (error.code === 'ENOENT') {
+                // console.warn(`MemoryManager.loadMemory: File not found '${filePathForLog}'. Returning default value.`); // Можно добавить, если нужно часто видеть
+                return defaultValue;
+            } else if (['EACCES', 'EPERM'].includes(error.code)) {
+                console.error(`MemoryManager.loadMemory: Permission denied for file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'ENOSPC') {
+                console.error(`MemoryManager.loadMemory: No space left on device for file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'EMFILE') {
+                console.error(`MemoryManager.loadMemory: Too many open files when trying to access '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            } else if (error.code === 'EIO') {
+                console.error(`MemoryManager.loadMemory: I/O error accessing file '${filePathForLog}'. Code: ${error.code}. Returning default value.`);
+                return defaultValue;
+            }
+            // Для остальных ошибок - пробрасываем дальше
+            console.error(`MemoryManager.loadMemory: Unhandled FS error for file '${filePathForLog}'. Code: ${error.code || 'N/A'}. Rethrowing.`);
             throw error;
         }
     }
@@ -117,13 +136,36 @@ class MemoryManager {
     async overwriteMemory(taskDirPath, memoryCategoryFileName, newContent, options = {}) {
         const { isJson = false } = options;
         if (newContent === undefined) return;
+
         const memoryBankPath = this._getTaskMemoryBankPath(taskDirPath);
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
-        await fsp.mkdir(memoryBankPath, { recursive: true });
-        const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName);
-        const contentToWrite = isJson ? JSON.stringify(newContent, null, 2) : String(newContent);
-        // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
-        await fsp.writeFile(filePath, contentToWrite, 'utf8');
+        const filePath = this.getMemoryFilePath(taskDirPath, memoryCategoryFileName); // Define filePath before try block
+
+        try {
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- memoryBankPath is derived from system-controlled taskDirPath.
+            await fsp.mkdir(memoryBankPath, { recursive: true });
+            const contentToWrite = isJson ? JSON.stringify(newContent, null, 2) : String(newContent);
+            // eslint-disable-next-line security/detect-non-literal-fs-filename -- filePath is pre-sanitized by this.getMemoryFilePath().
+            await fsp.writeFile(filePath, contentToWrite, 'utf8');
+        } catch (error) {
+            const filePathForLog = filePath || path.join(this._getTaskMemoryBankPath(taskDirPath), memoryCategoryFileName);
+            let errorMessage = `MemoryManager.overwriteMemory: Failed to write to file '${filePathForLog}'.`;
+
+            if (error.code === 'EACCES' || error.code === 'EPERM') {
+                errorMessage += ` Permission denied. Code: ${error.code}.`;
+            } else if (error.code === 'ENOSPC') {
+                errorMessage += ` No space left on device. Code: ${error.code}.`;
+            } else if (error.code === 'EMFILE') {
+                errorMessage += ` Too many open files. Code: ${error.code}.`;
+            } else if (error.code === 'EIO') {
+                errorMessage += ` I/O error. Code: ${error.code}.`;
+            } else {
+                errorMessage += ` Unhandled FS error. Code: ${error.code || 'N/A'}.`;
+            }
+            // Логируем оригинальную ошибку для полной трассировки
+            console.error(errorMessage, error);
+            // Пробрасываем новую ошибку с более контекстным сообщением
+            throw new Error(errorMessage);
+        }
     }
 
     async addChatMessage(taskDirPath, messageData) {
@@ -275,10 +317,87 @@ class MemoryManager {
             await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
         return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
     }
-    async getLatestKeyFindings(_taskDirPath, _limit = 5, _relevanceQuery = null) { // Renamed unused parameters
-        console.warn("MemoryManager.getLatestKeyFindings: Placeholder. Returning empty array.");
-        return [];
+    async getLatestKeyFindings(taskDirPath, limit = 5, relevanceQuery = null) {
+        if (!taskDirPath) {
+            console.warn("MemoryManager.getLatestKeyFindings: taskDirPath is required.");
+            return [];
+        }
+        try {
+            const filePath = this.getMemoryFilePath(taskDirPath, KEY_FINDINGS_FILENAME);
+            let fileContent;
+            try {
+                fileContent = await fsp.readFile(filePath, 'utf8');
+            } catch (readError) {
+                if (readError.code === 'ENOENT') {
+                    return []; // No findings file yet
+                }
+                throw readError; // Other read errors should be propagated or logged
+            }
+
+            if (!fileContent.trim()) {
+                return [];
+            }
+
+            const lines = fileContent.trim().split('\n');
+            let findings = [];
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    findings.push(JSON.parse(line));
+                } catch (parseError) {
+                    console.warn(`MemoryManager.getLatestKeyFindings: Skipping corrupted line in ${filePath}: ${parseError.message}`);
+                }
+            }
+
+            // Filter by relevanceQuery if provided
+            if (relevanceQuery && typeof relevanceQuery === 'string' && relevanceQuery.trim() !== "") {
+                const query = relevanceQuery.toLowerCase();
+                findings = findings.filter(finding => {
+                    const narrativeMatch = finding.sourceStepNarrative && finding.sourceStepNarrative.toLowerCase().includes(query);
+                    let dataMatch = false;
+                    if (finding.data) {
+                        try {
+                            const dataString = (typeof finding.data === 'string') ? finding.data : JSON.stringify(finding.data);
+                            dataMatch = dataString.toLowerCase().includes(query);
+                        } catch (e) { /* ignore stringify errors for filtering */ }
+                    }
+                    return narrativeMatch || dataMatch;
+                });
+            }
+
+            // Sort by timestamp (descending - newest first)
+            findings.sort((a, b) => {
+                const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                return timeB - timeA;
+            });
+
+            return findings.slice(0, limit);
+
+        } catch (error) {
+            console.error(`MemoryManager.getLatestKeyFindings: Failed to get key findings for task ${taskDirPath}`, error);
+            return []; // Return empty on error to prevent breaking callers
+        }
     }
+
+    async saveKeyFinding(taskDirPath, keyFinding) {
+        if (!taskDirPath || !keyFinding) {
+            console.error("MemoryManager.saveKeyFinding: taskDirPath and keyFinding are required.");
+            return;
+        }
+        try {
+            const filePath = this.getMemoryFilePath(taskDirPath, KEY_FINDINGS_FILENAME);
+            // Ensure directory exists (getMemoryFilePath ensures the base memory_bank,
+            // but if KEY_FINDINGS_FILENAME implies subdirs, this is safer)
+            await fsp.mkdir(path.dirname(filePath), { recursive: true });
+            const findingJsonString = JSON.stringify(keyFinding);
+            await fsp.appendFile(filePath, findingJsonString + '\n', 'utf8');
+        } catch (error) {
+            console.error(`MemoryManager.saveKeyFinding: Failed to save key finding for task ${taskDirPath}`, error);
+            // Do not re-throw, as saving a key finding might be non-critical for plan execution flow
+        }
+    }
+
     async loadGeminiCachedContentMap(taskDirPath) {
         return this.loadMemory(taskDirPath, 'gemini_cached_content_map.json', { isJson: true, defaultValue: {} });
     }

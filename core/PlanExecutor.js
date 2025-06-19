@@ -9,10 +9,14 @@ const FileSystemTool = require('../tools/FileSystemTool'); // Added
 const FileDownloaderTool = require('../tools/FileDownloaderTool'); // Added
 
 class PlanExecutor {
-    constructor(subTaskQueue, resultsQueue, aiService, tools = {}, savedTasksBaseDir) { // Changed llmService to aiService
+    constructor(subTaskQueue, resultsQueue, aiService, memoryManager, tools = {}, savedTasksBaseDir) { // Changed llmService to aiService
+        if (!memoryManager || typeof memoryManager.saveKeyFinding !== 'function') {
+            throw new Error("PlanExecutor: memoryManager instance with saveKeyFinding method is required.");
+        }
         this.subTaskQueue = subTaskQueue;
         this.resultsQueue = resultsQueue;
         this.aiService = aiService; // Changed llmService to aiService
+        this.memoryManager = memoryManager;
         this.tools = tools;
         this.savedTasksBaseDir = savedTasksBaseDir; // Store this
         if (!this.savedTasksBaseDir) {
@@ -147,7 +151,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput
-    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
+    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step ExploreSearchResults: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -250,7 +254,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput, method renamed
-    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
+    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step LLMStepExecutor: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -339,16 +343,315 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         }
     }
 
+    async _processSubTask(subTaskDefinition, parentTaskId, stepOutputs, journalEntries, stageIndex, executionContext) {
+        const stepNarrative = subTaskDefinition.narrative_step;
+        const stepId = subTaskDefinition.stepId;
+        let resolvedSubTaskInput;
+
+        try {
+            const originalInputCopy = JSON.parse(JSON.stringify(subTaskDefinition.sub_task_input));
+            resolvedSubTaskInput = await this._resolveOutputReferences(originalInputCopy, stepOutputs, stepId);
+        } catch (resolutionError) {
+            console.error(`PlanExecutor: Error resolving output references for stepId '${stepId}': ${resolutionError.message}`);
+            journalEntries.push(this._createJournalEntry(
+                "EXECUTION_STEP_PREPARATION_FAILED",
+                `Failed to resolve output references for step: ${stepNarrative} (StepID: ${stepId})`,
+                { parentTaskId, stageIndex, stepId, narrativeStep: stepNarrative, error: resolutionError.message }
+            ));
+            return Promise.resolve({ // Return a resolved promise with FAILED status
+                sub_task_id: uuidv4(),
+                stepId: stepId,
+                narrative_step: stepNarrative,
+                tool_name: subTaskDefinition.tool_name,
+                assigned_agent_role: subTaskDefinition.assigned_agent_role,
+                sub_task_input: subTaskDefinition.sub_task_input,
+                status: "FAILED",
+                error_details: { message: `Output reference resolution failed: ${resolutionError.message}` }
+            });
+        }
+
+        const subTaskInputForLog = { ...subTaskDefinition.sub_task_input };
+
+        if (subTaskDefinition.assigned_agent_role === "Orchestrator") {
+            const sub_task_id_for_orchestrator_step = uuidv4();
+            journalEntries.push(this._createJournalEntry(
+                "EXECUTION_STEP_ORCHESTRATOR_START",
+                `Orchestrator starting special step: ${stepNarrative} (StepID: ${stepId})`,
+                { parentTaskId, stageIndex, subTaskId: sub_task_id_for_orchestrator_step, stepId, narrativeStep: stepNarrative, toolName: subTaskDefinition.tool_name, subTaskInput: subTaskInputForLog }
+            ));
+            if (subTaskDefinition.tool_name === "ExploreSearchResults") {
+                return this._handleExploreSearchResults(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext);
+            } else if (subTaskDefinition.tool_name === "LLMStepExecutor") {
+                return this._handleLLMStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext);
+            } else if (subTaskDefinition.tool_name === "FileSystemTool" || subTaskDefinition.tool_name === "FileDownloaderTool") {
+                return (async () => {
+                    let tool;
+                    const taskWorkspaceDir = path.join(this.savedTasksBaseDir, parentTaskId, 'workspace');
+                    try {
+                        await fsp.mkdir(taskWorkspaceDir, { recursive: true });
+                        if (subTaskDefinition.tool_name === "FileSystemTool") {
+                            tool = new FileSystemTool(taskWorkspaceDir);
+                        } else {
+                            tool = new FileDownloaderTool(taskWorkspaceDir);
+                        }
+                        const operation = resolvedSubTaskInput.operation;
+                        const opParams = resolvedSubTaskInput.params;
+                        const allowedOperations = Object.getOwnPropertyNames(Object.getPrototypeOf(tool)).filter(prop => typeof tool[prop] === 'function' && !prop.startsWith('_') && prop !== 'constructor');
+                        if (typeof tool[operation] !== 'function' || !allowedOperations.includes(operation) ) {
+                            throw new Error(`Operation '${operation}' not found or not allowed on tool '${subTaskDefinition.tool_name}'.`);
+                        }
+                        const toolResult = await tool[operation](opParams);
+                        return {
+                            sub_task_id: sub_task_id_for_orchestrator_step,
+                            stepId: stepId,
+                            narrative_step: stepNarrative,
+                            tool_name: subTaskDefinition.tool_name,
+                            assigned_agent_role: "Orchestrator",
+                            sub_task_input: subTaskDefinition.sub_task_input,
+                            status: toolResult.error ? "FAILED" : "COMPLETED",
+                            result_data: toolResult.result,
+                            error_details: toolResult.error ? { message: toolResult.error } : null
+                        };
+                    } catch (err) {
+                        console.error(`PlanExecutor: Error executing Orchestrator tool ${subTaskDefinition.tool_name}, operation ${resolvedSubTaskInput.operation} (StepID: ${stepId}): ${err.message}`);
+                        return {
+                            sub_task_id: sub_task_id_for_orchestrator_step,
+                            stepId: stepId,
+                            narrative_step: stepNarrative,
+                            tool_name: subTaskDefinition.tool_name,
+                            assigned_agent_role: "Orchestrator",
+                            sub_task_input: subTaskDefinition.sub_task_input,
+                            status: "FAILED",
+                            error_details: { message: err.message }
+                        };
+                    }
+                })();
+            } else {
+                 console.error(`PlanExecutor: Unknown tool '${subTaskDefinition.tool_name}' for Orchestrator role. Step: "${stepNarrative}" (StepID: ${stepId})`);
+                 return Promise.resolve({
+                    sub_task_id: sub_task_id_for_orchestrator_step,
+                    stepId: stepId,
+                    narrative_step: stepNarrative,
+                    tool_name: subTaskDefinition.tool_name,
+                    assigned_agent_role: "Orchestrator",
+                    sub_task_input: subTaskDefinition.sub_task_input,
+                    status: "FAILED",
+                    error_details: { message: `Unknown Orchestrator tool: ${subTaskDefinition.tool_name}` }
+                });
+            }
+        } else {
+            const sub_task_id = uuidv4();
+            const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: resolvedSubTaskInput, narrative_step: stepNarrative, stepId: stepId };
+            journalEntries.push(this._createJournalEntry(
+                "EXECUTION_STEP_DISPATCHED",
+                `Dispatching step: ${stepNarrative} (SubTaskID: ${sub_task_id}, StepID: ${stepId}) to agent ${taskMessage.assigned_agent_role}`,
+                { parentTaskId, stageIndex, subTaskId: sub_task_id, stepId, narrativeStep: stepNarrative, toolName: taskMessage.tool_name, agentRole: taskMessage.assigned_agent_role, subTaskInputForLog }
+            ));
+            this.subTaskQueue.enqueueTask(taskMessage);
+            console.log(`PlanExecutor: Dispatched sub-task ${sub_task_id} (StepID: ${stepId}) for role ${taskMessage.assigned_agent_role} - Step: "${stepNarrative}" for Stage ${stageIndex}`);
+            return new Promise((resolve) => {
+                this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
+                    const resultDetails = { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative };
+                    if (error) {
+                        journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", `Error or timeout for SubTaskID: ${sub_task_id}`, { ...resultDetails, error: error.message }));
+                        console.error(`PlanExecutor: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${stageIndex}):`, error.message);
+                        resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
+                    } else if (resultMsg) {
+                        const resultDataPreview = typeof resultMsg.result_data === 'string' ? resultMsg.result_data.substring(0,100) + '...' : String(resultMsg.result_data);
+                        journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_RECEIVED", `Result received for SubTaskID: ${sub_task_id}, Status: ${resultMsg.status}`, { ...resultDetails, status: resultMsg.status, agentRole: resultMsg.worker_agent_role, resultDataPreview, errorDetails: resultMsg.error_details }));
+                        if (resultMsg.sub_task_id === sub_task_id) {
+                            console.log(`PlanExecutor: Received result for sub_task_id ${sub_task_id} (Stage ${stageIndex}). Status: ${resultMsg.status}`);
+                            resolve({
+                                sub_task_id,
+                                stepId: taskMessage.stepId,
+                                narrative_step: stepNarrative,
+                                tool_name: taskMessage.tool_name,
+                                sub_task_input: subTaskDefinition.sub_task_input,
+                                assigned_agent_role: taskMessage.assigned_agent_role,
+                                status: resultMsg.status,
+                                result_data: resultMsg.result_data,
+                                error_details: resultMsg.error_details
+                            });
+                        } else {
+                            const errorMessage = `Critical - Mismatched sub_task_id. Expected ${sub_task_id}, got ${resultMsg.sub_task_id} (StepID: ${taskMessage.stepId})`;
+                            journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", errorMessage, { ...resultDetails, stepId: taskMessage.stepId, expectedSubTaskId: sub_task_id, receivedSubTaskId: resultMsg.sub_task_id }));
+                            console.error(`PlanExecutor: ${errorMessage} for parent_task_id ${parentTaskId} (Stage ${stageIndex}).`);
+                            resolve({
+                                sub_task_id,
+                                stepId: taskMessage.stepId,
+                                narrative_step: stepNarrative,
+                                tool_name: taskMessage.tool_name,
+                                sub_task_input: subTaskDefinition.sub_task_input,
+                                assigned_agent_role: taskMessage.assigned_agent_role,
+                                status: "FAILED",
+                                error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
+                            });
+                        }
+                    }
+                }, sub_task_id);
+            });
+        }
+    }
+
+    async _executeStage(stageIndex, currentStageTaskDefinitions, parentTaskId, userTaskString, stepOutputs, journalEntries, executionContext, collectedKeyFindings, collectedErrors) {
+        journalEntries.push(this._createJournalEntry(
+            "EXECUTION_STAGE_START",
+            `Starting Stage ${stageIndex}/${currentStageTaskDefinitions.length}`, // Note: This length might be off if planStages.length was intended
+            { parentTaskId, stageIndex, stageTaskCount: currentStageTaskDefinitions.length }
+        ));
+        console.log(`PlanExecutor: Starting Stage ${stageIndex} with ${currentStageTaskDefinitions.length} sub-task(s).`);
+
+        const stageSubTaskPromises = [];
+        for (const subTaskDefinition of currentStageTaskDefinitions) {
+            stageSubTaskPromises.push(this._processSubTask(subTaskDefinition, parentTaskId, stepOutputs, journalEntries, stageIndex, executionContext));
+        }
+
+        const stageResults = await Promise.all(stageSubTaskPromises);
+        const stageContextEntriesForCurrentStage = [];
+        let firstFailedStepErrorDetailsInStage = null;
+        let stageFailed = false;
+
+        for (let j = 0; j < stageResults.length; j++) {
+            const resultOfSubTask = stageResults[j];
+            const originalSubTaskDef = currentStageTaskDefinitions[j];
+            const subTaskIdForResult = resultOfSubTask.sub_task_id;
+            const stepIdForResult = resultOfSubTask.stepId || originalSubTaskDef.stepId;
+            let processedData = resultOfSubTask.result_data;
+            const summarizationLogDetails = { parentTaskId, stageIndex, subTaskId: subTaskIdForResult, stepId: stepIdForResult, narrativeStep: resultOfSubTask.narrative_step };
+
+            if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
+                (resultOfSubTask.assigned_agent_role !== "Orchestrator" ||
+                 (resultOfSubTask.assigned_agent_role === "Orchestrator" && originalSubTaskDef.tool_name === "ExploreSearchResults"))) {
+                journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, summarizationLogDetails));
+                const originalDataForPreview = resultOfSubTask.result_data;
+                try {
+                    const summary = await this._summarizeStepData(resultOfSubTask.result_data, userTaskString, resultOfSubTask.narrative_step, subTaskIdForResult, parentTaskId);
+                    if (summary !== resultOfSubTask.result_data) {
+                         journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_SUCCESS", `Successfully summarized data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, { ...summarizationLogDetails, summarizedDataPreview: String(summary).substring(0,100) + "..."}));
+                    }
+                    processedData = summary;
+                } catch (summarizationError) {
+                    journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_FAILED", `Summarization failed for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, { ...summarizationLogDetails, errorMessage: summarizationError.message }));
+                    console.error(`PlanExecutor: Error during _summarizeStepData call for SubTaskID ${subTaskIdForResult} (StepID: ${stepIdForResult}): ${summarizationError.message}`);
+                    processedData = originalDataForPreview;
+                }
+            }
+
+            const contextEntry = {
+                stepId: stepIdForResult,
+                narrative_step: resultOfSubTask.narrative_step || originalSubTaskDef.narrative_step,
+                assigned_agent_role: resultOfSubTask.assigned_agent_role || originalSubTaskDef.assigned_agent_role,
+                tool_name: resultOfSubTask.tool_name || originalSubTaskDef.tool_name,
+                sub_task_input: originalSubTaskDef.sub_task_input,
+                status: resultOfSubTask.status,
+                processed_result_data: processedData,
+                raw_result_data: resultOfSubTask.result_data,
+                error_details: resultOfSubTask.error_details,
+                sub_task_id: subTaskIdForResult
+            };
+            stageContextEntriesForCurrentStage.push(contextEntry);
+
+            if (contextEntry.stepId) {
+                stepOutputs[contextEntry.stepId] = {
+                    status: contextEntry.status,
+                    result_data: contextEntry.raw_result_data,
+                    processed_result_data: contextEntry.processed_result_data,
+                    error_details: contextEntry.error_details
+                };
+            }
+
+            if (contextEntry.tool_name === "ExploreSearchResults" && resultOfSubTask.partial_errors && resultOfSubTask.partial_errors.length > 0) {
+                journalEntries.push(this._createJournalEntry(
+                    "EXECUTION_STEP_PARTIAL_ERRORS",
+                    `Step '${contextEntry.narrative_step}' (Tool: ${contextEntry.tool_name}, StepID: ${contextEntry.stepId}) completed with ${resultOfSubTask.partial_errors.length} partial error(s) while processing URLs.`,
+                    { parentTaskId, stageIndex, subTaskId: contextEntry.sub_task_id, stepId: contextEntry.stepId, partialErrorCount: resultOfSubTask.partial_errors.length, errors: resultOfSubTask.partial_errors }
+                ));
+                for (const partialErr of resultOfSubTask.partial_errors) {
+                    collectedErrors.push({
+                        errorId: uuidv4(),
+                        sourceStepNarrative: `${contextEntry.narrative_step} (processing URL: ${partialErr.url || 'Unknown URL'})`,
+                        sourceToolName: contextEntry.tool_name,
+                        errorMessage: partialErr.errorMessage,
+                        timestamp: new Date().toISOString()
+                    });
+                }
+            }
+
+            const logDetails = { parentTaskId, stageIndex, subTaskId: contextEntry.sub_task_id, stepId: contextEntry.stepId, narrativeStep: contextEntry.narrative_step, toolName: contextEntry.tool_name, agentRole: contextEntry.assigned_agent_role };
+            const dataPreviewForLog = contextEntry.processed_result_data !== undefined ? contextEntry.processed_result_data : contextEntry.raw_result_data;
+
+            if (contextEntry.status === "COMPLETED") {
+                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_COMPLETED", `Step completed: ${contextEntry.narrative_step}`, { ...logDetails, processedResultDataPreview: String(dataPreviewForLog).substring(0, 100) + "..." }));
+                const findingData = contextEntry.processed_result_data || contextEntry.raw_result_data;
+                if (findingData || (typeof findingData === 'boolean' || typeof findingData === 'number')) {
+                    let dataToStore = findingData;
+                    const MAX_FINDING_DATA_LENGTH = 500;
+                    if (typeof findingData === 'string' && findingData.length > MAX_FINDING_DATA_LENGTH) {
+                        dataToStore = findingData.substring(0, MAX_FINDING_DATA_LENGTH) + "...";
+                    }
+                    collectedKeyFindings.push({
+                        findingId: uuidv4(),
+                        sourceStepNarrative: contextEntry.narrative_step,
+                        sourceToolName: contextEntry.tool_name,
+                        data: dataToStore,
+                        timestamp: new Date().toISOString()
+                    });
+                    if (this.memoryManager) {
+                        try {
+                            // parentTaskId доступен в _executeStage как параметр
+                            await this.memoryManager.saveKeyFinding(parentTaskId, keyFinding);
+                        } catch (saveError) {
+                            console.error(`PlanExecutor._executeStage: Failed to save key finding for task ${parentTaskId}, step ${contextEntry.stepId}. Error: ${saveError.message}`);
+                            // Не прерываем выполнение плана из-за ошибки сохранения находки
+                        }
+                    }
+                }
+            } else if (contextEntry.status === "FAILED") {
+                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_FAILED", `Step failed: ${contextEntry.narrative_step}`, { ...logDetails, errorDetails: contextEntry.error_details }));
+                if (!firstFailedStepErrorDetailsInStage) {
+                    firstFailedStepErrorDetailsInStage = { // Directly assign the whole object as per new structure
+                        sub_task_id: contextEntry.sub_task_id,
+                        stepId: contextEntry.stepId,
+                        narrative_step: contextEntry.narrative_step,
+                        tool_name: contextEntry.tool_name,
+                        assigned_agent_role: contextEntry.assigned_agent_role,
+                        sub_task_input: contextEntry.sub_task_input,
+                        error_details: contextEntry.error_details || { message: "Unknown error in failed step." }
+                    };
+                }
+                if (contextEntry.error_details) {
+                    collectedErrors.push({
+                        errorId: uuidv4(),
+                        sourceStepNarrative: contextEntry.narrative_step,
+                        sourceToolName: contextEntry.tool_name,
+                        errorMessage: contextEntry.error_details.message || JSON.stringify(contextEntry.error_details),
+                        timestamp: new Date().toISOString()
+                    });
+                }
+                stageFailed = true; // Mark stage as failed
+            }
+        }
+
+        // Determine stage success based on entries processed in this stage
+        for (const entry of stageContextEntriesForCurrentStage) {
+            if (entry.status === "FAILED") {
+                stageFailed = true;
+                break;
+            }
+        }
+
+        return { stageSuccess: !stageFailed, stageContextEntries: stageContextEntriesForCurrentStage, failedStepDetails: firstFailedStepErrorDetailsInStage };
+    }
+
     async executePlan(planStages, parentTaskId, userTaskString) {
         const stepOutputs = {}; // Initialize stepOutputs map
         const journalEntries = [];
-        const executionContext = [];
+        const executionContext = []; // This will accumulate all stageContextEntries
         const collectedKeyFindings = [];
         const collectedErrors = [];
         let overallSuccess = true;
-        let finalAnswerOutput = null;
-        let finalAnswerWasSynthesized = false;
-        let failedStepDetails = null; // Initialize failedStepDetails
+        // finalAnswerOutput and finalAnswerWasSynthesized are removed from here
+        let failedStepDetails = null; // This will hold the details of the first failed step in any stage
 
         journalEntries.push(this._createJournalEntry(
             "PLAN_EXECUTION_START",
@@ -359,363 +662,38 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         for (let i = 0; i < planStages.length; i++) {
             const currentStageTaskDefinitions = planStages[i];
             const stageIndex = i + 1;
-            journalEntries.push(this._createJournalEntry(
-                "EXECUTION_STAGE_START",
-                `Starting Stage ${stageIndex}/${planStages.length}`,
-                { parentTaskId, stageIndex, stageTaskCount: currentStageTaskDefinitions.length }
-            ));
-            console.log(`PlanExecutor: Starting Stage ${stageIndex}/${planStages.length} with ${currentStageTaskDefinitions.length} sub-task(s).`);
 
-            const stageSubTaskPromises = [];
+            // Call the new _executeStage method
+            const stageResult = await this._executeStage(
+                stageIndex,
+                currentStageTaskDefinitions,
+                parentTaskId,
+                userTaskString,
+                stepOutputs,      // Mutated
+                journalEntries,   // Mutated
+                executionContext, // Passed for context, not directly mutated by _executeStage for its main list
+                collectedKeyFindings, // Mutated
+                collectedErrors     // Mutated
+            );
 
-            for (const subTaskDefinition of currentStageTaskDefinitions) {
-                const stepNarrative = subTaskDefinition.narrative_step;
-                const stepId = subTaskDefinition.stepId; // Essential for logging and output tracking
-
-                let resolvedSubTaskInput;
-                try {
-                    // Deep copy original input before resolving, to keep original for contextEntry
-                    const originalInputCopy = JSON.parse(JSON.stringify(subTaskDefinition.sub_task_input));
-                    resolvedSubTaskInput = this._resolveOutputReferences(originalInputCopy, stepOutputs, stepId);
-                } catch (resolutionError) {
-                    console.error(`PlanExecutor: Error resolving output references for stepId '${stepId}': ${resolutionError.message}`);
-                    journalEntries.push(this._createJournalEntry(
-                        "EXECUTION_STEP_PREPARATION_FAILED",
-                        `Failed to resolve output references for step: ${stepNarrative} (StepID: ${stepId})`,
-                        { parentTaskId, stageIndex, stepId, narrativeStep: stepNarrative, error: resolutionError.message }
-                    ));
-                    stageSubTaskPromises.push(Promise.resolve({
-                        sub_task_id: uuidv4(), // Generate a sub_task_id for this failure point
-                        stepId: stepId,
-                        narrative_step: stepNarrative,
-                        tool_name: subTaskDefinition.tool_name,
-                        assigned_agent_role: subTaskDefinition.assigned_agent_role,
-                        sub_task_input: subTaskDefinition.sub_task_input, // original input
-                        status: "FAILED",
-                        error_details: { message: `Output reference resolution failed: ${resolutionError.message}` }
-                    }));
-                    continue; // Skip to next task in stage
-                }
-
-                // subTaskInputForLog should ideally be the resolved one for better debugging of what the tool *actually* received.
-                // However, the original with @-references is also useful. For now, log original.
-                const subTaskInputForLog = { ...subTaskDefinition.sub_task_input };
-
-
-                if (subTaskDefinition.assigned_agent_role === "Orchestrator") {
-                    const sub_task_id_for_orchestrator_step = uuidv4();
-                    journalEntries.push(this._createJournalEntry(
-                        "EXECUTION_STEP_ORCHESTRATOR_START",
-                        `Orchestrator starting special step: ${stepNarrative} (StepID: ${stepId})`,
-                        { parentTaskId, stageIndex, subTaskId: sub_task_id_for_orchestrator_step, stepId, narrativeStep: stepNarrative, toolName: subTaskDefinition.tool_name, subTaskInput: subTaskInputForLog }
-                    ));
-                    if (subTaskDefinition.tool_name === "ExploreSearchResults") {
-                        // Pass resolvedSubTaskInput and subTaskDefinition
-                        stageSubTaskPromises.push(this._handleExploreSearchResults(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId));
-                    } else if (subTaskDefinition.tool_name === "LLMStepExecutor") { // Changed from GeminiStepExecutor
-                        // Pass resolvedSubTaskInput and subTaskDefinition
-                        stageSubTaskPromises.push(this._handleLLMStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId)); // Renamed method
-                    } else if (subTaskDefinition.tool_name === "FileSystemTool" || subTaskDefinition.tool_name === "FileDownloaderTool") {
-                        const toolPromise = (async () => {
-                            let tool;
-                            const taskWorkspaceDir = path.join(this.savedTasksBaseDir, parentTaskId, 'workspace');
-                            try {
-                                // eslint-disable-next-line security/detect-non-literal-fs-filename -- taskWorkspaceDir is constructed from base path and system-generated parentTaskId.
-                                await fsp.mkdir(taskWorkspaceDir, { recursive: true });
-                                if (subTaskDefinition.tool_name === "FileSystemTool") {
-                                    tool = new FileSystemTool(taskWorkspaceDir);
-                                } else {
-                                    tool = new FileDownloaderTool(taskWorkspaceDir);
-                                }
-                                // Use resolvedSubTaskInput for operations
-                                const operation = resolvedSubTaskInput.operation;
-                                const opParams = resolvedSubTaskInput.params;
-
-                                // Security: Validate the operation name before attempting to call it.
-                                const allowedOperations = Object.getOwnPropertyNames(Object.getPrototypeOf(tool)).filter(prop => typeof tool[prop] === 'function' && !prop.startsWith('_') && prop !== 'constructor');
-                                if (typeof tool[operation] !== 'function' || !allowedOperations.includes(operation) ) {
-                                    throw new Error(`Operation '${operation}' not found or not allowed on tool '${subTaskDefinition.tool_name}'.`);
-                                }
-
-                                // eslint-disable-next-line security/detect-object-injection -- 'operation' is validated against an allowed list derived from tool's prototype methods.
-                                const toolResult = await tool[operation](opParams);
-                                return {
-                                    sub_task_id: sub_task_id_for_orchestrator_step,
-                                    stepId: stepId,
-                                    narrative_step: stepNarrative,
-                                    tool_name: subTaskDefinition.tool_name,
-                                    assigned_agent_role: "Orchestrator",
-                                    sub_task_input: subTaskDefinition.sub_task_input, // original input
-                                    status: toolResult.error ? "FAILED" : "COMPLETED",
-                                    result_data: toolResult.result,
-                                    error_details: toolResult.error ? { message: toolResult.error } : null
-                                };
-                            } catch (err) {
-                                // eslint-disable-next-line security/detect-object-injection -- resolvedSubTaskInput.operation is from plan data, used here for logging purposes only in error message.
-                                console.error(`PlanExecutor: Error executing Orchestrator tool ${subTaskDefinition.tool_name}, operation ${resolvedSubTaskInput.operation} (StepID: ${stepId}): ${err.message}`);
-                                return {
-                                    sub_task_id: sub_task_id_for_orchestrator_step,
-                                    stepId: stepId,
-                                    narrative_step: stepNarrative,
-                                    tool_name: subTaskDefinition.tool_name,
-                                    assigned_agent_role: "Orchestrator",
-                                    sub_task_input: subTaskDefinition.sub_task_input, // original input
-                                    status: "FAILED",
-                                    error_details: { message: err.message }
-                                };
-                            }
-                        })();
-                        stageSubTaskPromises.push(toolPromise);
-                    } else {
-                         console.error(`PlanExecutor: Unknown tool '${subTaskDefinition.tool_name}' for Orchestrator role. Step: "${stepNarrative}" (StepID: ${stepId})`);
-                         stageSubTaskPromises.push(Promise.resolve({
-                            sub_task_id: sub_task_id_for_orchestrator_step,
-                            stepId: stepId,
-                            narrative_step: stepNarrative,
-                            tool_name: subTaskDefinition.tool_name,
-                            assigned_agent_role: "Orchestrator",
-                            sub_task_input: subTaskDefinition.sub_task_input, // original input
-                            status: "FAILED",
-                            error_details: { message: `Unknown Orchestrator tool: ${subTaskDefinition.tool_name}` }
-                        }));
-                    }
-                } else {
-                    const sub_task_id = uuidv4();
-                    // Use resolvedSubTaskInput for the task message
-                    const taskMessage = { sub_task_id, parent_task_id: parentTaskId, assigned_agent_role: subTaskDefinition.assigned_agent_role, tool_name: subTaskDefinition.tool_name, sub_task_input: resolvedSubTaskInput, narrative_step: stepNarrative, stepId: stepId };
-
-                    journalEntries.push(this._createJournalEntry(
-                        "EXECUTION_STEP_DISPATCHED",
-                        `Dispatching step: ${stepNarrative} (SubTaskID: ${sub_task_id}, StepID: ${stepId}) to agent ${taskMessage.assigned_agent_role}`,
-                        { parentTaskId, stageIndex, subTaskId: sub_task_id, stepId, narrativeStep: stepNarrative, toolName: taskMessage.tool_name, agentRole: taskMessage.assigned_agent_role, subTaskInputForLog }
-                    ));
-                    this.subTaskQueue.enqueueTask(taskMessage);
-                    console.log(`PlanExecutor: Dispatched sub-task ${sub_task_id} (StepID: ${stepId}) for role ${taskMessage.assigned_agent_role} - Step: "${stepNarrative}" for Stage ${stageIndex}`);
-
-                    const subTaskPromise = new Promise((resolve) => {
-                        this.resultsQueue.subscribeOnce(parentTaskId, (error, resultMsg) => {
-                            const resultDetails = { parentTaskId, stageIndex, subTaskId: sub_task_id, narrativeStep: stepNarrative };
-                            if (error) {
-                                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", `Error or timeout for SubTaskID: ${sub_task_id}`, { ...resultDetails, error: error.message }));
-                                console.error(`PlanExecutor: Error or timeout waiting for result of sub_task_id ${sub_task_id} (Stage ${stageIndex}):`, error.message);
-                                resolve({ sub_task_id, narrative_step: stepNarrative, tool_name: taskMessage.tool_name, sub_task_input: taskMessage.sub_task_input, assigned_agent_role: taskMessage.assigned_agent_role, status: "FAILED", error_details: { message: error.message } });
-                            } else if (resultMsg) {
-                                const resultDataPreview = typeof resultMsg.result_data === 'string' ? resultMsg.result_data.substring(0,100) + '...' : String(resultMsg.result_data);
-                                journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_RECEIVED", `Result received for SubTaskID: ${sub_task_id}, Status: ${resultMsg.status}`, { ...resultDetails, status: resultMsg.status, agentRole: resultMsg.worker_agent_role, resultDataPreview, errorDetails: resultMsg.error_details }));
-                                if (resultMsg.sub_task_id === sub_task_id) {
-                                    console.log(`PlanExecutor: Received result for sub_task_id ${sub_task_id} (Stage ${stageIndex}). Status: ${resultMsg.status}`);
-                    resolve({
-                        sub_task_id,
-                        stepId: taskMessage.stepId, // Ensure stepId is part of the resolved object
-                        narrative_step: stepNarrative,
-                        tool_name: taskMessage.tool_name,
-                        sub_task_input: subTaskDefinition.sub_task_input, // original input for context
-                        assigned_agent_role: taskMessage.assigned_agent_role,
-                        status: resultMsg.status,
-                        result_data: resultMsg.result_data,
-                        error_details: resultMsg.error_details
-                    });
-                                } else {
-                    const errorMessage = `Critical - Mismatched sub_task_id. Expected ${sub_task_id}, got ${resultMsg.sub_task_id} (StepID: ${taskMessage.stepId})`;
-                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_RESULT_ERROR", errorMessage, { ...resultDetails, stepId: taskMessage.stepId, expectedSubTaskId: sub_task_id, receivedSubTaskId: resultMsg.sub_task_id }));
-                                    console.error(`PlanExecutor: ${errorMessage} for parent_task_id ${parentTaskId} (Stage ${stageIndex}).`);
-                    resolve({
-                        sub_task_id,
-                        stepId: taskMessage.stepId,
-                        narrative_step: stepNarrative,
-                        tool_name: taskMessage.tool_name,
-                        sub_task_input: subTaskDefinition.sub_task_input,
-                        assigned_agent_role: taskMessage.assigned_agent_role,
-                        status: "FAILED",
-                        error_details: { message: "Mismatched sub_task_id in result processing.", details: errorMessage }
-                    });
-                                }
-                            }
-                        }, sub_task_id);
-                    });
-                    stageSubTaskPromises.push(subTaskPromise);
-                }
+            // Append results from the executed stage to the overall executionContext
+            if (stageResult.stageContextEntries) {
+                executionContext.push(...stageResult.stageContextEntries);
             }
 
-            const stageResults = await Promise.all(stageSubTaskPromises);
-            const stageContextEntries = [];
-            let firstFailedStepErrorDetails = null;
-
-            for (let j = 0; j < stageResults.length; j++) {
-                const resultOfSubTask = stageResults[j]; // This now includes stepId
-                const originalSubTaskDef = currentStageTaskDefinitions[j]; // This is the definition from the plan
-
-                const subTaskIdForResult = resultOfSubTask.sub_task_id;
-                const stepIdForResult = resultOfSubTask.stepId || originalSubTaskDef.stepId; // Prefer stepId from result if available (e.g. for internally generated failures)
-
-                let processedData = resultOfSubTask.result_data;
-                const summarizationLogDetails = { parentTaskId, stageIndex, subTaskId: subTaskIdForResult, stepId: stepIdForResult, narrativeStep: resultOfSubTask.narrative_step };
-
-                if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
-                    (resultOfSubTask.assigned_agent_role !== "Orchestrator" ||
-                     (resultOfSubTask.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "ExploreSearchResults"))) { // eslint-disable-line no-undef
-                    journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, summarizationLogDetails));
-                    const originalDataForPreview = resultOfSubTask.result_data;
-                    try {
-                        const summary = await this._summarizeStepData(resultOfSubTask.result_data, userTaskString, resultOfSubTask.narrative_step, subTaskIdForResult, parentTaskId);
-                        if (summary !== resultOfSubTask.result_data) {
-                             journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_SUCCESS", `Successfully summarized data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, { ...summarizationLogDetails, summarizedDataPreview: String(summary).substring(0,100) + "..."}));
-                        }
-                        processedData = summary;
-                    } catch (summarizationError) {
-                        journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_FAILED", `Summarization failed for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, { ...summarizationLogDetails, errorMessage: summarizationError.message }));
-                         console.error(`PlanExecutor: Error during _summarizeStepData call for SubTaskID ${subTaskIdForResult} (StepID: ${stepIdForResult}): ${summarizationError.message}`);
-                        processedData = originalDataForPreview;
-                    }
-                }
-
-                const contextEntry = {
-                    stepId: stepIdForResult, // Ensure stepId is in contextEntry
-                    narrative_step: resultOfSubTask.narrative_step || originalSubTaskDef.narrative_step,
-                    assigned_agent_role: resultOfSubTask.assigned_agent_role || originalSubTaskDef.assigned_agent_role,
-                    tool_name: resultOfSubTask.tool_name || originalSubTaskDef.tool_name,
-                    sub_task_input: originalSubTaskDef.sub_task_input, // Always store the original input with @-references
-                    status: resultOfSubTask.status,
-                    processed_result_data: processedData,
-                    raw_result_data: resultOfSubTask.result_data,
-                    error_details: resultOfSubTask.error_details,
-                    sub_task_id: subTaskIdForResult
-                };
-                stageContextEntries.push(contextEntry);
-
-                // Populate stepOutputs for reference resolution
-                if (contextEntry.stepId) {
-                    // eslint-disable-next-line security/detect-object-injection -- contextEntry.stepId is a UUID or plan-defined ID. Assigning to stepOutputs map.
-                    stepOutputs[contextEntry.stepId] = {
-                        status: contextEntry.status,
-                        result_data: contextEntry.raw_result_data,
-                        processed_result_data: contextEntry.processed_result_data,
-                        error_details: contextEntry.error_details
-                        // Note: partial_errors from ExploreSearchResults are not stored in stepOutputs directly,
-                        // as they are specific to that tool's execution instance.
-                        // They are processed below to be added to collectedErrors for CWC.
-                    };
-                }
-
-                // Process partial_errors from ExploreSearchResults
-                if (contextEntry.tool_name === "ExploreSearchResults" &&
-                    resultOfSubTask.partial_errors &&
-                    resultOfSubTask.partial_errors.length > 0) {
-
-                    journalEntries.push(this._createJournalEntry(
-                        "EXECUTION_STEP_PARTIAL_ERRORS",
-                        `Step '${contextEntry.narrative_step}' (Tool: ${contextEntry.tool_name}, StepID: ${contextEntry.stepId}) completed with ${resultOfSubTask.partial_errors.length} partial error(s) while processing URLs.`,
-                        {
-                            parentTaskId,
-                            stageIndex: stageIndex,
-                            subTaskId: contextEntry.sub_task_id,
-                            stepId: contextEntry.stepId,
-                            partialErrorCount: resultOfSubTask.partial_errors.length,
-                            errors: resultOfSubTask.partial_errors
-                        }
-                    ));
-
-                    for (const partialErr of resultOfSubTask.partial_errors) {
-                        const encounteredErrorEntry = {
-                            errorId: uuidv4(),
-                            sourceStepNarrative: `${contextEntry.narrative_step} (processing URL: ${partialErr.url || 'Unknown URL'})`,
-                            sourceToolName: contextEntry.tool_name,
-                            // subToolName: "ReadWebpageTool", // Optional: if we want this level of detail
-                            errorMessage: partialErr.errorMessage,
-                            timestamp: new Date().toISOString()
-                        };
-                        collectedErrors.push(encounteredErrorEntry);
-                    }
-                }
-
-
-                const logDetails = { parentTaskId, stageIndex, subTaskId: contextEntry.sub_task_id, stepId: contextEntry.stepId, narrativeStep: contextEntry.narrative_step, toolName: contextEntry.tool_name, agentRole: contextEntry.assigned_agent_role };
-                const dataPreviewForLog = contextEntry.processed_result_data !== undefined ? contextEntry.processed_result_data : contextEntry.raw_result_data;
-
-                if (contextEntry.status === "COMPLETED") {
-                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_COMPLETED", `Step completed: ${contextEntry.narrative_step}`, { ...logDetails, processedResultDataPreview: String(dataPreviewForLog).substring(0, 100) + "..." }));
-
-                    // Collect Key Finding for CurrentWorkingContext
-                    const findingData = contextEntry.processed_result_data || contextEntry.raw_result_data;
-                    if (findingData || (typeof findingData === 'boolean' || typeof findingData === 'number')) { // Ensure data is not null/undefined, allow boolean/numbers
-                        let dataToStore = findingData;
-                        const MAX_FINDING_DATA_LENGTH = 500;
-                        if (typeof findingData === 'string' && findingData.length > MAX_FINDING_DATA_LENGTH) {
-                            dataToStore = findingData.substring(0, MAX_FINDING_DATA_LENGTH) + "...";
-                        } else if (typeof findingData === 'object') {
-                            // Optionally stringify and truncate objects if they can be very large
-                            // For now, keeping small objects as is.
-                            // dataToStore = JSON.stringify(findingData);
-                            // if (dataToStore.length > MAX_FINDING_DATA_LENGTH) dataToStore = dataToStore.substring(0, MAX_FINDING_DATA_LENGTH) + "...";
-                        }
-                        const keyFinding = {
-                            findingId: uuidv4(),
-                            sourceStepNarrative: contextEntry.narrative_step,
-                            sourceToolName: contextEntry.tool_name,
-                            data: dataToStore,
-                            timestamp: new Date().toISOString()
-                        };
-                        collectedKeyFindings.push(keyFinding);
-                    }
-
-                } else if (contextEntry.status === "FAILED") {
-                    journalEntries.push(this._createJournalEntry("EXECUTION_STEP_FAILED", `Step failed: ${contextEntry.narrative_step}`, { ...logDetails, errorDetails: contextEntry.error_details }));
-                    if (!firstFailedStepErrorDetails) { // This is the first failure in the stage that we're processing
-                        firstFailedStepErrorDetails = contextEntry.error_details || { message: "Unknown error in failed step." };
-                        // Populate failedStepDetails with comprehensive information
-                        failedStepDetails = {
-                            sub_task_id: contextEntry.sub_task_id,
-                            stepId: contextEntry.stepId, // Add stepId here
-                            narrative_step: contextEntry.narrative_step,
-                            tool_name: contextEntry.tool_name,
-                            assigned_agent_role: contextEntry.assigned_agent_role,
-                            sub_task_input: contextEntry.sub_task_input,
-                            error_details: contextEntry.error_details
-                        };
-                        // Ensure sub_task_id is part of firstFailedStepErrorDetails if it was missing before, for compatibility with existing logging
-                        if (!firstFailedStepErrorDetails.sub_task_id && contextEntry.sub_task_id) { // This sub_task_id is the uuid for the execution instance
-                            firstFailedStepErrorDetails.sub_task_id = contextEntry.sub_task_id;
-                        }
-                         // Add stepId to firstFailedStepErrorDetails as well for consistency if needed elsewhere
-                        if (!firstFailedStepErrorDetails.stepId && contextEntry.stepId) {
-                            firstFailedStepErrorDetails.stepId = contextEntry.stepId;
-                        }
-                    }
-                    // Collect Error for CurrentWorkingContext
-                    if (contextEntry.error_details) {
-                        const encounteredError = {
-                            errorId: uuidv4(), // Add an ID for errors as well
-                            sourceStepNarrative: contextEntry.narrative_step,
-                            sourceToolName: contextEntry.tool_name,
-                            errorMessage: contextEntry.error_details.message || JSON.stringify(contextEntry.error_details),
-                            timestamp: new Date().toISOString()
-                        };
-                        collectedErrors.push(encounteredError);
-                    }
-                }
-            }
-            executionContext.push(...stageContextEntries);
-
-            let stageFailed = false;
-            for (const entry of stageContextEntries) {
-                if (entry.status === "FAILED") {
-                    console.error(`PlanExecutor: Sub-task ${entry.sub_task_id} ("${entry.narrative_step}") failed in Stage ${stageIndex}. Halting further stages.`);
-                    overallSuccess = false;
-                    stageFailed = true;
-                    break;
-                }
-            }
-
-            if (stageFailed) {
-                const reason = firstFailedStepErrorDetails ?
-                               `Step ${firstFailedStepErrorDetails.sub_task_id || originalSubTaskDef.sub_task_id} ("${firstFailedStepErrorDetails.narrative_step || originalSubTaskDef.narrative_step}") failed: ${firstFailedStepErrorDetails.message || 'Unknown error'}` : // eslint-disable-line no-undef
-                               "A step in the stage failed."; // eslint-disable-line no-undef
-                journalEntries.push(this._createJournalEntry("EXECUTION_STAGE_FAILED", `Stage ${stageIndex} failed. Reason: ${reason}. Halting plan execution.`, { parentTaskId, stageIndex, reason: firstFailedStepErrorDetails }));
-                break;
+            if (!stageResult.stageSuccess) {
+                overallSuccess = false;
+                failedStepDetails = stageResult.failedStepDetails; // Capture details of the first failed step
+                const reason = failedStepDetails ?
+                               `Step ${failedStepDetails.stepId || failedStepDetails.sub_task_id} ("${failedStepDetails.narrative_step}") failed: ${failedStepDetails.error_details.message || 'Unknown error'}` :
+                               "A step in the stage failed.";
+                journalEntries.push(this._createJournalEntry("EXECUTION_STAGE_FAILED", `Stage ${stageIndex} failed. Reason: ${reason}. Halting plan execution.`, { parentTaskId, stageIndex, reason: failedStepDetails }));
+                console.error(`PlanExecutor: Stage ${stageIndex} failed. Halting further stages.`);
+                break; // Halt plan execution
             } else {
                 journalEntries.push(this._createJournalEntry("EXECUTION_STAGE_COMPLETED", `Stage ${stageIndex} completed successfully.`, { parentTaskId, stageIndex }));
+                console.log(`PlanExecutor: Stage ${stageIndex} completed successfully.`);
             }
-            console.log(`PlanExecutor: Stage ${stageIndex} completed successfully.`);
         }
 
         journalEntries.push(this._createJournalEntry(
@@ -725,22 +703,37 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
         ));
         console.log(`PlanExecutor: Finished processing all stages for parentTaskId: ${parentTaskId}. Overall success: ${overallSuccess}`);
 
-        // Check for pre-synthesized final answer
-        if (overallSuccess && executionContext.length > 0) {
-            // eslint-disable-next-line security/detect-object-injection -- executionContext is an array, accessing last element with known properties.
-            const lastStepContext = executionContext[executionContext.length - 1];
-            // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'status' property.
-            if (lastStepContext.status === "COMPLETED" &&
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'assigned_agent_role' property.
-                lastStepContext.assigned_agent_role === "Orchestrator" &&
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'tool_name' property.
-                lastStepContext.tool_name === "LLMStepExecutor" && // Changed from GeminiStepExecutor
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input' property.
-                lastStepContext.sub_task_input &&
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known 'sub_task_input.isFinalAnswer' property.
-                lastStepContext.sub_task_input.isFinalAnswer === true) { // Check on original input
+        let finalAnswerResult = { finalAnswerOutput: null, finalAnswerWasSynthesized: false };
+        if (overallSuccess) {
+            finalAnswerResult = this._extractFinalAnswer(executionContext, journalEntries, parentTaskId);
+        }
 
-                // eslint-disable-next-line security/detect-object-injection -- lastStepContext is from executionContext array, accessing known properties 'processed_result_data' and 'raw_result_data'.
+        return {
+            success: overallSuccess,
+            executionContext,
+            journalEntries,
+            updatesForWorkingContext: {
+                keyFindings: collectedKeyFindings,
+                errorsEncountered: collectedErrors
+            },
+            finalAnswer: finalAnswerResult.finalAnswerOutput,
+            finalAnswerSynthesized: finalAnswerResult.finalAnswerWasSynthesized,
+            failedStepDetails: failedStepDetails // Add the new field here
+        };
+    }
+
+    _extractFinalAnswer(executionContext, journalEntries, parentTaskId) {
+        let finalAnswerOutput = null;
+        let finalAnswerWasSynthesized = false;
+
+        if (executionContext.length > 0) {
+            const lastStepContext = executionContext[executionContext.length - 1];
+            if (lastStepContext.status === "COMPLETED" &&
+                lastStepContext.assigned_agent_role === "Orchestrator" &&
+                lastStepContext.tool_name === "LLMStepExecutor" &&
+                lastStepContext.sub_task_input &&
+                lastStepContext.sub_task_input.isFinalAnswer === true) {
+
                 finalAnswerOutput = lastStepContext.processed_result_data || lastStepContext.raw_result_data;
                 finalAnswerWasSynthesized = true;
 
@@ -757,19 +750,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 console.log(`PlanExecutor: Final answer identified as pre-synthesized by step: "${lastStepContext.narrative_step}" (StepID: ${lastStepContext.stepId})`);
             }
         }
-
-        return {
-            success: overallSuccess,
-            executionContext,
-            journalEntries,
-            updatesForWorkingContext: {
-                keyFindings: collectedKeyFindings,
-                errorsEncountered: collectedErrors
-            },
-            finalAnswer: finalAnswerOutput,
-            finalAnswerSynthesized: finalAnswerWasSynthesized,
-            failedStepDetails: failedStepDetails // Add the new field here
-        };
+        return { finalAnswerOutput, finalAnswerWasSynthesized };
     }
 }
 

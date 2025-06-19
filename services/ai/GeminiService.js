@@ -1,4 +1,6 @@
 // File: services/ai/GeminiService.js
+const fs = require('fs');
+const path = require('path');
 const BaseAIService = require('../BaseAIService.js'); // Corrected path
 const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@google/generative-ai");
 
@@ -17,6 +19,21 @@ class GeminiService extends BaseAIService {
     constructor(apiKey, baseConfig = {}) {
         super(apiKey, baseConfig); // baseConfig is now stored in this.baseConfig by super
         this.genAI = null; // Initialize GoogleGenerativeAI client instance
+        this.tokenizerWarningShown = false;
+
+        this.modelSpecs = null;
+        try {
+            const specsPath = path.join(__dirname, '..', '..', 'config', 'ai_model_specs.json'); // Path from services/ai/ to config/
+            if (fs.existsSync(specsPath)) {
+                const specsContent = fs.readFileSync(specsPath, 'utf8');
+                this.modelSpecs = JSON.parse(specsContent);
+            } else {
+                console.warn(`GeminiService: Model specs file not found at ${specsPath}. Using hardcoded defaults or baseConfig only for context windows.`);
+            }
+        } catch (e) {
+            console.error(`GeminiService: Error loading or parsing model specs file: ${e.message}.`);
+            this.modelSpecs = null; // Ensure modelSpecs is null in case of error
+        }
 
         if (!this._getApiKey() && !process.env.GEMINI_API_KEY) { // Check resolved API key
             console.warn("GeminiService: API key is not provided directly or via GEMINI_API_KEY env var. Service may use stubbed responses or fail on client init if key becomes mandatory for SDK.");
@@ -112,20 +129,27 @@ class GeminiService extends BaseAIService {
 
         try {
             const modelInstance = this.genAI.getGenerativeModel({ model: modelName });
-            const result = await modelInstance.generateContent(requestPayload);
-            const response = result.response; // await not needed here as per SDK v0.8.0
+
+            const requestFn = () => modelInstance.generateContent(requestPayload);
+            const result = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
+            const response = result.response;
 
             if (response && typeof response.text === 'function') {
                 return response.text();
             } else if (response?.candidates?.[0]?.content?.parts?.[0]?.text) {
                 return response.candidates[0].content.parts[0].text;
             } else {
-                console.warn(`GeminiService (${modelName}): API response format error. No text found. Response:`, JSON.stringify(response, null, 2));
-                throw new Error("Gemini API response format error: No text content found.");
+                console.warn(`GeminiService (${modelName}): API response format error (after retries). No text found. Response:`, JSON.stringify(response, null, 2));
+                throw new Error("Gemini API response format error (after retries): No text content found.");
             }
         } catch (error) {
-            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent):`, error.message);
-            throw new Error(`Gemini API Error: ${error.message}`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (generateContent after retries):`, error.message, error.stack);
+            throw new Error(`Gemini API Error (after retries): ${error.message}`);
         }
     }
 
@@ -182,14 +206,20 @@ class GeminiService extends BaseAIService {
 
             try {
                 const modelInstance = this.genAI.getGenerativeModel({ model: modelName });
-                const result = await modelInstance.generateContent(requestPayload);
+                const requestFn = () => modelInstance.generateContent(requestPayload);
+                const result = await this._executeRequestWithRetry(
+                    requestFn,
+                    this.baseConfig.maxRetries || 3,
+                    this.baseConfig.initialRetryDelayMs || 1000,
+                    this.getServiceName()
+                );
                 const response = result.response;
                 if (response && typeof response.text === 'function') return response.text();
                 if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
-                throw new Error("Gemini API chat response format error (with cache): No text content found.");
+                throw new Error("Gemini API chat response format error (with cache, after retries): No text content found.");
             } catch (error) {
-                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat):`, error.message);
-                throw new Error(`Gemini API Error (with cache for chat): ${error.message}`);
+                console.error(`GeminiService (${modelName}): Error during generateContent (with cache for chat, after retries):`, error.message, error.stack);
+                throw new Error(`Gemini API Error (with cache for chat, after retries): ${error.message}`);
             }
         }
 
@@ -239,64 +269,79 @@ class GeminiService extends BaseAIService {
 
 
             const chat = modelInstance.startChat({ history: messagesForChatSDK });
-            const result = await chat.sendMessage(lastUserMessage);
+
+            const requestFn = () => chat.sendMessage(lastUserMessage);
+            const result = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
             const response = result.response;
 
             if (response && typeof response.text === 'function') return response.text();
             if (response?.candidates?.[0]?.content?.parts?.[0]?.text) return response.candidates[0].content.parts[0].text;
-            throw new Error("Gemini API chat response format error: No text content found.");
+            throw new Error("Gemini API chat response format error (after retries): No text content found.");
         } catch (error) {
-            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat):`, error.message);
-            throw new Error(`Gemini API Chat Error: ${error.message}`);
+            console.error(`GeminiService (${modelName}): Error during Gemini API call (sendMessage/startChat, after retries):`, error.message, error.stack);
+            throw new Error(`Gemini API Chat Error (after retries): ${error.message}`);
         }
     }
 
     /**
      * @override
      */
-    getTokenizer() {
-        // Gemini's Node SDK doesn't expose a direct synchronous tokenizer.
-        // `model.countTokens()` is async. For synchronous needs (like in MemoryManager's assembleMegaContext),
-        // a placeholder or library like 'gpt-tokenizer' (if compatible enough) might be used.
-        // For now, providing a very basic approximation.
-        console.warn("GeminiService.getTokenizer: Using approximate word count as tokenizer. For precise token counts, use asynchronous model.countTokens() where possible.");
+    getTokenizer(modelName = null) { // modelName is not used by current Gemini sync tokenizer
+        if (!this.tokenizerWarningShown) {
+            console.warn(`GeminiService.getTokenizer: Using approximate word count as tokenizer (for model: ${modelName || this.baseConfig.defaultModel || 'unknown'}). For precise token counts, use asynchronous model.countTokens() where possible or ensure context is managed conservatively.`);
+            this.tokenizerWarningShown = true;
+        }
         return (text) => {
             if (!text) return 0;
-            return text.split(/\\s+/).length; // Simple word count
+            return text.split(/\s+/).filter(Boolean).length; // Более точный подсчет слов
         };
     }
 
     /**
      * @override
      */
-    getMaxContextTokens() {
-        // Security: Use the already validated modelName from constructor or default for context window lookup.
-        // Assuming this.baseConfig.defaultModel is from a trusted source (config).
-        // If model could be passed to this function, it would need validation here too.
-        const currentModelForContext = this.baseConfig.defaultModel || 'gemini-pro';
-        // Known context windows ( octubre 2023 values, check Gemini docs for updates)
-        // Gemini 1.5 Pro: 1M tokens (1,048,576). Effective usable might be less for generation.
-        // Gemini 1.0 Pro: 30720 input + 2048 output = 32768 total.
-        // For simplicity, returning the input token limit or a known total.
-        const modelContextWindows = {
-            'gemini-1.5-pro-latest': 1048576,
-            'gemini-1.5-pro': 1048576,
-            'gemini-1.5-flash-latest': 1048576,
-            'gemini-1.5-flash': 1048576,
-            'gemini-pro': 30720, // Common context window for Gemini 1.0 Pro
-            'gemini-1.0-pro': 30720,
-            'gemini-1.0-pro-vision-latest': 12288, // Smaller for vision
-             // Fallback
-            'default': 30720
-        };
+    getMaxContextTokens(modelName = null) {
+        const modelNameToUse = modelName || this.baseConfig.defaultModel || 'default';
+        // Абсолютный fallback, если ничего не найдено или не загружено
+        let contextWindow = 30720;
 
-        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig (assumed safe) or validated against allowedModels.
-        let effectiveLimit = modelContextWindows[currentModelForContext] || modelContextWindows['default'];
-        // For 1.5 models, often a smaller practical limit is used for context assembly due to cost/performance.
-        if (currentModelForContext.startsWith('gemini-1.5')) {
-            effectiveLimit = this.baseConfig?.maxTokensForContext || 131072; // e.g. 128k as a practical limit
+        if (this.modelSpecs && this.modelSpecs.gemini) {
+            const serviceSpecs = this.modelSpecs.gemini;
+            let specToUse = null;
+
+            if (serviceSpecs[modelNameToUse]) {
+                specToUse = serviceSpecs[modelNameToUse];
+            } else if (serviceSpecs.default) {
+                specToUse = serviceSpecs.default;
+                console.warn(`GeminiService.getMaxContextTokens: Model '${modelNameToUse}' not found in specs. Using default spec.`);
+            } else {
+                console.warn(`GeminiService.getMaxContextTokens: Model '${modelNameToUse}' and default spec not found. Using hardcoded fallback: ${contextWindow}`);
+            }
+
+            if (specToUse) {
+                // Gemini 1.5 модели могут иметь 'effectiveContextWindow' для практического использования
+                if (modelNameToUse.startsWith('gemini-1.5') && specToUse.effectiveContextWindow) {
+                    contextWindow = specToUse.effectiveContextWindow;
+                } else if (specToUse.contextWindow) {
+                    contextWindow = specToUse.contextWindow;
+                } else {
+                     console.warn(`GeminiService.getMaxContextTokens: contextWindow not defined for '${modelNameToUse}' or default in specs. Using hardcoded fallback: ${contextWindow}`);
+                }
+            }
+        } else {
+            console.warn(`GeminiService.getMaxContextTokens: Model specs not loaded. Using hardcoded fallback: ${contextWindow}`);
         }
-        return effectiveLimit;
+        // Дополнительное применение this.baseConfig.maxTokensForContext для Gemini 1.5 моделей, если оно было специфично задано
+        if (modelNameToUse.startsWith('gemini-1.5') && this.baseConfig?.maxTokensForContext && this.baseConfig.maxTokensForContext < contextWindow) {
+            // console.log(`GeminiService.getMaxContextTokens: Overriding spec-defined context window for ${modelNameToUse} with baseConfig.maxTokensForContext: ${this.baseConfig.maxTokensForContext}`);
+            contextWindow = this.baseConfig.maxTokensForContext;
+        }
+        return contextWindow;
     }
 
     /**

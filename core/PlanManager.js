@@ -281,6 +281,151 @@ class PlanManager {
         }
     }
 
+    _buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber, replanErrorHistory = null) {
+        let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`; // This line is updated by the new instructions, but we keep it as a base
+        revisionContext = ""; // Start fresh for the new instruction format
+
+        // The new instruction format incorporates revisionAttemptNumber directly.
+        // revisionContext += `Original User Task: '${userTaskString}'\n\n`; // Original task is part of the new instructions
+
+        if (currentCWC) { // currentCWC no longer has keyFindings or errorsEncountered directly
+            revisionContext += "Current Working Context (CWC) Summary:\n";
+            revisionContext += `Overall Progress: ${currentCWC.summaryOfProgress || 'Not available.'}\n`;
+            revisionContext += "---\n";
+        }
+
+        if (latestKeyFindings && latestKeyFindings.length > 0) {
+            revisionContext += `Recent Key Findings (up to ${latestKeyFindings.length}):
+${JSON.stringify(latestKeyFindings, null, 2)}
+---
+`;
+        }
+        if (latestErrors && latestErrors.length > 0) {
+            revisionContext += `Recent Errors Encountered (up to ${latestErrors.length}):
+${JSON.stringify(latestErrors, null, 2)}
+---
+`;
+        }
+
+        if (failedStepInfo) {
+            revisionContext += "Information about the failed step:\n";
+            revisionContext += `Narrative: ${failedStepInfo.narrative_step || 'N/A'}\n`;
+            revisionContext += `Agent Role: ${failedStepInfo.assigned_agent_role || 'N/A'}\n`;
+            revisionContext += `Tool: ${failedStepInfo.tool_name || 'N/A'}\n`;
+            revisionContext += `Input: ${JSON.stringify(failedStepInfo.sub_task_input, null, 2)}\n`;
+            revisionContext += `Error Message: ${failedStepInfo.errorMessage || 'N/A'}\n`;
+            revisionContext += "---\n";
+        }
+
+        if (remainingPlanStages && remainingPlanStages.length > 0) {
+            try {
+                const remainingPlanString = JSON.stringify(remainingPlanStages, null, 2);
+                if (remainingPlanString.length < 2000) { // Keep context concise
+                    revisionContext += `Remaining plan stages from previous attempt:\n${remainingPlanString}\n---\n`;
+                }
+            } catch (e) { console.warn("PlanManager: Could not stringify remainingPlanStages for revision prompt."); }
+        }
+
+        if (executionContextSoFar && executionContextSoFar.length > 0) {
+            try {
+                // Limit to last 3-5 steps to keep context manageable, assuming more recent is more relevant for immediate failure.
+                const recentContextString = JSON.stringify(executionContextSoFar.slice(-5), null, 2); // Changed from -3 to -5 for a bit more context
+                revisionContext += `Recent execution context (last ${Math.min(5, executionContextSoFar.length)} steps/results):\n${recentContextString}\n---\n`;
+            } catch (e) { console.warn("PlanManager: Could not stringify executionContextSoFar for revision prompt."); }
+        }
+
+        if (replanErrorHistory && replanErrorHistory.length > 0) {
+            revisionContext += "History of attempts in the current replanning cycle:\n";
+            for (const attempt of replanErrorHistory) {
+                revisionContext += `- Attempt ${attempt.attemptInCycle}: Failed on step "${attempt.failedStepNarrative}" with error "${attempt.errorMessage}"\n`;
+            }
+            revisionContext += "---\n";
+        }
+
+        revisionContext += `Instruction: This is replanning attempt number ${revisionAttemptNumber}.
+    You are provided with:
+    1. The original user task.
+    2. Available agent capabilities and tools.
+    3. Information about the most recent failed step ('Information about the failed step').
+    4. History of attempts in the current replanning cycle (if any, under 'History of attempts in the current replanning cycle'). This shows recent errors for the same underlying issue.
+    5. Broader execution context and previously successful steps (under 'Recent execution context').
+    6. Potentially, parts of the plan that were remaining before this failure.
+
+    Your goal is to generate a revised plan to achieve the original user task.
+
+    CRITICAL CONSIDERATIONS FOR REPLANNING:
+    - Analyze the 'Information about the failed step' and the 'History of attempts in the current replanning cycle' very carefully.
+    - If the same step or similar errors are repeating in the current cycle, DO NOT simply retry the same action. You MUST propose a significantly different approach to overcome the obstacle OR determine if the task is unachievable.
+    - If you've tried different approaches for the same obstacle and it's still failing (as shown in the history), it's highly likely the task is unachievable with the current capabilities.
+
+    ACTIONS TO TAKE:
+    A. If you can devise a NEW, genuinely different strategy to overcome the specific error(s) encountered:
+        - Generate a new plan (or modify the remaining plan).
+        - Ensure your new plan explicitly addresses the reason for the previous failure(s).
+        - Leverage any useful results from 'Recent execution context'.
+    B. If, after considering the failure history (especially repeated failures on the same step/issue), you determine the task is unachievable or cannot be reliably fixed:
+        - Return an empty JSON array: []
+        - Alternatively, return a plan with a single step using 'LLMStepExecutor' with 'isFinalAnswer: true'. The prompt for this step should clearly explain to the user why the task is considered unachievable, referencing the persistent errors. Example: { "prompt": "The task cannot be completed because attempts to process X consistently fail due to Y. All available methods have been exhausted.", "isFinalAnswer": true }.
+
+    Твой новый план должен (если ты не выбираешь вариант B):
+    а) Учитывать причину предыдущего сбоя (из 'Information about the failed step' и 'History of attempts...').
+    б) Предложить конкретные изменения или АЛЬТЕРНАТИВНЫЕ шаги для обхода проблемы. Не повторяй слепо предыдущие неудачные действия.
+    в) Если проблема не в конкретном шаге, а в общей стратегии, ПЕРЕСМОТРЕТЬ СТРАТЕГИЮ.
+    г) Если предыдущие шаги (из 'Recent execution context') дали полезные результаты, старайся их ИСПОЛЬЗОВАТЬ в новом плане, чтобы не делать лишнюю работу.
+    д) НЕ ЗАЦИКЛИВАЙСЯ на создании неработающих планов. Если после ${revisionAttemptNumber} попыток (и особенно если история текущего цикла показывает повторы) задача не решается, признай ее невыполнимой (вариант B).
+    `;
+        return revisionContext;
+    }
+
+    _buildBasePlanningPrompt(formattedAgentCapabilitiesString, orchestratorSpecialActionsDescription, planFormatInstructions, PRINCIPLES_OF_GOOD_PLANNING) {
+        return `
+${PRINCIPLES_OF_GOOD_PLANNING}
+
+Available agent capabilities:
+---
+${formattedAgentCapabilitiesString}
+---
+${orchestratorSpecialActionsDescription}
+---
+${planFormatInstructions}`;
+    }
+
+    _getLLMCallParams(memoryContext, originalPlanningPrompt, userTaskString, isRevision, revisionAttemptNumber, basePromptSection) {
+        let llmCallPromptToUse = originalPlanningPrompt;
+
+        // Determine the model for the LLM call, defaulting appropriately
+        let defaultModelForService = 'gpt-4'; // General default
+        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService') {
+            defaultModelForService = 'gemini-1.5-pro-latest'; // Gemini specific default
+        }
+        const paramsForLLM = {
+            model: (this.aiService.baseConfig && this.aiService.baseConfig.planningModel) || defaultModelForService
+        };
+
+        // Check if running with GeminiService and if OrchestratorAgent has prepared a CachedContent.
+        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService' &&
+            memoryContext && memoryContext.isMegaContextCachedByGemini === true &&
+            memoryContext.geminiCachedContentName) {
+
+            console.log(`PlanManager: Gemini CachedContent (Name: ${memoryContext.geminiCachedContentName}) found. Using short prompt for planning.`);
+
+            if (isRevision) {
+                llmCallPromptToUse = `Original User Task: '${userTaskString}'.
+This is a replanning attempt (Attempt #${revisionAttemptNumber}).
+Detailed context including previous attempt's failure, execution history, CWC, key findings, and errors has been provided in the cached content.
+Instruction: Based on ALL available information (original task, cached context, and the specific details of the previous failure), generate a revised plan.
+${basePromptSection}`;
+            } else {
+                llmCallPromptToUse = `User Task: '${userTaskString}'.
+The necessary context (task definition, uploaded files, key findings, chat history) has been provided and is cached.
+${basePromptSection}
+Based on the cached context and the user task, generate a plan.`;
+            }
+            paramsForLLM.cachedContentName = memoryContext.geminiCachedContentName;
+        }
+        return { llmCallPromptToUse, paramsForLLM };
+    }
+
     async getPlan(
         userTaskString,
         knownAgentRoles,
@@ -293,7 +438,8 @@ class PlanManager {
         isRevision = false,
         revisionAttemptNumber = 0,
         latestKeyFindings = [], // New parameter
-        latestErrors = []      // New parameter
+        latestErrors = [],      // New parameter
+        replanErrorHistory = null // New parameter
     ) {
         let initialPromptSection = `User task: '${userTaskString}'.`;
         if (memoryContext && memoryContext.taskDefinition && memoryContext.taskDefinition !== userTaskString) {
@@ -499,90 +645,23 @@ Produce ONLY the JSON array of stages. Do not include any other text before or a
 `;
 
         if (isRevision) {
-            let revisionContext = `This is a replanning attempt (Attempt #${revisionAttemptNumber}) due to a failure in a previous execution.\n`;
-            revisionContext += `Original User Task: '${userTaskString}'\n\n`;
-
-            if (currentCWC) { // currentCWC no longer has keyFindings or errorsEncountered directly
-                revisionContext += "Current Working Context (CWC) Summary:\n";
-                revisionContext += `Overall Progress: ${currentCWC.summaryOfProgress || 'Not available.'}\n`;
-                revisionContext += "---\n";
-            }
-
-            if (latestKeyFindings && latestKeyFindings.length > 0) {
-                revisionContext += `Recent Key Findings (up to ${latestKeyFindings.length}):
-${JSON.stringify(latestKeyFindings, null, 2)}
----
-`;
-            }
-            if (latestErrors && latestErrors.length > 0) {
-                revisionContext += `Recent Errors Encountered (up to ${latestErrors.length}):
-${JSON.stringify(latestErrors, null, 2)}
----
-`;
-            }
-
-            if (failedStepInfo) {
-                revisionContext += "Information about the failed step:\n";
-                revisionContext += `Narrative: ${failedStepInfo.narrative_step || 'N/A'}\n`;
-                revisionContext += `Agent Role: ${failedStepInfo.assigned_agent_role || 'N/A'}\n`;
-                revisionContext += `Tool: ${failedStepInfo.tool_name || 'N/A'}\n`;
-                revisionContext += `Input: ${JSON.stringify(failedStepInfo.sub_task_input, null, 2)}\n`;
-                revisionContext += `Error Message: ${failedStepInfo.errorMessage || 'N/A'}\n`;
-                revisionContext += "---\n";
-            }
-
-            if (remainingPlanStages && remainingPlanStages.length > 0) {
-                try {
-                    const remainingPlanString = JSON.stringify(remainingPlanStages, null, 2);
-                    if (remainingPlanString.length < 2000) {
-                        revisionContext += `Remaining plan stages from previous attempt:\n${remainingPlanString}\n---\n`;
-                    }
-                } catch (e) { console.warn("PlanManager: Could not stringify remainingPlanStages for revision prompt."); }
-            }
-
-            if (executionContextSoFar && executionContextSoFar.length > 0) {
-                try {
-                    const recentContextString = JSON.stringify(executionContextSoFar.slice(-3), null, 2);
-                    revisionContext += `Recent execution context (last 3-5 steps/results):\n${recentContextString}\n---\n`;
-                } catch (e) { console.warn("PlanManager: Could not stringify executionContextSoFar for revision prompt."); }
-            }
-
-            revisionContext += `Instruction: Given all the information above (original task, capabilities, previous attempt's failure, context, and remaining plan if any), generate a revised plan to achieve the user's objective. You can modify the remaining plan, create a completely new plan, or decide if the task is unachievable. If the task seems unachievable or you cannot devise a recovery plan, return an empty JSON array [] or a plan with a single step explaining why it's not possible using LLMStepExecutor with isFinalAnswer: true.
-Твой новый план должен:
-а) Учитывать причину предыдущего сбоя (из 'Information about the failed step').
-б) Предложить конкретные изменения или альтернативные шаги для обхода проблемы.
-в) Если проблема не в конкретном шаге, а в общей стратегии, пересмотреть стратегию.
-г) Если предыдущие шаги (из 'Recent execution context') дали полезные результаты, старайся их использовать в новом плане, чтобы не делать лишнюю работу.
-д) Если задача действительно невыполнима даже после нескольких попыток, четко объясни это в финальном шаге через \`LLMStepExecutor\` с \`isFinalAnswer: true\`. Не зацикливайся на создании неработающих планов.`;
-
-            // New approach for revision:
+            const revisionPromptSection = this._buildRevisionContextPrompt(userTaskString, currentCWC, latestKeyFindings, latestErrors, failedStepInfo, remainingPlanStages, executionContextSoFar, revisionAttemptNumber, replanErrorHistory);
             let fullRevisionPromptBase;
-            // If megaContext is available, use it as the primary source of information for replanning.
-            // It contains a comprehensive snapshot of the task state (task def, uploaded files, findings, etc.).
-            // The existing revisionContext (failed step details, recent CWC, etc.) is appended to it.
+
             if (memoryContext && memoryContext.megaContext && typeof memoryContext.megaContext === 'string' && memoryContext.megaContext.trim() !== '') {
                 fullRevisionPromptBase = `${memoryContext.megaContext}
 
-${revisionContext}`; // Append specific revision details to the general megaContext.
-                sourcePrefix += "_with_megacontext"; // Indicate megaContext was used for logging/tracking.
+${revisionPromptSection}`;
+                sourcePrefix += "_with_megacontext";
             } else {
-                // Fallback: If megaContext is not available, use the older method of combining
-                // revisionContext with memoryContextPromptSection (summarized decisions, CWC snapshot).
-                fullRevisionPromptBase = `${revisionContext}${memoryContextPromptSection}`;
+                fullRevisionPromptBase = `${revisionPromptSection}${memoryContextPromptSection}`;
             }
-            planningPrompt = `${fullRevisionPromptBase}
-${PRINCIPLES_OF_GOOD_PLANNING}
-
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
-${orchestratorSpecialActionsDescription}
----
-${planFormatInstructions}`;
+            const basePromptSection = this._buildBasePlanningPrompt(formattedAgentCapabilitiesString, orchestratorSpecialActionsDescription, planFormatInstructions, PRINCIPLES_OF_GOOD_PLANNING);
+            planningPrompt = `${fullRevisionPromptBase}${basePromptSection}`;
 
         } else {
             // Logic for initial planning
+            const basePromptSection = this._buildBasePlanningPrompt(formattedAgentCapabilitiesString, orchestratorSpecialActionsDescription, planFormatInstructions, PRINCIPLES_OF_GOOD_PLANNING);
             // Check if a pre-assembled megaContext is provided in memoryContext.
             if (memoryContext && memoryContext.megaContext && typeof memoryContext.megaContext === 'string' && memoryContext.megaContext.trim() !== '') {
                 // If megaContext exists, it becomes the primary informational base for the planning prompt.
@@ -590,94 +669,31 @@ ${planFormatInstructions}`;
                 // We then append the userTaskString explicitly for emphasis, followed by standard planning instructions.
                 planningPrompt = `${memoryContext.megaContext}
 
-User Task (ensure this is addressed by the plan): '${userTaskString}'
-${PRINCIPLES_OF_GOOD_PLANNING}
-
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
-${orchestratorSpecialActionsDescription}
----
-${planFormatInstructions}`;
+User Task (ensure this is addressed by the plan): '${userTaskString}'${basePromptSection}`;
                 sourcePrefix += "_with_megacontext"; // Update source prefix for tracking.
             } else {
                 // Fallback to the original logic if megaContext is not available.
                 // This constructs the prompt from individual pieces like initialPromptSection (user task)
                 // and memoryContextPromptSection (summarized decisions, CWC snapshot).
-                planningPrompt = `${initialPromptSection}${memoryContextPromptSection}
-${PRINCIPLES_OF_GOOD_PLANNING}
-
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
-${orchestratorSpecialActionsDescription}
----
-${planFormatInstructions}`;
+                planningPrompt = `${initialPromptSection}${memoryContextPromptSection}${basePromptSection}`;
             }
         }
 
         let planJsonString;
-        let llmCallPrompt = planningPrompt; // Start with the fully constructed prompt
+        const basePromptSection = this._buildBasePlanningPrompt(formattedAgentCapabilitiesString, orchestratorSpecialActionsDescription, planFormatInstructions, PRINCIPLES_OF_GOOD_PLANNING);
 
-        // Determine the model for the LLM call, defaulting appropriately for Gemini or other services.
-        let defaultModelForService = 'gpt-4'; // General default
-        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService') {
-            defaultModelForService = 'gemini-1.5-pro-latest'; // Gemini specific default
-        }
-        const llmCallParams = {
-            model: (this.aiService.baseConfig && this.aiService.baseConfig.planningModel) || defaultModelForService
-        };
-
-        // Check if running with GeminiService and if OrchestratorAgent has prepared a CachedContent.
-        if (this.aiService.getServiceName && this.aiService.getServiceName() === 'GeminiService' &&
-            memoryContext && memoryContext.isMegaContextCachedByGemini === true &&
-            memoryContext.geminiCachedContentName) {
-
-            console.log(`PlanManager: Gemini CachedContent (Name: ${memoryContext.geminiCachedContentName}) found. Using short prompt for planning.`);
-
-            if (isRevision) {
-                // For revisions, the prompt needs to instruct the LLM to use the cached context
-                // while also considering the revision-specific details (failure, CWC, etc.).
-                // The 'revisionContext' variable already contains much of this, excluding the full megaContext.
-                // We assume 'userTaskString' is the most direct representation of the overall goal.
-                llmCallPrompt = `Original User Task: '${userTaskString}'.
-This is a replanning attempt (Attempt #${revisionAttemptNumber}).
-Detailed context including previous attempt's failure, execution history, CWC, key findings, and errors has been provided in the cached content.
-Instruction: Based on ALL available information (original task, cached context, and the specific details of the previous failure), generate a revised plan.
-${PRINCIPLES_OF_GOOD_PLANNING}
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
-${orchestratorSpecialActionsDescription}
----
-${planFormatInstructions}`;
-            } else {
-                // For initial planning with cached content.
-                llmCallPrompt = `User Task: '${userTaskString}'.
-The necessary context (task definition, uploaded files, key findings, chat history) has been provided and is cached.
-${PRINCIPLES_OF_GOOD_PLANNING}
-Available agent capabilities:
----
-${formattedAgentCapabilitiesString}
----
-${orchestratorSpecialActionsDescription}
----
-${planFormatInstructions}
-Based on the cached context and the user task, generate a plan.`;
-            }
-
-            llmCallParams.cachedContentName = memoryContext.geminiCachedContentName;
-            // sourcePrefix might already include "_with_megacontext" from earlier logic if megaContext string was present.
-            // This is acceptable as it indicates rich context was available, now via cache.
-        }
-        // If not using Gemini cache, llmCallPrompt remains the original long planningPrompt,
-        // and llmCallParams does not include cachedContentName.
+        // Determine the actual prompt and parameters for the LLM call
+        const { llmCallPromptToUse, paramsForLLM } = this._getLLMCallParams(
+            memoryContext,
+            planningPrompt, // This is the potentially long/full prompt
+            userTaskString,
+            isRevision,
+            revisionAttemptNumber,
+            basePromptSection // Pass basePromptSection for Gemini cache prompt reconstruction
+        );
 
         try {
-            planJsonString = await this.aiService.generateText(llmCallPrompt, llmCallParams);
+            planJsonString = await this.aiService.generateText(llmCallPromptToUse, paramsForLLM);
         } catch (llmError) {
             console.error(`PlanManager: Error from AI service during ${sourcePrefix} planning:`, llmError.message);
             return { success: false, message: `Failed to generate plan due to AI service error: ${llmError.message}`, source: `${sourcePrefix}_service_error`, rawResponse: null };

@@ -12,7 +12,10 @@
     // const MemoryManager = require('../core/MemoryManager.js'); // Removed as memoryManager instance is injected
     // const ConfigManager = require('../core/ConfigManager.js'); // Commented out due to missing file
     const { loadTaskState } = require('../utils/taskStateUtil.js');
-    // const { v4: uuidv4 } = require('uuid'); // Removed as unused
+    const { v4: uuidv4 } = require('uuid'); // Added for replan cycle ID
+
+    const MAX_TOTAL_REPLAN_ATTEMPTS = 5;
+    const MAX_REPLAN_ATTEMPTS_PER_CYCLE = 2;
 
     class OrchestratorAgent {
         constructor(activeAIService, taskQueue, memoryManager, reportGenerator, agentCapabilities, resultsQueue, savedTasksBaseDir) {
@@ -27,6 +30,7 @@
             this.planManager = new PlanManager(activeAIService, this.agentCapabilities);
             this.planExecutor = new PlanExecutor(
                 this.taskQueue, this.resultsQueue, this.aiService,
+                this.memoryManager, // <--- ДОБАВЛЕНО
                 {}, this.savedTasksBaseDir
             );
             // this.configManager = new ConfigManager(); // Commented out due to missing file
@@ -86,6 +90,10 @@
                 responseMessage = existingState.responseMessage || '';
                 currentWebSearchResults = existingState.currentWebSearchResults || null;
                 lastError = existingState.lastError || null;
+                // Replanning history fields
+                taskState.replanHistory = existingState.replanHistory || [];
+                taskState.currentReplanningCycleId = existingState.currentReplanningCycleId || null;
+                taskState.totalReplanAttempts = existingState.totalReplanAttempts || 0;
             } else {
                 taskId = taskIdToLoad ? taskIdToLoad.split('_')[1] : Date.now().toString();
                 const baseTaskDir = this.savedTasksBaseDir || path.join(process.cwd(), 'tasks');
@@ -102,6 +110,10 @@
                 uploadedFilePaths = []; planStages = null; lastExecutionContext = null;
                 needsUserInput = false; pendingQuestionId = null; responseMessage = '';
                 currentWebSearchResults = null; lastError = null;
+                // Replanning history fields
+                taskState.replanHistory = [];
+                taskState.currentReplanningCycleId = null;
+                taskState.totalReplanAttempts = 0;
 
                 if (taskIdToLoad && executionMode !== EXECUTE_FULL_PLAN && executionMode !== PLAN_ONLY) {
                     const loadTaskDir = path.join(baseTaskDir, new Date().toISOString().split('T')[0], `task_${taskIdToLoad.split('_')[1]}`);
@@ -212,7 +224,132 @@
         async _summarizeAndPresentSearchResults(_taskState, _searchQuery) { /* ... no change from Turn 43 ... */ }
         async _handleSynthesizeOnlyMode(_taskState) { /* ... no change ... */ }
         async _handleExecutePlannedTaskMode(_taskState) { /* ... no change ... */ }
-        async _performPlanningPhase(_taskState) { /* ... no change ... */ }
+    async _performPlanningPhase(taskState, isRevision = false) {
+        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_PHASE_STARTED", `Starting planning phase. Is revision: ${isRevision}`));
+
+        const planningModelName = taskState.aiService.baseConfig?.planningModel ||
+                                  taskState.aiService.baseConfig?.defaultModel ||
+                                  (taskState.aiService.getServiceName() === 'GeminiService' ? 'gemini-pro' : 'gpt-3.5-turbo');
+
+        const tokenizerForPlanning = taskState.aiService.getTokenizer(planningModelName);
+        const modelMaxTokens = taskState.aiService.getMaxContextTokens(planningModelName);
+        const maxTokensForMegaContext = Math.floor(modelMaxTokens * 0.8); // Reserve 20% for plan output and overhead
+
+        let memoryContext = {}; // Initialize memoryContext for planManager
+
+        // Assemble megaContext
+        const contextSpecification = {
+            systemPrompt: "You are a meticulous planning AI. Your goal is to create a robust, step-by-step plan to achieve the user's task.",
+            includeTaskDefinition: true,
+            uploadedFilePaths: taskState.uploadedFilePaths.map(p => ({ relativePath: p, type: 'file' })),
+            maxLatestKeyFindings: 5,
+            chatHistory: await this.memoryManager.getChatHistory(taskState.taskDirPath, { limit: taskState.CHAT_HISTORY_LIMIT || 10, sort_order: 'desc' }), // Get recent, descending for relevance
+            maxTokenLimit: maxTokensForMegaContext,
+            originalUserTask: taskState.currentOriginalTask,
+            currentWorkingContext: taskState.currentWorkingContext,
+            // enableMegaContextCache: true, // Default is true in MemoryManager
+            // megaContextCacheTTLSeconds: taskState.DEFAULT_MEGA_CONTEXT_TTL, // Default is null in MemoryManager
+        };
+
+        try {
+            const megaContextResult = await this.memoryManager.assembleMegaContext(
+                taskState.taskDirPath,
+                contextSpecification,
+                tokenizerForPlanning
+            );
+
+            if (megaContextResult && megaContextResult.success) {
+                memoryContext.megaContext = megaContextResult.contextString;
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLED", `MegaContext assembled. Tokens: ${megaContextResult.tokenCount}. From Cache: ${megaContextResult.fromCache}`));
+
+                if (taskState.aiService.getServiceName() === 'GeminiService' &&
+                    megaContextResult.contextString && // Ensure there's content to cache
+                    megaContextResult.tokenCount > (taskState.MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE || 1024)) { // MIN_TOKEN_THRESHOLD_FOR_GEMINI_CACHE from taskState
+
+                    taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_STARTED", `Preparing Gemini cache for planning model: ${planningModelName}. MegaContext tokens: ${megaContextResult.tokenCount}`));
+
+                    // Gemini's prepareContextForModel expects an array of "Content" objects or a simple string.
+                    // assembleMegaContext returns a single string, so we might need to wrap it if the service expects structured content.
+                    // For now, assume it can take the string directly, or that prepareContextForModel handles it.
+                    const preparedGeminiContext = await taskState.aiService.prepareContextForModel(
+                        megaContextResult.contextString,
+                        {
+                            modelName: planningModelName,
+                            cacheConfig: {
+                                ttlSeconds: taskState.DEFAULT_GEMINI_CACHED_CONTENT_TTL, // from taskState
+                                displayName: `plan_ctx_${taskState.taskId}`
+                             }
+                        }
+                    );
+                    if (preparedGeminiContext && preparedGeminiContext.cacheName) {
+                        memoryContext.isMegaContextCachedByGemini = true;
+                        memoryContext.geminiCachedContentName = preparedGeminiContext.cacheName;
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_SUCCESS", `Gemini cache prepared. Name: ${preparedGeminiContext.cacheName}`));
+                    } else {
+                        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("GEMINI_CACHE_PREPARATION_SKIPPED_OR_FAILED", "Gemini cache not created or no name returned."));
+                    }
+                }
+            } else {
+                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_FAILED", `Failed to assemble MegaContext: ${megaContextResult?.error || 'Unknown error'}`));
+            }
+        } catch (megaContextError) {
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("MEGA_CONTEXT_ASSEMBLY_ERROR", `Error during MegaContext assembly: ${megaContextError.message}`));
+            console.error(`OrchestratorAgent._performPlanningPhase: Error assembling megaContext: ${megaContextError.stack}`);
+            // Decide if we should proceed without megaContext or fail planning
+        }
+
+        // Prepare other context pieces for planManager.getPlan
+        let cwcForPlanning = taskState.currentWorkingContext;
+        let executionContextForPlanning = taskState.lastExecutionContext;
+        let remainingPlanForRevision = isRevision ? taskState.planStages : null;
+        const latestKeyFindingsForPlanning = await this.memoryManager.getLatestKeyFindings(taskState.taskDirPath, 5);
+        const latestErrorsForPlanningNonCycle = isRevision && taskState.lastError ? [taskState.lastError] : []; // General last error for context
+
+        let replanErrorHistoryForPrompt = null;
+        if (isRevision && taskState.replanHistory && taskState.currentReplanningCycleId) {
+            replanErrorHistoryForPrompt = taskState.replanHistory
+                .filter(entry => entry.cycleId === taskState.currentReplanningCycleId)
+                .slice(-3)
+                .map(entry => ({
+                    attemptInCycle: entry.attemptInCycle,
+                    failedStepNarrative: entry.failedStepNarrative,
+                    errorMessage: entry.errorMessage.substring(0, 200)
+                }));
+        }
+
+        const planResult = await this.planManager.getPlan(
+            taskState.currentOriginalTask,
+            taskState.workerAgentCapabilities.map(agent => agent.role),
+            taskState.workerAgentCapabilities.reduce((acc, agent) => {
+                acc[agent.role] = agent.tools.map(tool => tool.name);
+                return acc;
+            }, {}),
+            memoryContext, // Contains megaContext and Gemini cache info
+            cwcForPlanning,
+            executionContextForPlanning,
+            isRevision ? taskState.lastError : null,
+            remainingPlanForRevision,
+            isRevision,
+            taskState.totalReplanAttempts,
+            latestKeyFindingsForPlanning,
+            latestErrorsForPlanningNonCycle, // Use the general last error here
+            replanErrorHistoryForPrompt
+        );
+
+        if (!planResult.success) {
+            taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_FAILED", `Planning failed: ${planResult.message}`, { rawResponse: planResult.rawResponse }));
+            if (planResult.message && planResult.message.toLowerCase().includes("clarification needed")) {
+                 taskState.needsUserInput = true;
+                 taskState.responseMessage = planResult.message;
+            }
+            return { success: false, message: planResult.message, rawResponse: planResult.rawResponse };
+        }
+        taskState.planStages = planResult.plan;
+        taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("PLANNING_SUCCESSFUL", `Plan created successfully. Source: ${planResult.source}. Plan has ${planResult.plan.length} stages.`));
+        await this.memoryManager.overwriteMemory(taskState.taskDirPath, 'plan.json', taskState.planStages, { isJson: true });
+        taskState.lastError = null;
+        return { success: true };
+    }
         async _performExecutionPhase(_taskState) { /* ... no change ... */ }
         async _performCwcUpdateLLM(_taskState) { /* ... no change ... */ }
         async _performFinalSynthesis(_taskState) { /* ... no change ... */ }
@@ -314,7 +451,55 @@
                     }
 
                     if (taskState.executionMode === PLAN_ONLY || (taskState.executionMode === EXECUTE_FULL_PLAN && (!taskState.planStages?.length) )) {
-                        const planningOutcome = await this._performPlanningPhase(taskState);
+                        // Check replan limits BEFORE attempting a new planning phase (initial or revision)
+                        if (taskState.lastError) { // Indicates a previous execution attempt failed
+                            taskState.totalReplanAttempts = (taskState.totalReplanAttempts || 0) + 1;
+                            const lastFailedStepId = taskState.lastError.stepId || taskState.lastError.sub_task_id;
+                            const lastErrorMessage = taskState.lastError.error_details?.message || taskState.lastError.message || 'Unknown error';
+                            let currentAttemptInCycle = 1;
+                            const lastCycleEntry = taskState.replanHistory && taskState.replanHistory.length > 0 ?
+                                taskState.replanHistory[taskState.replanHistory.length - 1] : null;
+                            const SIMILARITY_THRESHOLD = 50;
+                            const isSimilarError = lastCycleEntry &&
+                                                   lastCycleEntry.cycleId === taskState.currentReplanningCycleId &&
+                                                   lastCycleEntry.failedStepId === lastFailedStepId &&
+                                                   lastCycleEntry.errorMessage?.substring(0, SIMILARITY_THRESHOLD) === lastErrorMessage.substring(0, SIMILARITY_THRESHOLD);
+
+                            if (taskState.currentReplanningCycleId && isSimilarError) {
+                                currentAttemptInCycle = (lastCycleEntry.attemptInCycle || 0) + 1;
+                            } else {
+                                taskState.currentReplanningCycleId = `cycle_${uuidv4()}`;
+                                currentAttemptInCycle = 1;
+                            }
+
+                            taskState.replanHistory.push({
+                                cycleId: taskState.currentReplanningCycleId,
+                                attemptInCycle: currentAttemptInCycle,
+                                failedStepId: lastFailedStepId,
+                                failedStepNarrative: taskState.lastError.narrative_step || 'N/A',
+                                errorMessage: lastErrorMessage,
+                                timestamp: new Date().toISOString()
+                            });
+
+                            if (currentAttemptInCycle > MAX_REPLAN_ATTEMPTS_PER_CYCLE) {
+                                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLAN_CYCLE_LIMIT_EXCEEDED", `Max attempts (${MAX_REPLAN_ATTEMPTS_PER_CYCLE}) for similar error on step ${lastFailedStepId} exceeded. Task failed.`));
+                                taskState.overallSuccess = false;
+                                taskState.responseMessage = `Задача не может быть выполнена: ошибка на шаге "${taskState.lastError.narrative_step || lastFailedStepId}" повторяется (${lastErrorMessage.substring(0,100)}...).`;
+                                console.log(`[OrchestratorAgent] REPLAN_CYCLE_LIMIT_EXCEEDED for task ${taskState.taskId}`);
+                                taskState.executionMode = 'ABORTED_REPLAN_CYCLE_LIMIT';
+                                throw new Error(`Replanning cycle limit exceeded for step ${lastFailedStepId}.`);
+                            }
+                            if (taskState.totalReplanAttempts > MAX_TOTAL_REPLAN_ATTEMPTS) {
+                                taskState.finalJournalEntries.push(this._createOrchestratorJournalEntry("REPLAN_TOTAL_LIMIT_EXCEEDED", `Total replan attempts (${MAX_TOTAL_REPLAN_ATTEMPTS}) exceeded. Task failed.`));
+                                taskState.overallSuccess = false;
+                                taskState.responseMessage = `Задача не может быть выполнена: превышено общее количество попыток перепланирования.`;
+                                console.log(`[OrchestratorAgent] REPLAN_TOTAL_LIMIT_EXCEEDED for task ${taskState.taskId}`);
+                                taskState.executionMode = 'ABORTED_REPLAN_TOTAL_LIMIT';
+                                throw new Error(`Total replanning attempts limit exceeded.`);
+                            }
+                        }
+                        // Pass isRevision based on whether lastError exists (signifying a prior failed execution)
+                        const planningOutcome = await this._performPlanningPhase(taskState, !!taskState.lastError);
                         if (planningOutcome.needsUserInput) { return; } // This will go to finally
                         if (!planningOutcome.success) {
                             taskState.overallSuccess = false; taskState.responseMessage = planningOutcome.message || "Planning failed.";

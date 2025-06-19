@@ -1,4 +1,6 @@
 // File: services/ai/OpenAIService.js
+const fs = require('fs');
+const path = require('path');
 const BaseAIService = require('../BaseAIService.js'); // Corrected path
 const OpenAI = require('openai'); // Official OpenAI library
 const { get_encoding, encoding_for_model: encodingForModel } = require('tiktoken'); // Specific import for get_encoding
@@ -16,19 +18,46 @@ class OpenAIService extends BaseAIService {
     constructor(apiKey, baseConfig = {}) {
         super(apiKey, baseConfig); // Sets this.apiKey and this.baseConfig
         this.openai = null; // Initialized in _ensureClient
-        this.tokenizerName = this.baseConfig.tokenizerName || 'cl100k_base';
+
+        this.modelSpecs = null;
+        try {
+            const specsPath = path.join(__dirname, '..', '..', 'config', 'ai_model_specs.json'); // Path from services/ai/ to config/
+            if (fs.existsSync(specsPath)) {
+                const specsContent = fs.readFileSync(specsPath, 'utf8');
+                this.modelSpecs = JSON.parse(specsContent);
+            } else {
+                console.warn(`OpenAIService: Model specs file not found at ${specsPath}. Using hardcoded defaults or baseConfig only for context windows.`);
+            }
+        } catch (e) {
+            console.error(`OpenAIService: Error loading or parsing model specs file: ${e.message}.`);
+            this.modelSpecs = null; // Ensure modelSpecs is null in case of error
+        }
+
+        let tokenizerNameToUse = this.baseConfig.tokenizerName || 'cl100k_base'; // Global fallback
+        const defaultModelName = this.baseConfig.defaultModel || 'default';
+
+        if (this.modelSpecs && this.modelSpecs.openai && this.modelSpecs.openai[defaultModelName] && this.modelSpecs.openai[defaultModelName].tokenizer) {
+            tokenizerNameToUse = this.modelSpecs.openai[defaultModelName].tokenizer;
+        } else if (this.modelSpecs && this.modelSpecs.openai && this.modelSpecs.openai.default && this.modelSpecs.openai.default.tokenizer) {
+            tokenizerNameToUse = this.modelSpecs.openai.default.tokenizer;
+        }
+        this.tokenizerName = tokenizerNameToUse;
         this.enc = null;
 
         try {
             // Try to get encoding by model name first if a defaultModel is specified
-            if (this.baseConfig.defaultModel) {
-                 this.enc = encodingForModel(this.baseConfig.defaultModel);
+            // The tokenizerName determined above (from specs or fallback) is the primary one to try.
+            // However, encodingForModel is generally more robust if a model name is available.
+            const modelForTiktoken = this.baseConfig.defaultModel;
+            if (modelForTiktoken) {
+                 this.enc = encodingForModel(modelForTiktoken);
             } else {
-                this.enc = get_encoding(this.tokenizerName);
+                this.enc = get_encoding(this.tokenizerName); // Fallback to tokenizerName if no defaultModel
             }
         } catch (e) {
-            console.warn(`OpenAIService: Failed to load tiktoken encoder '${this.baseConfig.defaultModel || this.tokenizerName}'. Attempting fallback to '${this.tokenizerName}'. Error: ${e.message}`);
+            console.warn(`OpenAIService: Failed to load tiktoken encoder for model '${this.baseConfig.defaultModel || 'N/A'}' or tokenizer '${this.tokenizerName}'. Attempting fallback. Error: ${e.message}`);
             try {
+                // Fallback to the determined tokenizerName if model-specific loading failed or no model was specified
                 this.enc = get_encoding(this.tokenizerName);
             } catch (e2) {
                  console.warn(`OpenAIService: Fallback tiktoken encoder '${this.tokenizerName}' also failed. Tokenizer will not be available. Error: ${e2.message}`);
@@ -139,7 +168,13 @@ class OpenAIService extends BaseAIService {
             if (stopSequences !== undefined) requestPayload.stop = stopSequences;
             // Add other OpenAI specific parameters from params if needed
 
-            const completion = await this.openai.chat.completions.create(requestPayload);
+            const requestFn = () => this.openai.chat.completions.create(requestPayload);
+            const completion = await this._executeRequestWithRetry(
+                requestFn,
+                this.baseConfig.maxRetries || 3,
+                this.baseConfig.initialRetryDelayMs || 1000,
+                this.getServiceName()
+            );
 
             if (completion.choices && completion.choices.length > 0) {
                 const choice = completion.choices[0];
@@ -147,77 +182,79 @@ class OpenAIService extends BaseAIService {
                     return choice.message.content.trim();
                 }
             }
-            console.warn("OpenAIService API response warning: No content found or unexpected format.", completion);
-            throw new Error("OpenAI API response error: No message content found.");
+            console.warn("OpenAIService API response warning: No content found or unexpected format (after retries).", completion);
+            throw new Error("OpenAI API response error: No message content found (after retries).");
         } catch (error) {
-            const errorDetail = error.response?.data?.error?.message || error.error?.message || error.message;
-            console.error(`OpenAIService: Error during chat completion for model ${model}:`, errorDetail, error.stack);
-            throw new Error(`OpenAI API Error: ${errorDetail}`);
+            // error.message should already be enriched by _executeRequestWithRetry
+            const errorDetail = error.finalStatusCode ? `Status ${error.finalStatusCode}: ${error.message}` : (error.response?.data?.error?.message || error.error?.message || error.message);
+            console.error(`OpenAIService: Error during chat completion for model ${model} (after retries):`, errorDetail, error.stack);
+            // If _executeRequestWithRetry threw, error.message is already "Failed AIService API call after X attempts: original_message"
+            // So, we might not need to prepend "OpenAI API Error (after retries):" if error.message is already descriptive.
+            // However, to be explicit about the source:
+            throw new Error(`OpenAI API Error (after retries): ${error.message}`);
         }
     }
 
     /**
      * @override
      */
-    getTokenizer() {
+    getTokenizer(modelName = null) {
+        const targetModelName = modelName || this.baseConfig.defaultModel;
+        let specificEncoder;
+
+        if (targetModelName) {
+            try {
+                specificEncoder = encodingForModel(targetModelName);
+                if (specificEncoder) {
+                    return (text) => text ? specificEncoder.encode(text).length : 0;
+                }
+            } catch (e) {
+                console.warn(`OpenAIService.getTokenizer: Failed to load tiktoken encoder for specific model '${targetModelName}'. Falling back. Error: ${e.message}`);
+            }
+        }
+
+        // Fallback to the initialized encoder (this.enc) or default logic
         if (this.enc) {
             return (text) => text ? this.enc.encode(text).length : 0;
         }
+
+        // Absolute fallback if this.enc also failed (should be rare after constructor improvements)
         console.warn("OpenAIService.getTokenizer: tiktoken encoder not available. Falling back to basic word count.");
-        return (text) => text ? text.split(/\\s+/).length : 0; // Basic fallback
+        return (text) => text ? text.split(/\s+/).filter(Boolean).length : 0;
     }
 
     /**
      * @override
      */
-    getMaxContextTokens() {
-        // Security: Use the already validated model name from constructor or default for context window lookup.
-        // Assuming this.baseConfig.defaultModel is from a trusted source (config).
-        const currentModelForContext = this.baseConfig.defaultModel || 'gpt-3.5-turbo';
-        // Source: https://platform.openai.com/docs/models (Context window column)
-        // Values as of late 2023 / early 2024. Always verify with OpenAI documentation.
-        const modelContextWindows = {
-            // GPT-4 Turbo models
-            'gpt-4-turbo': 128000,
-            'gpt-4-turbo-2024-04-09': 128000,
-            'gpt-4-turbo-preview': 128000,
-            'gpt-4-0125-preview': 128000,
-            'gpt-4-1106-preview': 128000,
-            'gpt-4-vision-preview': 128000,
+    getMaxContextTokens(modelName = null) {
+        const modelNameToUse = modelName || this.baseConfig.defaultModel || 'default';
+        let contextWindow = 4096; // Absolute fallback
 
-            // GPT-4 base models
-            'gpt-4': 8192,
-            'gpt-4-0613': 8192,
-            'gpt-4-32k': 32768,
-            'gpt-4-32k-0613': 32768,
+        if (this.modelSpecs && this.modelSpecs.openai) {
+            const serviceSpecs = this.modelSpecs.openai;
+            if (serviceSpecs[modelNameToUse] && serviceSpecs[modelNameToUse].contextWindow) {
+                contextWindow = serviceSpecs[modelNameToUse].contextWindow;
+            } else {
+                // Attempt to find a base model if exact match not found (e.g., "gpt-4" from "gpt-4-turbo-preview")
+                const baseModelMatch = modelNameToUse.match(/^(gpt-4o|gpt-4-turbo|gpt-4|gpt-3\.5-turbo)/);
+                let foundBaseSpec = false;
+                if (baseModelMatch && baseModelMatch[0] && serviceSpecs[baseModelMatch[0]] && serviceSpecs[baseModelMatch[0]].contextWindow) {
+                    contextWindow = serviceSpecs[baseModelMatch[0]].contextWindow;
+                    console.warn(`OpenAIService.getMaxContextTokens: No exact spec for '${modelNameToUse}', using base model '${baseModelMatch[0]}' context window: ${contextWindow}`);
+                    foundBaseSpec = true;
+                }
 
-            // GPT-3.5 Turbo models
-            'gpt-3.5-turbo-0125': 16385,
-            'gpt-3.5-turbo': 16385,          // Often updated, currently (early 2024) 16K.
-            'gpt-3.5-turbo-1106': 16385,     // 16K context window.
-            'gpt-3.5-turbo-instruct': 4096, // Instruct model.
-            // Older gpt-3.5-turbo versions might have 4096, but aliases usually point to newer ones.
-            'gpt-3.5-turbo-0613': 4096,
-            'gpt-3.5-turbo-16k': 16385, // Explicitly 16k.
-            'gpt-3.5-turbo-16k-0613': 16385,
-
-
-            'default': 4096 // Default fallback
-        };
-
-        // eslint-disable-next-line security/detect-object-injection -- currentModelForContext is derived from baseConfig (assumed safe) or validated against allowedModels.
-        let contextSize = modelContextWindows[currentModelForContext];
-        if (!contextSize) {
-            // Try to find a base model if versioned e.g. gpt-4-0125-preview -> gpt-4
-            const baseModel = currentModelForContext.split('-').slice(0, 2).join('-');
-            // eslint-disable-next-line security/detect-object-injection -- baseModel is derived from currentModelForContext (which is validated/safe) and used to access a known map.
-            contextSize = modelContextWindows[baseModel];
-            if (!contextSize && currentModelForContext.startsWith('gpt-4')) contextSize = modelContextWindows['gpt-4'];
-            else if (!contextSize && currentModelForContext.startsWith('gpt-3.5-turbo')) contextSize = modelContextWindows['gpt-3.5-turbo'];
-            else contextSize = modelContextWindows['default'];
-            // console.warn(`OpenAIService.getMaxContextTokens: Model '${currentModelForContext}' not found in known list. Using inferred ${contextSize} tokens.`);
+                if (!foundBaseSpec && serviceSpecs.default && serviceSpecs.default.contextWindow) {
+                    contextWindow = serviceSpecs.default.contextWindow;
+                    console.warn(`OpenAIService.getMaxContextTokens: Model '${modelNameToUse}' not found in specs or known base models. Using default OpenAI spec context window: ${contextWindow}`);
+                } else if (!foundBaseSpec) {
+                    console.warn(`OpenAIService.getMaxContextTokens: Model '${modelNameToUse}' not found and no default OpenAI spec context window. Using hardcoded fallback: ${contextWindow}`);
+                }
+            }
+        } else {
+            console.warn(`OpenAIService.getMaxContextTokens: Model specs not loaded. Using hardcoded fallback: ${contextWindow}`);
         }
-        return contextSize;
+        return contextWindow;
     }
 
     /**
