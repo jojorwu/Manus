@@ -147,7 +147,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput
-    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
+    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step ExploreSearchResults: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -250,7 +250,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput, method renamed
-    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
+    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step LLMStepExecutor: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -411,10 +411,10 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                     ));
                     if (subTaskDefinition.tool_name === "ExploreSearchResults") {
                         // Pass resolvedSubTaskInput and subTaskDefinition
-                        stageSubTaskPromises.push(this._handleExploreSearchResults(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId));
+                        stageSubTaskPromises.push(this._handleExploreSearchResults(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext));
                     } else if (subTaskDefinition.tool_name === "LLMStepExecutor") { // Changed from GeminiStepExecutor
                         // Pass resolvedSubTaskInput and subTaskDefinition
-                        stageSubTaskPromises.push(this._handleLLMStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId)); // Renamed method
+                        stageSubTaskPromises.push(this._handleLLMStepExecutor(sub_task_id_for_orchestrator_step, subTaskDefinition, resolvedSubTaskInput, executionContext)); // Renamed method
                     } else if (subTaskDefinition.tool_name === "FileSystemTool" || subTaskDefinition.tool_name === "FileDownloaderTool") {
                         const toolPromise = (async () => {
                             let tool;
@@ -553,7 +553,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
                 if (resultOfSubTask.status === "COMPLETED" && resultOfSubTask.result_data &&
                     (resultOfSubTask.assigned_agent_role !== "Orchestrator" ||
-                     (resultOfSubTask.assigned_agent_role === "Orchestrator" && subTaskDefinition.tool_name === "ExploreSearchResults"))) { // eslint-disable-line no-undef
+                     (resultOfSubTask.assigned_agent_role === "Orchestrator" && originalSubTaskDef.tool_name === "ExploreSearchResults"))) {
                     journalEntries.push(this._createJournalEntry("EXECUTION_DATA_SUMMARIZATION_START", `Summarizing data for step: ${resultOfSubTask.narrative_step} (StepID: ${stepIdForResult})`, summarizationLogDetails));
                     const originalDataForPreview = resultOfSubTask.result_data;
                     try {
@@ -708,8 +708,8 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
 
             if (stageFailed) {
                 const reason = firstFailedStepErrorDetails ?
-                               `Step ${firstFailedStepErrorDetails.sub_task_id || originalSubTaskDef.sub_task_id} ("${firstFailedStepErrorDetails.narrative_step || originalSubTaskDef.narrative_step}") failed: ${firstFailedStepErrorDetails.message || 'Unknown error'}` : // eslint-disable-line no-undef
-                               "A step in the stage failed."; // eslint-disable-line no-undef
+                               `Step ${failedStepDetails.stepId || failedStepDetails.sub_task_id} ("${failedStepDetails.narrative_step}") failed: ${failedStepDetails.error_details.message || 'Unknown error'}` :
+                               "A step in the stage failed.";
                 journalEntries.push(this._createJournalEntry("EXECUTION_STAGE_FAILED", `Stage ${stageIndex} failed. Reason: ${reason}. Halting plan execution.`, { parentTaskId, stageIndex, reason: firstFailedStepErrorDetails }));
                 break;
             } else {

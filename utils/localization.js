@@ -1,32 +1,24 @@
 // utils/localization.js
 const fs = require('fs').promises;
 const path = require('path');
+const osLocale = require('os-locale');
 
 let translations = {};
 let currentLocale = 'en'; // Default locale
-
-// Store os-locale functions if dynamically imported
-let osLocaleSyncFunction = null;
 
 async function initializeLocalization() {
     console.log("Localization: Initializing with os-locale..."); // Non-localized initial log
 
     try {
-        // Dynamically import os-locale
-        // os-locale uses a default export for its CommonJS version when imported like this.
-        const osLocaleModule = await import('os-locale'); // eslint-disable-line node/no-unsupported-features/es-syntax, node/no-missing-import
-        osLocaleSyncFunction = osLocaleModule.osLocaleSync || (osLocaleModule.default ? osLocaleModule.default.osLocaleSync : null);
-
-        if (osLocaleSyncFunction) {
-            currentLocale = osLocaleSyncFunction() || 'en';
-        } else {
-            // Fallback if osLocaleSync is not found on the imported module
-            console.warn("Localization: osLocaleSync not found on dynamically imported module. Falling back to LANG or default 'en'.");
+        // Use the imported os-locale
+        currentLocale = await osLocale(); // os-locale@4 returns a Promise
+        if (!currentLocale) { // Handle cases where osLocale might return null/undefined
+            console.warn("Localization: os-locale did not return a locale. Falling back to LANG or default 'en'.");
             currentLocale = process.env.LANG ? process.env.LANG.split('.')[0] : 'en';
         }
     } catch (error) {
-        // Log a non-localized warning if dynamic import fails
-        console.warn(`Localization: Could not dynamically import os-locale. Falling back to LANG or default "en". Error: ${error.message}`);
+        // Log a non-localized warning if os-locale fails
+        console.warn(`Localization: Could not get system locale with os-locale. Falling back to LANG or default "en". Error: ${error.message}`);
         currentLocale = process.env.LANG ? process.env.LANG.split('.')[0] : 'en';
     }
 

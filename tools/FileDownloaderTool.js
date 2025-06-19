@@ -54,7 +54,8 @@ class FileDownloaderTool {
     _sanitizeFilename(filename) {
         if (typeof filename !== 'string') return 'downloaded_file';
         // Remove or replace invalid characters: / \ ? < > : * | " and control characters, limit length
-        let sanitized = filename.replace(/[\0-\x1f\x7f-\x9f]/g, ''); // eslint-disable-line no-control-regex
+        const controlCharsRegex = /[\x00-\x1f\x7f-\x9f]/g; // Used to strip control characters from filenames derived from content-disposition headers. These ranges cover common problematic characters. eslint-disable-line no-control-regex
+        let sanitized = filename.replace(controlCharsRegex, '');
         sanitized = sanitized.replace(/[/?<>:*|" ":\s]/g, '_'); // Common invalid chars and whitespace (removed unnecessary escape for :)
         sanitized = sanitized.substring(0, 200); // Limit length to prevent overly long filenames
         if (sanitized.trim() === "") return 'downloaded_file';

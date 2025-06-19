@@ -29,15 +29,16 @@
     "cheerio": "^1.0.0-rc.12",
     "dotenv": "^16.0.0",
     "express": "^5.1.0",
-    "fs-extra": "*",
+    "fs-extra": "^11.2.0",
     "jsdom": "^24.1.0",
     "mathjs": "^14.5.2",
     "multer": "^2.0.1",
-    "openai": "*",
+    "openai": "^4.52.7",
+    "os-locale": "4.0.0",
     "pdfkit": "^0.15.0",
     "tiktoken": "^1.0.21",
     "uuid": "^11.1.0",
-    "ws": "*"
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "eslint": "^8.57.1",
