@@ -1,6 +1,6 @@
 // core/websocketHandler.js
 const { WebSocketServer, WebSocket } = require('ws');
-const url = require('url');
+// const url = require('url'); // Removed as unused
 
 const CHAT_WEBSOCKET_PATH = '/api/chat_ws';
 const activeTaskSockets = new Map(); // Key: taskId (string), Value: Set<WebSocket>

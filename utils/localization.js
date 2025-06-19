@@ -86,7 +86,7 @@ function t(key, args) {
                 // However, typically argKey is a known, safe placeholder name from the code.
                 // If argKey could come from untrusted input, it would need sanitization.
                 const sanitizedArgKey = escapeRegExp(argKey); // Use the new escape function
-                const placeholder = new RegExp(`{${sanitizedArgKey}}`, 'g');
+                const placeholder = new RegExp(`{${sanitizedArgKey}}`, 'g'); // eslint-disable-line security/detect-non-literal-regexp
                 message = message.replace(placeholder, String(args[argKey]));
             }
         }

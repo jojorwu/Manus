@@ -380,7 +380,7 @@ class GeminiService extends BaseAIService {
         }
 
         const { modelName, systemInstruction, cacheConfig = {} } = options;
-        const { ttlSeconds, displayName, forceRecreate } = cacheConfig; // taskId not directly used for API, but for managing multiple caches if needed by caller
+        const { ttlSeconds, displayName /*, forceRecreate*/ } = cacheConfig; // taskId not directly used for API, but for managing multiple caches if needed by caller // forceRecreate removed
 
         if (!modelName) {
             throw new Error("GeminiService.prepareContextForModel: 'modelName' is required in options.");

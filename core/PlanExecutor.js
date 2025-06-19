@@ -51,7 +51,8 @@ class PlanExecutor {
 
                 // Fallback logic for processed_result_data
                 if (requestedFieldName === 'processed_result_data' && (resolvedValue === undefined || resolvedValue === null)) {
-                    if (stepOutputs[sourceStepId].hasOwnProperty('result_data')) { // Check if result_data actually exists
+                    // Security: Use Object.prototype.hasOwnProperty.call to avoid prototype pollution.
+                    if (Object.prototype.hasOwnProperty.call(stepOutputs[sourceStepId], 'result_data')) { // Check if result_data actually exists
                         console.warn(`PlanExecutor._resolveOutputReferences: Field 'processed_result_data' for step '${sourceStepId}' is null or undefined. Falling back to 'result_data' (referenced by step ${currentStepIdForLog}).`);
                         actualFieldName = 'result_data';
                         resolvedValue = stepOutputs[sourceStepId][actualFieldName];
@@ -64,7 +65,8 @@ class PlanExecutor {
                 }
 
                 // Check if the (potentially fallback) fieldName actually exists in the output
-                if (!stepOutputs[sourceStepId].hasOwnProperty(actualFieldName)) {
+                // Security: Use Object.prototype.hasOwnProperty.call to avoid prototype pollution.
+                if (!Object.prototype.hasOwnProperty.call(stepOutputs[sourceStepId], actualFieldName)) {
                      throw new Error(`Unresolved reference: Field '${actualFieldName}' not found in output of step '${sourceStepId}' (referenced by step ${currentStepIdForLog}).`);
                 }
 
@@ -139,7 +141,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput
-    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId) {
+    async _handleExploreSearchResults(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step ExploreSearchResults: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -240,7 +242,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
     }
 
     // Signature updated to accept resolvedSubTaskInput, method renamed
-    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, parentTaskId) {
+    async _handleLLMStepExecutor(sub_task_id, subTaskDefinition, resolvedSubTaskInput, executionContext, _parentTaskId) { // eslint-disable-line no-unused-vars
         console.log(`PlanExecutor: Handling special step LLMStepExecutor: "${subTaskDefinition.narrative_step}" (SubTaskID: ${sub_task_id}, StepID: ${subTaskDefinition.stepId})`);
 
         const originalSubTaskInput = subTaskDefinition.sub_task_input;
@@ -257,7 +259,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 // Security: Ensure only own properties of promptParams are accessed.
                 if (Object.prototype.hasOwnProperty.call(promptParams, key)) {
                     const sanitizedKey = escapeRegExp(key); // Sanitize key for RegExp
-                    const placeholder = new RegExp(`{{\\s*${sanitizedKey}\\s*}}`, 'g');
+                    const placeholder = new RegExp(`{{\\s*${sanitizedKey}\\s*}}`, 'g'); // eslint-disable-line security/detect-non-literal-regexp
                     let valueToInject = promptParams[key];
                     if (valueToInject === "{previous_step_output}") {
                         if (executionContext.length > 0) {
@@ -276,7 +278,7 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                 if (executionContext.length > 0) {
                     const lastStepOutput = executionContext[executionContext.length - 1].processed_result_data || executionContext[executionContext.length - 1].raw_result_data || "";
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), typeof lastStepOutput === 'string' ? lastStepOutput : JSON.stringify(lastStepOutput));
-                } else {
+                } else { // This else is for the inner if (executionContext.length > 0)
                     promptInput = promptInput.replace(new RegExp("{{\\s*previous_step_output\\s*}}", 'g'), "No data from previous steps.");
                 }
             }

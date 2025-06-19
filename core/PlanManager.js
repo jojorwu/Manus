@@ -82,7 +82,7 @@ class PlanManager {
                         const value = match[groupIndex] ? match[groupIndex].trim() : "";
                         // Security: Sanitize placeholder for use in RegExp.
                         const sanitizedPlaceholder = escapeRegExp(placeholder);
-                        populatedTemplateString = populatedTemplateString.replace(new RegExp(`{{${sanitizedPlaceholder}}}`, 'g'), value);
+                        populatedTemplateString = populatedTemplateString.replace(new RegExp(`{{${sanitizedPlaceholder}}}`, 'g'), value); // eslint-disable-line security/detect-non-literal-regexp
                     }
                 }
                 try {

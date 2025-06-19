@@ -8,11 +8,11 @@ class BaseAIService {
     }
 
     // Abstract methods that subclasses should implement
-    async completeChat(messages, params = {}) {
+    async completeChat(_messages, _params = {}) {
         throw new Error("Method 'completeChat()' must be implemented by subclasses.");
     }
 
-    async generateText(prompt, params = {}) {
+    async generateText(_prompt, _params = {}) {
         throw new Error("Method 'generateText()' must be implemented by subclasses.");
     }
 

@@ -1,6 +1,6 @@
 // core/MemoryManager.js
 const fsp = require('fs').promises;
-const fs = require('fs');
+// const fs = require('fs'); // Removed as unused
 const path = require('path');
 const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
@@ -213,7 +213,7 @@ class MemoryManager {
         } catch (llmError) { throw new Error(`Failed to summarize '${memoryCategoryFileName}': ${llmError.message}`); }
     }
     async assembleMegaContext(taskDirPath, contextSpecification, tokenizerCompatibleWithLLM) { /* ... no change ... */
-        const { systemPrompt = null, includeTaskDefinition = false, uploadedFilePaths = [], maxLatestKeyFindings = 0, keyFindingsRelevanceQuery = null, includeRawContentForReferencedFindings = true, chatHistory = [], maxTokenLimit, priorityOrder = ['systemPrompt', 'chatHistory', 'uploadedFilePaths', 'taskDefinition', 'keyFindings'], customPreamble = "Use the following information context:\n--- BEGIN CONTEXT ---", customPostamble = "--- END CONTEXT ---", recordSeparator = "\n\n--- Next Record ---\n", findingSeparator = "\n---\n", currentProgressSummary, currentNextObjective, recentErrorsSummary, summarizedKeyFindingsText, overallExecutionSuccess, executionContext, originalUserTask, enableMegaContextCache = true, megaContextCacheTTLSeconds = null } = contextSpecification || {};
+        const { systemPrompt = null, includeTaskDefinition = false, uploadedFilePaths = [], maxLatestKeyFindings = 0, keyFindingsRelevanceQuery = null, /* includeRawContentForReferencedFindings = true, */ chatHistory = [], maxTokenLimit, priorityOrder = ['systemPrompt', 'chatHistory', 'uploadedFilePaths', 'taskDefinition', 'keyFindings'], customPreamble = "Use the following information context:\n--- BEGIN CONTEXT ---", customPostamble = "--- END CONTEXT ---", recordSeparator = "\n\n--- Next Record ---\n", findingSeparator = "\n---\n", /* currentProgressSummary, currentNextObjective, recentErrorsSummary, summarizedKeyFindingsText, overallExecutionSuccess, executionContext, */ originalUserTask, enableMegaContextCache = true, megaContextCacheTTLSeconds = null } = contextSpecification || {};
         if (typeof maxTokenLimit !== 'number' || maxTokenLimit <= 0) return { success: false, error: "maxTokenLimit must be a positive number."};
         if (typeof tokenizerCompatibleWithLLM !== 'function') return { success: false, error: "tokenizerCompatibleWithLLM must be a function."};
         let cacheKey, cacheDir, cacheFilePath;
@@ -256,7 +256,7 @@ class MemoryManager {
         if (enableMegaContextCache && cacheKey && cacheFilePath) { try { await fsp.mkdir(cacheDir, { recursive: true }); await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
         return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
     }
-    async getLatestKeyFindings(taskDirPath, limit = 5, relevanceQuery = null) {
+    async getLatestKeyFindings(_taskDirPath, _limit = 5, _relevanceQuery = null) { // Renamed unused parameters
         console.warn("MemoryManager.getLatestKeyFindings: Placeholder. Returning empty array.");
         return [];
     }

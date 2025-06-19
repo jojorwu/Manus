@@ -9,10 +9,10 @@
     const PLAN_ONLY = 'PLAN_ONLY';
     const SYNTHESIZE_ONLY = 'SYNTHESIZE_ONLY';
     const EXECUTE_PLANNED_TASK = 'EXECUTE_PLANNED_TASK';
-    const MemoryManager = require('../core/MemoryManager.js');
+    // const MemoryManager = require('../core/MemoryManager.js'); // Removed as memoryManager instance is injected
     // const ConfigManager = require('../core/ConfigManager.js'); // Commented out due to missing file
     const { loadTaskState } = require('../utils/taskStateUtil.js');
-    const { v4: uuidv4 } = require('uuid');
+    // const { v4: uuidv4 } = require('uuid'); // Removed as unused
 
     class OrchestratorAgent {
         constructor(activeAIService, taskQueue, memoryManager, reportGenerator, agentCapabilities, resultsQueue, savedTasksBaseDir) {
@@ -207,15 +207,15 @@
             return classificationResult;
         }
 
-        async _notifyAndExecuteSearch(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
-        async _summarizeAndPresentSearchResults(taskState, searchQuery) { /* ... no change from Turn 43 ... */ }
-        async _handleSynthesizeOnlyMode(taskState) { /* ... no change ... */ }
-        async _handleExecutePlannedTaskMode(taskState) { /* ... no change ... */ }
-        async _performPlanningPhase(taskState) { /* ... no change ... */ }
-        async _performExecutionPhase(taskState) { /* ... no change ... */ }
-        async _performCwcUpdateLLM(taskState) { /* ... no change ... */ }
-        async _performFinalSynthesis(taskState) { /* ... no change ... */ }
-        async _finalizeTaskProcessing(taskState) { /* ... no change ... */ }
+        async _notifyAndExecuteSearch(_taskState, _searchQuery) { /* ... no change from Turn 43 ... */ }
+        async _summarizeAndPresentSearchResults(_taskState, _searchQuery) { /* ... no change from Turn 43 ... */ }
+        async _handleSynthesizeOnlyMode(_taskState) { /* ... no change ... */ }
+        async _handleExecutePlannedTaskMode(_taskState) { /* ... no change ... */ }
+        async _performPlanningPhase(_taskState) { /* ... no change ... */ }
+        async _performExecutionPhase(_taskState) { /* ... no change ... */ }
+        async _performCwcUpdateLLM(_taskState) { /* ... no change ... */ }
+        async _performFinalSynthesis(_taskState) { /* ... no change ... */ }
+        async _finalizeTaskProcessing(_taskState) { /* ... no change ... */ }
 
         async handleUserTask(userTaskString, uploadedFiles, parentTaskId = null, taskIdToLoad = null, executionMode = EXECUTE_FULL_PLAN) {
             let taskState;

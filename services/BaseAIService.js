@@ -32,7 +32,7 @@ class BaseAIService {
      * @returns {Promise<string>} The generated text.
      * @throws {Error} If not implemented.
      */
-    async generateText(promptString, params) {
+    async generateText(_promptString, _params) {
         throw new Error("Method 'generateText(promptString, params)' must be implemented.");
     }
 
@@ -43,7 +43,7 @@ class BaseAIService {
      * @returns {Promise<string>} The assistant's reply content.
      * @throws {Error} If not implemented.
      */
-    async completeChat(messagesArray, params) {
+    async completeChat(_messagesArray, _params) {
         throw new Error("Method 'completeChat(messagesArray, params)' must be implemented.");
     }
 
@@ -96,7 +96,7 @@ class BaseAIService {
      *                                   or null if no special handle is generated or caching is not applicable/failed.
      * @throws {Error} If not implemented or if preparation fails.
      */
-    async prepareContextForModel(contextParts, options) {
+    async prepareContextForModel(_contextParts, _options) {
         throw new Error("Method 'prepareContextForModel(contextParts, options)' must be implemented.");
     }
 }

@@ -1,7 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const multer = require('multer');
-const path = require('path'); // path is still needed for savedTasksBaseDir in getTaskDirectoryPath (now in utils)
+// const path = require('path'); // Removed as unused
 const http = require('http');
 // WebSocket related imports are now in websocketHandler.js
 // url module is now used in websocketHandler.js
@@ -9,7 +9,7 @@ const http = require('http');
 
 // Import local modules using CommonJS syntax
 const OrchestratorAgent = require('./agents/OrchestratorAgent.js');
-const { initializeLocalization, t } = require('./utils/localization.js');
+const { initializeLocalization } = require('./utils/localization.js'); // Removed t as unused
 const initializeApiRoutes = require('./routes/apiRoutes.js');
 const initializeWebSocketHandler = require('./core/websocketHandler.js');
 const { getTaskDirectoryPath } = require('./utils/taskPathUtils.js'); // Import from new util module

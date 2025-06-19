@@ -1,9 +1,13 @@
 // File: tools/Context7DocumentationTool.js
 // const { t } = require('../utils/localization'); // For future localization of logs
+// eslint-disable-next-line no-unused-vars -- Used in constructor for instanceof check and type validation
 const Context7Client = require('../services/Context7Client'); // Adjust path if Context7Client is elsewhere
 
 class Context7DocumentationTool {
     constructor(context7ClientInstance) {
+        // Although Context7Client might not be directly used as a variable after this,
+        // it's kept for potential instanceof checks or if direct static calls were ever needed.
+        // The primary use is to ensure context7ClientInstance is of the expected type/interface.
         if (!context7ClientInstance || typeof context7ClientInstance.resolveLibraryId !== 'function' || typeof context7ClientInstance.getLibraryDocs !== 'function') {
             // console.error(t('C7TOOL_ERROR_INVALID_CLIENT')); // Or a more direct error for now
             throw new Error("Context7DocumentationTool: Invalid Context7Client instance provided.");

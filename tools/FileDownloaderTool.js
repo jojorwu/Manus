@@ -3,7 +3,7 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 const path = require('path');
 const axios = require('axios');
-const { Writable } = require('stream'); // Not strictly needed for pipe, but good for reference
+// const { Writable } = require('stream'); // Removed as unused
 
 class FileDownloaderTool {
     constructor(taskWorkspaceDir) {
@@ -97,7 +97,7 @@ class FileDownloaderTool {
             // 1. HEAD request (optional, for headers and size check)
             let headResponse;
             let initialContentLength = null;
-            let contentType = null;
+            // let contentType = null; // Ensured removed as unused
 
             try {
                 headResponse = await axios({ method: 'head', url, timeout: 10000 });
@@ -107,7 +107,7 @@ class FileDownloaderTool {
                         return { result: null, error: `File size (${initialContentLength} bytes) exceeds maximum allowed size of ${MAX_FILE_SIZE_BYTES} bytes.` };
                     }
                 }
-                contentType = headResponse.headers['content-type'];
+                // contentType = headResponse.headers['content-type']; // Value is not used
                 if (!finalFilename) {
                     finalFilename = this._extractFilename(url, headResponse.headers);
                 }
@@ -167,7 +167,7 @@ class FileDownloaderTool {
 
             return new Promise((resolve, reject) => {
                 response.data.pipe(writer);
-                let error = null;
+                // let error = null; // Removed as unused
                 writer.on('finish', () => {
                     if (receivedBytes > MAX_FILE_SIZE_BYTES) { // Final check after stream finishes
                         fsp.unlink(safeFilePath)
@@ -179,13 +179,13 @@ class FileDownloaderTool {
                     }
                 });
                 writer.on('error', err => {
-                    error = err;
+                    // error = err; // Removed assignment to unused variable
                     writer.close(); // Ensure stream is closed
                     fsp.unlink(safeFilePath).catch(e => console.error(`FileDownloaderTool: Failed to clean up partially downloaded file ${safeFilePath} after writer error: ${e.message}`));
                     reject({ result: null, error: `Failed to write file to disk: ${err.message}` });
                 });
                 response.data.on('error', err => { // Handle errors from the response stream itself
-                    error = err;
+                    // error = err; // Removed assignment to unused variable
                     writer.close();
                     fsp.unlink(safeFilePath).catch(e => console.error(`FileDownloaderTool: Failed to clean up partially downloaded file ${safeFilePath} after response error: ${e.message}`));
                     reject({ result: null, error: `Failed to download file, stream error: ${err.message}` });
