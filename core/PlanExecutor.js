@@ -9,10 +9,14 @@ const FileSystemTool = require('../tools/FileSystemTool'); // Added
 const FileDownloaderTool = require('../tools/FileDownloaderTool'); // Added
 
 class PlanExecutor {
-    constructor(subTaskQueue, resultsQueue, aiService, tools = {}, savedTasksBaseDir) { // Changed llmService to aiService
+    constructor(subTaskQueue, resultsQueue, aiService, memoryManager, tools = {}, savedTasksBaseDir) { // Changed llmService to aiService
+        if (!memoryManager || typeof memoryManager.saveKeyFinding !== 'function') {
+            throw new Error("PlanExecutor: memoryManager instance with saveKeyFinding method is required.");
+        }
         this.subTaskQueue = subTaskQueue;
         this.resultsQueue = resultsQueue;
         this.aiService = aiService; // Changed llmService to aiService
+        this.memoryManager = memoryManager;
         this.tools = tools;
         this.savedTasksBaseDir = savedTasksBaseDir; // Store this
         if (!this.savedTasksBaseDir) {
@@ -592,6 +596,15 @@ Please summarize this data concisely, keeping in mind its relevance to the origi
                         data: dataToStore,
                         timestamp: new Date().toISOString()
                     });
+                    if (this.memoryManager) {
+                        try {
+                            // parentTaskId доступен в _executeStage как параметр
+                            await this.memoryManager.saveKeyFinding(parentTaskId, keyFinding);
+                        } catch (saveError) {
+                            console.error(`PlanExecutor._executeStage: Failed to save key finding for task ${parentTaskId}, step ${contextEntry.stepId}. Error: ${saveError.message}`);
+                            // Не прерываем выполнение плана из-за ошибки сохранения находки
+                        }
+                    }
                 }
             } else if (contextEntry.status === "FAILED") {
                 journalEntries.push(this._createJournalEntry("EXECUTION_STEP_FAILED", `Step failed: ${contextEntry.narrative_step}`, { ...logDetails, errorDetails: contextEntry.error_details }));

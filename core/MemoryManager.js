@@ -9,6 +9,7 @@ const MEMORY_BANK_DIR_NAME = 'memory_bank';
 const MEGA_CONTEXT_CACHE_DIR_NAME = 'mega_context_cache';
 const MEGA_CONTEXT_CACHE_VERSION = 'mcc-v1';
 const CHAT_HISTORY_FILENAME = 'chat_messages.json';
+const KEY_FINDINGS_FILENAME = 'key_findings.jsonl';
 
 class MemoryManager {
     /**
@@ -316,10 +317,87 @@ class MemoryManager {
             await fsp.writeFile(cacheFilePath, JSON.stringify({ contextString: finalContextString, tokenCount: finalTokenCount, timestamp: new Date().toISOString() }, null, 2), 'utf8'); } catch (cacheWriteError) { console.warn(`MM.assembleMegaContext: Error writing to cache: ${cacheWriteError.message}`); }}
         return { success: true, contextString: finalContextString, tokenCount: finalTokenCount, fromCache: false };
     }
-    async getLatestKeyFindings(_taskDirPath, _limit = 5, _relevanceQuery = null) { // Renamed unused parameters
-        console.warn("MemoryManager.getLatestKeyFindings: Placeholder. Returning empty array.");
-        return [];
+    async getLatestKeyFindings(taskDirPath, limit = 5, relevanceQuery = null) {
+        if (!taskDirPath) {
+            console.warn("MemoryManager.getLatestKeyFindings: taskDirPath is required.");
+            return [];
+        }
+        try {
+            const filePath = this.getMemoryFilePath(taskDirPath, KEY_FINDINGS_FILENAME);
+            let fileContent;
+            try {
+                fileContent = await fsp.readFile(filePath, 'utf8');
+            } catch (readError) {
+                if (readError.code === 'ENOENT') {
+                    return []; // No findings file yet
+                }
+                throw readError; // Other read errors should be propagated or logged
+            }
+
+            if (!fileContent.trim()) {
+                return [];
+            }
+
+            const lines = fileContent.trim().split('\n');
+            let findings = [];
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    findings.push(JSON.parse(line));
+                } catch (parseError) {
+                    console.warn(`MemoryManager.getLatestKeyFindings: Skipping corrupted line in ${filePath}: ${parseError.message}`);
+                }
+            }
+
+            // Filter by relevanceQuery if provided
+            if (relevanceQuery && typeof relevanceQuery === 'string' && relevanceQuery.trim() !== "") {
+                const query = relevanceQuery.toLowerCase();
+                findings = findings.filter(finding => {
+                    const narrativeMatch = finding.sourceStepNarrative && finding.sourceStepNarrative.toLowerCase().includes(query);
+                    let dataMatch = false;
+                    if (finding.data) {
+                        try {
+                            const dataString = (typeof finding.data === 'string') ? finding.data : JSON.stringify(finding.data);
+                            dataMatch = dataString.toLowerCase().includes(query);
+                        } catch (e) { /* ignore stringify errors for filtering */ }
+                    }
+                    return narrativeMatch || dataMatch;
+                });
+            }
+
+            // Sort by timestamp (descending - newest first)
+            findings.sort((a, b) => {
+                const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                return timeB - timeA;
+            });
+
+            return findings.slice(0, limit);
+
+        } catch (error) {
+            console.error(`MemoryManager.getLatestKeyFindings: Failed to get key findings for task ${taskDirPath}`, error);
+            return []; // Return empty on error to prevent breaking callers
+        }
     }
+
+    async saveKeyFinding(taskDirPath, keyFinding) {
+        if (!taskDirPath || !keyFinding) {
+            console.error("MemoryManager.saveKeyFinding: taskDirPath and keyFinding are required.");
+            return;
+        }
+        try {
+            const filePath = this.getMemoryFilePath(taskDirPath, KEY_FINDINGS_FILENAME);
+            // Ensure directory exists (getMemoryFilePath ensures the base memory_bank,
+            // but if KEY_FINDINGS_FILENAME implies subdirs, this is safer)
+            await fsp.mkdir(path.dirname(filePath), { recursive: true });
+            const findingJsonString = JSON.stringify(keyFinding);
+            await fsp.appendFile(filePath, findingJsonString + '\n', 'utf8');
+        } catch (error) {
+            console.error(`MemoryManager.saveKeyFinding: Failed to save key finding for task ${taskDirPath}`, error);
+            // Do not re-throw, as saving a key finding might be non-critical for plan execution flow
+        }
+    }
+
     async loadGeminiCachedContentMap(taskDirPath) {
         return this.loadMemory(taskDirPath, 'gemini_cached_content_map.json', { isJson: true, defaultValue: {} });
     }

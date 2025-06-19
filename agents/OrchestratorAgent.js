@@ -27,6 +27,7 @@
             this.planManager = new PlanManager(activeAIService, this.agentCapabilities);
             this.planExecutor = new PlanExecutor(
                 this.taskQueue, this.resultsQueue, this.aiService,
+                this.memoryManager, // <--- ДОБАВЛЕНО
                 {}, this.savedTasksBaseDir
             );
             // this.configManager = new ConfigManager(); // Commented out due to missing file
